@@ -1,4 +1,9 @@
-import type { SandboxProvider, SandboxSSHAttach, SandboxConnectOptions } from "./remoteTarget.js";
+import type {
+  SandboxProvider,
+  SandboxSSHAttach,
+  SandboxSSHTransport,
+  SandboxConnectOptions,
+} from "./remoteTarget.js";
 
 /**
  * 沙箱 provisioner 契约（Plan A）。
@@ -43,6 +48,19 @@ export interface SandboxProvisionResult {
 }
 
 /**
+ * 深拷贝传输层。
+ *
+ * transport 是嵌套对象，浅拷贝会让调用方此后的改写（例如刷新隧道端点）穿透到正在使用的
+ * 底层连接上；headers 里装的是 WS 鉴权头，同样不能共享引用。
+ */
+function copySandboxSSHTransport(transport: SandboxSSHTransport): SandboxSSHTransport {
+  if (transport.kind === "tcp") {
+    return { ...transport };
+  }
+  return { ...transport, ...(transport.headers ? { headers: { ...transport.headers } } : {}) };
+}
+
+/**
  * provisioner 返回的 attach 信息 → 内部 target。
  *
  * provider 由请求方持有（响应里不重复），因此必须显式传入——不能让两者漂移。
@@ -55,6 +73,6 @@ export function toSandboxConnectOptions(
     kind: "sandbox",
     provider,
     sandboxId: result.sandboxId,
-    ssh: { ...result.ssh },
+    ssh: { ...result.ssh, transport: copySandboxSSHTransport(result.ssh.transport) },
   };
 }

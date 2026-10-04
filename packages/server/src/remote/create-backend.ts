@@ -33,8 +33,10 @@ export async function createRemoteBackend(target: RemoteTarget): Promise<IRemote
     }
     case "sandbox": {
       const { SandboxBackend } = await import("./sandbox-backend.js");
-      let privateKey: string | Buffer | undefined;
-      if (target.ssh.privateKeyPath) {
+      // provisioner 为每个沙箱生成一次性密钥，只能内联下发——它没法往用户机器上写文件。
+      // 本机自建、私钥已落盘的沙箱才会走 privateKeyPath。
+      let privateKey: string | Buffer | undefined = target.ssh.privateKey;
+      if (!privateKey && target.ssh.privateKeyPath) {
         const keyPath = target.ssh.privateKeyPath.replace(/^~/, homedir());
         privateKey = await readFile(keyPath);
       }

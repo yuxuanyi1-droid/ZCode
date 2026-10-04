@@ -1,6 +1,6 @@
 import type { RemoteAssetInstallMode } from "./remoteAssetInstallMode.js";
 import type { RemoteResourcePackageSelection } from "./remoteResourcePackages.js";
-import type { SandboxProvider } from "./remoteTarget.js";
+import type { SandboxProvider, SandboxSSHTransport } from "./remoteTarget.js";
 import type { ProviderFamilyDomain } from "./model-provider-family.js";
 import type { ProviderFamilyConnectionSelectionSettings } from "./provider-family-connection-selection.js";
 import type { ZCodeProvider } from "./zcode-task-types-core.js";
@@ -161,10 +161,14 @@ export interface SandboxRemoteTargetSnapshot {
   kind: "sandbox";
   provider: SandboxProvider;
   sandboxId: string;
-  /** attach 入口；凭据以 credentialService 键名形式保存，真实 secret 不落 setting.json。 */
+  /**
+   * attach 入口；凭据以 credentialService 键名形式保存，真实 secret 不落 setting.json。
+   *
+   * 这里没有 `privateKey`：provisioner 为每个沙箱生成的一次性私钥只随建连请求内联下发
+   * （见 `SandboxSSHAttach.privateKey`），属于会话级 secret，不落盘。
+   */
   ssh: {
-    host: string;
-    port?: number;
+    transport: SandboxSSHTransport;
     username: string;
     privateKeyPath?: string;
     passwordCredentialKey?: string;

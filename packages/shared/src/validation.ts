@@ -94,11 +94,25 @@ export const dockerConnectOptionsSchema = z.object({
   container: nonEmptyStringSchema,
 });
 
+// 端点信息放在 transport 分支里，schema 层同样不允许「websocket 却带 host」这种组合。
+export const sandboxSshTransportSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("tcp"),
+    host: nonEmptyStringSchema,
+    port: z.number().int().positive().max(65535).optional(),
+  }),
+  z.object({
+    kind: z.literal("websocket"),
+    url: nonEmptyStringSchema,
+    headers: z.record(z.string(), z.string()).optional(),
+  }),
+]);
+
 export const sandboxSshAttachSchema = z.object({
-  host: nonEmptyStringSchema,
-  port: z.number().int().positive().max(65535).optional(),
+  transport: sandboxSshTransportSchema,
   username: nonEmptyStringSchema,
   password: z.string().optional(),
+  privateKey: z.string().optional(),
   privateKeyPath: z.string().optional(),
   privateKeyPassphrase: z.string().optional(),
 });

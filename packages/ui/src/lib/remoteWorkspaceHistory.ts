@@ -241,8 +241,7 @@ function createRemoteTargetSnapshot(
         provider: target.provider,
         sandboxId: target.sandboxId,
         ssh: {
-          host: target.ssh.host,
-          port: target.ssh.port,
+          transport: target.ssh.transport,
           username: target.ssh.username,
           privateKeyPath: target.ssh.privateKeyPath,
           passwordCredentialKey:
@@ -303,8 +302,7 @@ export function createRemoteTargetFromSnapshot(
         provider: snapshot.provider,
         sandboxId: snapshot.sandboxId,
         ssh: {
-          host: snapshot.ssh.host,
-          port: snapshot.ssh.port,
+          transport: snapshot.ssh.transport,
           username: snapshot.ssh.username,
           ...(snapshot.ssh.privateKeyPath ? { privateKeyPath: snapshot.ssh.privateKeyPath } : {}),
           ...(credentials.password ? { password: credentials.password } : {}),

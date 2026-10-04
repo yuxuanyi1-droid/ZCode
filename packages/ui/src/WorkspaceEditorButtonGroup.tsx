@@ -106,7 +106,9 @@ export function WorkspaceEditorButtonGroup({
     const openOptions =
       remoteTarget || workspaceIdentity
         ? {
-            remoteTarget: remoteTarget ? createOpenInEditorRemoteTarget(remoteTarget) : undefined,
+            remoteTarget: remoteTarget
+              ? (createOpenInEditorRemoteTarget(remoteTarget) ?? undefined)
+              : undefined,
             workspaceIdentity,
           }
         : undefined;

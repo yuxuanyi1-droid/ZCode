@@ -42,6 +42,7 @@ export type {
   SandboxConnectOptions,
   SandboxProvider,
   SandboxSSHAttach,
+  SandboxSSHTransport,
   SSHConnectOptions,
   WSLConnectOptions,
 } from "./remoteTarget.js";

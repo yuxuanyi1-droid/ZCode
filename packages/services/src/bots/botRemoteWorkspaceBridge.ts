@@ -125,6 +125,40 @@ export function createBotRemoteWorkspaceService(params: {
     if (!entry || entry.kind !== "remote") {
       return null;
     }
+    if (entry.target.kind === "sandbox") {
+      // 快照只存 credentialService 键名，bot 侧要真正建连就得像 ssh 一样把 secret 读回来。
+      // 一次性私钥不落盘（见 SandboxRemoteTargetSnapshot.ssh），所以这里只还原密码类凭据。
+      return {
+        kind: "sandbox",
+        provider: entry.target.provider,
+        sandboxId: entry.target.sandboxId,
+        ssh: {
+          transport: entry.target.ssh.transport,
+          username: entry.target.ssh.username,
+          ...(entry.target.ssh.privateKeyPath
+            ? { privateKeyPath: entry.target.ssh.privateKeyPath }
+            : {}),
+          ...(entry.target.ssh.passwordCredentialKey
+            ? {
+                password:
+                  (await params.credentialService.load(entry.target.ssh.passwordCredentialKey)) ??
+                  undefined,
+              }
+            : {}),
+          ...(entry.target.ssh.privateKeyPassphraseCredentialKey
+            ? {
+                privateKeyPassphrase:
+                  (await params.credentialService.load(
+                    entry.target.ssh.privateKeyPassphraseCredentialKey,
+                  )) ?? undefined,
+              }
+            : {}),
+        },
+        ...(entry.target.assetInstallMode
+          ? { assetInstallMode: entry.target.assetInstallMode }
+          : {}),
+      };
+    }
     if (entry.target.kind !== "ssh") {
       return entry.target;
     }

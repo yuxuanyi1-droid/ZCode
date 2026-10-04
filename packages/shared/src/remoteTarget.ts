@@ -30,14 +30,34 @@ export const SANDBOX_PROVIDERS = ["modal", "e2b", "daytona"] as const;
 export type SandboxProvider = (typeof SANDBOX_PROVIDERS)[number];
 
 /**
+ * sandbox attach 的传输层。
+ *
+ * 显式建模是因为三家 provider 的能力并不相同：
+ * - Modal：沙箱内跑 sshd，用 unencrypted 端口隧道拿到裸 TCP 端点
+ * - Daytona：官方 SSH 网关，token 当用户名，也是裸 TCP
+ * - E2B：端口只以 HTTPS/WSS 暴露，**没有裸 TCP**，只能走 WebSocket 隧道
+ *
+ * 端点放在 transport 里而不是与它平级，避免表达出「websocket 传输却带着一个 host」
+ * 这种没有意义的组合。
+ */
+export type SandboxSSHTransport =
+  | { kind: "tcp"; host: string; port?: number }
+  | { kind: "websocket"; url: string; headers?: Record<string, string> };
+
+/**
  * 沙箱 attach 连接信息。由外部 provisioner 建立，ZCode 只读不改。
- * 字段与 SSHConnectOptions 的凭据部分对齐，因为 v1 的 attach 传输层就是 SSH。
+ * 凭据字段与 SSHConnectOptions 对齐，因为 attach 的传输层就是 SSH。
  */
 export interface SandboxSSHAttach {
-  host: string;
-  port?: number;
+  transport: SandboxSSHTransport;
   username: string;
   password?: string;
+  /**
+   * 内联私钥。provisioner 在远端为每个沙箱生成一次性密钥后只能这样下发——
+   * 它没法往用户机器上写一个 privateKeyPath 指向的文件。
+   */
+  privateKey?: string;
+  /** 客户端本地已存在的私钥路径；本机自建的沙箱可以走这条。 */
   privateKeyPath?: string;
   privateKeyPassphrase?: string;
 }
@@ -78,6 +98,7 @@ export function stripRemoteTargetSecrets(target: RemoteTarget): RemoteTarget {
   if (target.kind === "sandbox") {
     const {
       password: _password,
+      privateKey: _privateKey,
       privateKeyPassphrase: _privateKeyPassphrase,
       ...sanitizedSsh
     } = target.ssh;

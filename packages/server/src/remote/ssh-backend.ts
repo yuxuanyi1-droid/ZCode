@@ -3,6 +3,7 @@ import { Client as SSHClient } from "ssh2";
 import type { ConnectConfig } from "ssh2";
 import { createReadStream } from "node:fs";
 import { posix } from "node:path";
+import type { Duplex } from "node:stream";
 import { Emitter } from "@zcode/rpc";
 import { resolveZCodeRuntimeEnv } from "@zcode/shared";
 import type {
@@ -45,6 +46,13 @@ export interface SSHBackendOptions {
   privateKeyPassphrase?: string;
   password?: string;
   agent?: string;
+  /** 预建传输层；只有 sandbox 的 WebSocket 隧道会传它。 */
+  sock?: Duplex;
+  /**
+   * 延迟建立传输层。WebSocket 隧道要异步握手，构造期拿不到。
+   * 与 `sock` 二选一；每次（重）连都会重新调用一次，拿到的是新隧道。
+   */
+  openSock?: () => Promise<Duplex>;
 }
 
 type SSHUploadFailureKind = "sftp-session" | "sftp-write" | "local-read" | "aborted";
@@ -93,6 +101,9 @@ export class SSHBackend implements IRemoteBackend {
   private client: SSHClient;
   private connected = false;
   private readonly config: ConnectConfig;
+  private readonly options: SSHBackendOptions;
+  /** 由 `openSock` 建立、当前正在使用的隧道；无隧道时为 null。 */
+  private sock: Duplex | null = null;
   private homeDirPromise: Promise<string> | null = null;
   private execUploadOnly = false;
   private disposed = false;
@@ -124,6 +135,7 @@ export class SSHBackend implements IRemoteBackend {
   };
 
   constructor(options: SSHBackendOptions) {
+    this.options = options;
     this.client = new SSHClient();
     this.client.on("error", this.onClientError);
     this.client.on("close", this.onClientClose);
@@ -136,6 +148,7 @@ export class SSHBackend implements IRemoteBackend {
       passphrase: options.privateKeyPassphrase,
       password: options.password,
       agent: options.agent,
+      sock: options.sock,
     });
     if (resolveZCodeRuntimeEnv(process.env) === "development") {
       this.config.debug = (message: string) => {
@@ -175,6 +188,22 @@ export class SSHBackend implements IRemoteBackend {
     // 调用 ensureConnected。ssh2 Client 支持 end 后再次 connect，必须在 backend 边界阻止旧凭据复活。
     this.assertNotDisposed();
     if (this.connected) return;
+
+    if (this.options.openSock) {
+      // WebSocket 隧道必须在这里异步建好：构造期是同步的，拿不到握手结果。
+      // 每次重连都重建，避免复用已经死掉的隧道。
+      this.sock?.destroy();
+      this.sock = null;
+      const sock = await this.options.openSock();
+      if (this.disposed) {
+        // 握手期间可能被 dispose；此时不能再把连接标记成可用。
+        sock.destroy();
+        throw new Error("SSH backend 已释放，无法重新建立连接");
+      }
+      this.sock = sock;
+    }
+
+    const config: ConnectConfig = this.sock ? { ...this.config, sock: this.sock } : this.config;
     return new Promise((resolve, reject) => {
       const handleReady = () => {
         this.client.off("error", handleConnectError);
@@ -196,7 +225,7 @@ export class SSHBackend implements IRemoteBackend {
       };
       this.client.once("ready", handleReady);
       this.client.once("error", handleConnectError);
-      this.client.connect(this.config);
+      this.client.connect(config);
     });
   }
 
@@ -607,6 +636,10 @@ export class SSHBackend implements IRemoteBackend {
     this.client.off("close", this.onClientClose);
     this.client.off("end", this.onClientEnd);
     this.client.end();
+    // 隧道由本 backend 独占；client.end() 对自定义 sock 不保证关闭，这里显式回收，
+    // 否则每次 dispose 都会漏一条到沙箱的 WebSocket。
+    this.sock?.destroy();
+    this.sock = null;
     this.connected = false;
     this.disconnectEmitter.dispose();
   }

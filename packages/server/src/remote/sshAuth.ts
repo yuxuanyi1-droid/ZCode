@@ -1,4 +1,5 @@
 import type { ConnectConfig } from "ssh2";
+import type { Duplex } from "node:stream";
 
 export const SSH_READY_TIMEOUT_MS = 60_000;
 export const SSH_KEEPALIVE_INTERVAL_MS = 15_000;
@@ -12,6 +13,11 @@ interface SSHConnectConfigInput {
   passphrase?: string;
   password?: string;
   agent?: string;
+  /**
+   * 预建好的传输层。给了它就不再按 host/port 建 TCP——
+   * sandbox 的 WebSocket 隧道走这条路（E2B 不提供裸 TCP）。
+   */
+  sock?: Duplex;
 }
 
 function isMissingPrivateKeyPassphraseMessage(message: string): boolean {
@@ -31,8 +37,11 @@ export function buildSSHConnectConfig(input: SSHConnectConfigInput): ConnectConf
   const resolvedAgent = input.agent ?? (hasPassword ? undefined : process.env["SSH_AUTH_SOCK"]);
 
   return {
+    // sock 与 host/port 是互斥的传输方式：ssh2 在给了 sock 时会忽略 host/port。
+    // 仍然填上 host/port，是因为 ssh2 的类型要求它们存在，且报错信息里带上更可诊断。
     host: input.host,
     port: input.port ?? 22,
+    ...(input.sock ? { sock: input.sock } : {}),
     username: input.username,
     privateKey: input.privateKey,
     passphrase: input.passphrase,

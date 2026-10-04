@@ -9,7 +9,7 @@ function buildSandboxTarget(overrides?: Partial<SandboxConnectOptions>): Sandbox
     kind: "sandbox",
     provider: "modal",
     sandboxId: "sbx-42",
-    ssh: { host: "127.0.0.1", port: 2222, username: "dev" },
+    ssh: { transport: { kind: "tcp", host: "127.0.0.1", port: 2222 }, username: "dev" },
     ...overrides,
   };
 }
@@ -59,11 +59,48 @@ test("createRemoteBackend reads the attach private key relative to the home dire
     createRemoteBackend(
       buildSandboxTarget({
         ssh: {
-          host: "127.0.0.1",
+          transport: { kind: "tcp", host: "127.0.0.1" },
           username: "dev",
           privateKeyPath: "/definitely/not/a/real/key",
         },
       }),
     ),
   );
+});
+
+test("createRemoteBackend prefers the inline private key over privateKeyPath", async () => {
+  // provisioner 的一次性私钥只能内联下发；此时即使同时带了一个不存在（或本机不适用）的
+  // privateKeyPath，也不能去读盘失败——否则远端沙箱永远连不上。
+  const backend = await createRemoteBackend(
+    buildSandboxTarget({
+      ssh: {
+        transport: { kind: "tcp", host: "127.0.0.1" },
+        username: "dev",
+        privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-real-key\n",
+        privateKeyPath: "/definitely/not/a/real/key",
+      },
+    }),
+  );
+
+  assert.ok(backend instanceof SandboxBackend);
+  backend.dispose();
+});
+
+test("createRemoteBackend builds a WebSocket-transport sandbox without dialing at construction time", async () => {
+  // E2B 只有 WSS 入口。构造阶段不能真的去握手：地址不存在也要能建出后端，
+  // 由第一次 exec/detect 才触发连接（否则连接向导会在无法预检的地址上直接失败）。
+  const backend = await createRemoteBackend(
+    buildSandboxTarget({
+      provider: "e2b",
+      sandboxId: "sbx-ws",
+      ssh: {
+        transport: { kind: "websocket", url: "wss://8081-sbx.e2b.app" },
+        username: "dev",
+      },
+    }),
+  );
+
+  assert.ok(backend instanceof SandboxBackend);
+  assert.equal(backend.provider, "e2b");
+  backend.dispose();
 });

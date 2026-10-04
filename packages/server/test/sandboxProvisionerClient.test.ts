@@ -40,7 +40,7 @@ test("create posts the request to /sandboxes with a bearer token", async () => {
   const { calls, fetchImpl } = createFetchStub(
     Response.json({
       sandboxId: "sbx-42",
-      ssh: { host: "10.0.0.7", port: 2222, username: "dev" },
+      ssh: { transport: { kind: "tcp", host: "10.0.0.7", port: 2222 }, username: "dev" },
       workspacePath: "/workspace/ZCode",
     }),
   );
@@ -71,7 +71,7 @@ test("create omits the authorization header when no token is configured", async 
   const { calls, fetchImpl } = createFetchStub(
     Response.json({
       sandboxId: "sbx-42",
-      ssh: { host: "10.0.0.7", username: "dev" },
+      ssh: { transport: { kind: "tcp", host: "10.0.0.7" }, username: "dev" },
       workspacePath: "/workspace/ZCode",
     }),
   );
@@ -103,7 +103,7 @@ test("create rejects a response that fails the result schema", async () => {
   const { fetchImpl } = createFetchStub(
     Response.json({
       sandboxId: "modal:sbx-42",
-      ssh: { host: "10.0.0.7", username: "dev" },
+      ssh: { transport: { kind: "tcp", host: "10.0.0.7" }, username: "dev" },
       workspacePath: "/workspace/ZCode",
     }),
   );

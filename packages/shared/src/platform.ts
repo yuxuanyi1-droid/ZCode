@@ -276,7 +276,13 @@ export interface PrintPageToPdfResult {
   error?: string;
 }
 
-export function createOpenInEditorRemoteTarget(target: RemoteTarget): OpenInEditorRemoteTarget {
+/**
+ * 返回 `null` 表示该 target 无法映射成编辑器的 Remote-SSH 标识（例如只有 WSS 入口的沙箱）。
+ * 调用方应当把 null 当作「不传 remoteTarget」处理，而不是编一个连不上的 host。
+ */
+export function createOpenInEditorRemoteTarget(
+  target: RemoteTarget,
+): OpenInEditorRemoteTarget | null {
   switch (target.kind) {
     case "ssh":
       // openInEditor 只需要构造 VS Code Remote-SSH URI 的连接标识，
@@ -301,15 +307,21 @@ export function createOpenInEditorRemoteTarget(target: RemoteTarget): OpenInEdit
         kind: "docker",
         container: target.container,
       };
-    case "sandbox":
+    case "sandbox": {
       // 沙箱 v1 的 attach 入口就是 SSH，所以「在编辑器中打开」复用 Remote-SSH 标识；
       // 同样只透出连接标识，凭证留在连接流程内。
+      const { transport } = target.ssh;
+      if (transport.kind !== "tcp") {
+        // WSS-only 沙箱（E2B）没有 Remote-SSH 能直连的 host:port，编辑器打不开。
+        return null;
+      }
       return {
         kind: "ssh",
-        host: target.ssh.host,
-        port: target.ssh.port,
+        host: transport.host,
+        port: transport.port,
         username: target.ssh.username,
       };
+    }
   }
 }
 

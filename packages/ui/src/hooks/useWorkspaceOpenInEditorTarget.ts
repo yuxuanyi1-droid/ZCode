@@ -41,7 +41,10 @@ function resolveWorkspaceOpenInEditorTarget(
   const remoteTarget = matchedTab?.remoteTarget;
   return {
     isRemoteWorkspace: hasRemoteMatch,
-    remoteTarget: remoteTarget ? createOpenInEditorRemoteTarget(remoteTarget) : undefined,
+    // createOpenInEditorRemoteTarget 对没有 TCP 入口的沙箱返回 null，这里统一折成 undefined。
+    remoteTarget: remoteTarget
+      ? (createOpenInEditorRemoteTarget(remoteTarget) ?? undefined)
+      : undefined,
   };
 }
 
