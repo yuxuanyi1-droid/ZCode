@@ -31,6 +31,8 @@ import {
   formatLogPrefix,
   formatZodError,
   remoteTargetSchema,
+  sandboxProvisionRequestSchema,
+  toSandboxConnectOptions,
   SERVER_REMOTE_PROTOCOL_VERSION,
   ZCODE_RPC_HOST_CAPABILITY_HEADER,
   ZCODE_VERSION,
@@ -38,7 +40,12 @@ import {
   type ServerRemoteInfo,
   type ServerRemoteWorkspaceInfo,
 } from "@zcode/shared";
-import { connectRemote, createRemoteBackend, type RemoteConnection } from "./remote/index.js";
+import {
+  connectRemote,
+  createRemoteBackend,
+  createSandboxProvisionerFromEnv,
+  type RemoteConnection,
+} from "./remote/index.js";
 import { createHostCapabilityStore } from "./hostCapability.js";
 
 function wrapWebSocket(ws: WebSocket): ISocket {
@@ -361,6 +368,44 @@ export function createHttpServer(
       remoteConnections.set(id, connection);
 
       return c.json({ id });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: message }, 500);
+    }
+  });
+
+  // 沙箱入口：由 provisioner 建好沙箱，ZCode 只 attach。
+  // 与 /api/connect-remote 的区别只有"target 从哪来"——后面的 backend→connectRemote
+  // 完全复用同一条路径，所以 attach 之后的部署/握手/重连行为与 SSH 目标一致。
+  app.post("/api/connect-sandbox", async (c) => {
+    const rawBody = await c.req.json();
+    const parsedBody = sandboxProvisionRequestSchema.safeParse(rawBody);
+    if (!parsedBody.success) {
+      return c.json({ error: `Invalid request body: ${formatZodError(parsedBody.error)}` }, 400);
+    }
+    const request = parsedBody.data;
+
+    const provisioner = createSandboxProvisionerFromEnv();
+    if (!provisioner) {
+      return c.json(
+        {
+          error: `Sandbox provisioner is not configured (set ZCODE_SANDBOX_PROVISIONER_URL).`,
+        },
+        503,
+      );
+    }
+
+    try {
+      const result = await provisioner.create(request);
+      const backend = await createRemoteBackend(toSandboxConnectOptions(request.provider, result));
+      const connection = await connectRemote(backend);
+      const id = generateId();
+      remoteConnections.set(id, connection);
+
+      // workspacePath 一起回传：checkout 目录由 provisioner 决定，调用方不该自己猜默认值。
+      // 注意这里**不**有任何失败清理——attach 失败也不销毁沙箱，
+      // 回收由 provisioner 按 timeoutSeconds/expiresAt 自己负责。
+      return c.json({ id, sandboxId: result.sandboxId, workspacePath: result.workspacePath });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return c.json({ error: message }, 500);

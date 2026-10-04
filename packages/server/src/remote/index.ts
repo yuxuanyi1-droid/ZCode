@@ -27,6 +27,14 @@ export {
   type DockerContainerInfo,
 } from "./docker-detect.js";
 export { SandboxBackend } from "./sandbox-backend.js";
+export {
+  DEFAULT_SANDBOX_PROVISION_TIMEOUT_MS,
+  SANDBOX_PROVISION_PATH,
+  SandboxProvisionerClient,
+  SandboxProvisionerError,
+  createSandboxProvisionerFromEnv,
+  type SandboxProvisionerOptions,
+} from "./sandbox-provisioner.js";
 export { WSLBackend } from "./wsl-backend.js";
 export {
   isWSLAvailable,

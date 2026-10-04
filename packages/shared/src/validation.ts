@@ -103,12 +103,26 @@ export const sandboxSshAttachSchema = z.object({
   privateKeyPassphrase: z.string().optional(),
 });
 
+// sandboxId 会进入 remote workspace identity 的 authority 段，含 ":" / "/" 会破坏解析，
+// 因此在 schema 层直接挡住，而不是等 identity 构造侧静默产出坏键。
+// provisioner 的响应复用同一 schema，否则外部服务能塞进一个通行无阻的坏 id。
+export const sandboxIdSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9._-]+$/, "sandboxId must not contain ':' or '/'");
+
+// 仓库名是 checkout 目录名，必须是单段；owner 允许含 "/"（GitHub 单段，GitLab 子组嵌套）。
+export const sandboxRepositoryRefSchema = z.object({
+  owner: nonEmptyStringSchema,
+  name: nonEmptyStringSchema.refine(
+    (value) => !value.includes("/"),
+    "repository name must be a single path segment",
+  ),
+});
+
 export const sandboxConnectOptionsSchema = z.object({
   kind: z.literal("sandbox"),
   provider: z.enum(SANDBOX_PROVIDERS),
-  // sandboxId 会进入 remote workspace identity 的 authority 段，含 ":" / "/" 会破坏解析，
-  // 因此在 schema 层直接挡住，而不是等 identity 构造侧静默产出坏键。
-  sandboxId: z.string().regex(/^[A-Za-z0-9._-]+$/, "sandboxId must not contain ':' or '/'"),
+  sandboxId: sandboxIdSchema,
   ssh: sandboxSshAttachSchema,
   assetInstallMode: z.enum(REMOTE_ASSET_INSTALL_MODES).optional(),
   resourcePackages: z
@@ -124,6 +138,22 @@ export const remoteTargetSchema = z.discriminatedUnion("kind", [
   dockerConnectOptionsSchema,
   sandboxConnectOptionsSchema,
 ]);
+
+export const sandboxProvisionRequestSchema = z.object({
+  provider: z.enum(SANDBOX_PROVIDERS),
+  repository: sandboxRepositoryRefSchema,
+  branch: nonEmptyStringSchema,
+  ref: nonEmptyStringSchema.optional(),
+  workspacePath: nonEmptyStringSchema.optional(),
+  timeoutSeconds: z.number().int().positive().optional(),
+});
+
+export const sandboxProvisionResultSchema = z.object({
+  sandboxId: sandboxIdSchema,
+  ssh: sandboxSshAttachSchema,
+  workspacePath: nonEmptyStringSchema,
+  expiresAt: z.number().int().nonnegative().optional(),
+});
 
 export const helloMessageSchema = z.object({
   type: z.literal("zcode-hello"),

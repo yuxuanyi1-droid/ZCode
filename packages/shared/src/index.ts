@@ -46,6 +46,12 @@ export type {
   WSLConnectOptions,
 } from "./remoteTarget.js";
 export { SANDBOX_PROVIDERS, stripRemoteTargetSecrets } from "./remoteTarget.js";
+export type {
+  SandboxProvisionRequest,
+  SandboxProvisionResult,
+  SandboxRepositoryRef,
+} from "./sandboxProvisioner.js";
+export { toSandboxConnectOptions } from "./sandboxProvisioner.js";
 export { buildSshRemoteHostKey } from "./remoteSshHostKey.js";
 export { buildRemoteEnvironmentKey } from "./remoteEnvironmentKey.js";
 export type {
