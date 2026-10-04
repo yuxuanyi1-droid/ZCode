@@ -27,6 +27,7 @@ import {
 import { DirectoryBrowser } from "@/DirectoryBrowser.js";
 import { RemoteConnectionFields } from "@/RemoteConnectionFields.js";
 import type { SSHAuthMethod } from "@/hooks/useRemoteConnectionForm.js";
+import type { WizardRemoteKind } from "@/lib/remoteConnectionWizard.js";
 import { Button } from "@/components/ui/button.js";
 import { cn } from "@/components/lib/utils.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
@@ -37,7 +38,7 @@ import {
 } from "@/settings/RemoteSyncActions.js";
 export { RemoteConnectionConnectingStep } from "@/remote-connection/RemoteConnectionConnectingStep.js";
 
-function getKindIcon(kind: RemoteTarget["kind"]) {
+function getKindIcon(kind: WizardRemoteKind) {
   switch (kind) {
     case "ssh":
       return ServerIcon;
@@ -55,9 +56,9 @@ export function RemoteConnectionKindStep({
   onCancel,
   onNext,
 }: {
-  kind: RemoteTarget["kind"];
-  availableKinds: RemoteTarget["kind"][];
-  onKindChange: (value: RemoteTarget["kind"]) => void;
+  kind: WizardRemoteKind;
+  availableKinds: WizardRemoteKind[];
+  onKindChange: (value: WizardRemoteKind) => void;
   onCancel: () => void;
   onNext: () => void;
 }) {

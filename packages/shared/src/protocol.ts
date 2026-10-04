@@ -1,5 +1,6 @@
 import type { RemoteAssetInstallMode } from "./remoteAssetInstallMode.js";
 import type { RemoteResourcePackageSelection } from "./remoteResourcePackages.js";
+import type { SandboxProvider } from "./remoteTarget.js";
 import type { ProviderFamilyDomain } from "./model-provider-family.js";
 import type { ProviderFamilyConnectionSelectionSettings } from "./provider-family-connection-selection.js";
 import type { ZCodeProvider } from "./zcode-task-types-core.js";
@@ -156,10 +157,28 @@ export interface DockerRemoteTargetSnapshot {
   container: string;
 }
 
+export interface SandboxRemoteTargetSnapshot {
+  kind: "sandbox";
+  provider: SandboxProvider;
+  sandboxId: string;
+  /** attach 入口；凭据以 credentialService 键名形式保存，真实 secret 不落 setting.json。 */
+  ssh: {
+    host: string;
+    port?: number;
+    username: string;
+    privateKeyPath?: string;
+    passwordCredentialKey?: string;
+    privateKeyPassphraseCredentialKey?: string;
+  };
+  assetInstallMode?: RemoteAssetInstallMode;
+  resourcePackages?: RemoteResourcePackageSelection;
+}
+
 export type RemoteTargetSnapshot =
   | SSHRemoteTargetSnapshot
   | WSLRemoteTargetSnapshot
-  | DockerRemoteTargetSnapshot;
+  | DockerRemoteTargetSnapshot
+  | SandboxRemoteTargetSnapshot;
 
 export interface RemoteWorkspaceSessionSnapshot {
   /** 远程 workspace 的真实绝对路径 */

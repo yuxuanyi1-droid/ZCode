@@ -39,10 +39,13 @@ export type {
 export type {
   DockerConnectOptions,
   RemoteTarget,
+  SandboxConnectOptions,
+  SandboxProvider,
+  SandboxSSHAttach,
   SSHConnectOptions,
   WSLConnectOptions,
 } from "./remoteTarget.js";
-export { stripRemoteTargetSecrets } from "./remoteTarget.js";
+export { SANDBOX_PROVIDERS, stripRemoteTargetSecrets } from "./remoteTarget.js";
 export { buildSshRemoteHostKey } from "./remoteSshHostKey.js";
 export { buildRemoteEnvironmentKey } from "./remoteEnvironmentKey.js";
 export type {

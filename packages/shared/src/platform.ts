@@ -300,6 +300,15 @@ export function createOpenInEditorRemoteTarget(target: RemoteTarget): OpenInEdit
         kind: "docker",
         container: target.container,
       };
+    case "sandbox":
+      // 沙箱 v1 的 attach 入口就是 SSH，所以「在编辑器中打开」复用 Remote-SSH 标识；
+      // 同样只透出连接标识，凭证留在连接流程内。
+      return {
+        kind: "ssh",
+        host: target.ssh.host,
+        port: target.ssh.port,
+        username: target.ssh.username,
+      };
   }
 }
 

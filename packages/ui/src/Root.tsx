@@ -5,8 +5,8 @@ import {
   APP_RUNTIME_PREFERENCES_CHANGED_BROADCAST_CHANNEL,
   DesktopCommandIds,
   appRuntimePreferencesChangedBroadcastPayloadSchema,
-  type RemoteTarget,
 } from "@zcode/shared";
+import type { WizardRemoteKind } from "@/lib/remoteConnectionWizard.js";
 import { TooltipProvider } from "@/components/ui/tooltip.js";
 import { Button } from "@/components/ui/button.js";
 import { PlatformProvider } from "@/hooks/usePlatform.js";
@@ -86,7 +86,7 @@ import {
 
 const DEFAULT_LUCIDE_STROKE_WIDTH = 1.5;
 interface RemoteConnectionOpenPreference {
-  preferredKind?: RemoteTarget["kind"];
+  preferredKind?: WizardRemoteKind;
   preferredWslDistro?: string;
 }
 

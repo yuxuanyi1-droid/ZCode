@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   DockerContainerInfo,
   RemoteAssetInstallMode,
-  RemoteTarget,
   SSHConfigAliasOption,
   WSLDistro,
 } from "@zcode/shared";
@@ -12,8 +11,9 @@ import {
   loadRemoteConnectionDockerOptions,
   resolveDockerContainerSelectionAfterRefresh,
 } from "@/lib/remoteConnectionDockerOptions.js";
+import type { WizardRemoteKind } from "@/lib/remoteConnectionWizard.js";
 
-type RemoteKind = RemoteTarget["kind"];
+type RemoteKind = WizardRemoteKind;
 export type SSHAuthMethod = "password" | "privateKey";
 
 function buildAvailableKinds(options: { isWindowsDesktop: boolean }): RemoteKind[] {

@@ -26,6 +26,7 @@ export {
   parseDockerContainerList,
   type DockerContainerInfo,
 } from "./docker-detect.js";
+export { SandboxBackend } from "./sandbox-backend.js";
 export { WSLBackend } from "./wsl-backend.js";
 export {
   isWSLAvailable,

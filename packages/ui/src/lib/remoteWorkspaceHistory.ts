@@ -5,11 +5,18 @@ import type {
   RemoteTarget,
   RemoteTargetSnapshot,
   RemoteWorkspaceSessionEntry,
+  SandboxProvider,
 } from "@zcode/shared";
 import type { WindowTabState } from "@/store/tabStore.js";
 import { isWorkspaceTab } from "@/store/tabStore.js";
 
 const REMOTE_WORKSPACE_SESSION_LIMIT = 20;
+
+const SANDBOX_PROVIDER_LABELS: Record<SandboxProvider, string> = {
+  modal: "Modal",
+  e2b: "E2B",
+  daytona: "Daytona",
+};
 
 interface RemoteWorkspaceSessionMutation {
   entry: RemoteWorkspaceSessionEntry;
@@ -39,6 +46,13 @@ function collectRemoteWorkspaceCredentialKeys(snapshot: RemoteTargetSnapshot): s
     return [snapshot.passwordCredentialKey, snapshot.privateKeyPassphraseCredentialKey].filter(
       (key): key is string => typeof key === "string" && key.length > 0,
     );
+  }
+
+  if (snapshot.kind === "sandbox") {
+    return [
+      snapshot.ssh.passwordCredentialKey,
+      snapshot.ssh.privateKeyPassphraseCredentialKey,
+    ].filter((key): key is string => typeof key === "string" && key.length > 0);
   }
 
   return [];
@@ -79,6 +93,8 @@ export function formatRemoteWorkspaceTargetSubtitle(
     }
     case "docker":
       return `Docker · ${target.container}`;
+    case "sandbox":
+      return `${SANDBOX_PROVIDER_LABELS[target.provider]} · ${target.sandboxId}`;
   }
 }
 
@@ -92,6 +108,8 @@ export function formatRemoteWorkspaceHeaderHostLabel(
       return formatWslRemoteTargetAuthority(target);
     case "docker":
       return `docker:${target.container}`;
+    case "sandbox":
+      return `${target.provider}:${target.sandboxId}`;
   }
 }
 
@@ -131,6 +149,9 @@ function getRemoteWorkspaceAuthorityKey(target: RemoteTarget | RemoteTargetSnaps
     }
     case "docker":
       return ["docker", target.container].join(":");
+    case "sandbox":
+      // 必须与 shared 的 buildRemoteWorkspaceIdentity 权威段一致：sandbox:<provider>:<sandboxId>。
+      return ["sandbox", target.provider, target.sandboxId].join(":");
   }
 }
 
@@ -214,6 +235,32 @@ function createRemoteTargetSnapshot(
         kind: "docker",
         container: target.container,
       };
+    case "sandbox":
+      return {
+        kind: "sandbox",
+        provider: target.provider,
+        sandboxId: target.sandboxId,
+        ssh: {
+          host: target.ssh.host,
+          port: target.ssh.port,
+          username: target.ssh.username,
+          privateKeyPath: target.ssh.privateKeyPath,
+          passwordCredentialKey:
+            target.ssh.password && target.ssh.password.length > 0
+              ? previousSnapshot?.kind === "sandbox" && previousSnapshot.ssh.passwordCredentialKey
+                ? previousSnapshot.ssh.passwordCredentialKey
+                : buildRemoteWorkspacePasswordCredentialKey(workspaceKey)
+              : undefined,
+          privateKeyPassphraseCredentialKey:
+            target.ssh.privateKeyPassphrase && target.ssh.privateKeyPassphrase.length > 0
+              ? previousSnapshot?.kind === "sandbox" &&
+                previousSnapshot.ssh.privateKeyPassphraseCredentialKey
+                ? previousSnapshot.ssh.privateKeyPassphraseCredentialKey
+                : buildRemoteWorkspacePrivateKeyPassphraseCredentialKey(workspaceKey)
+              : undefined,
+        },
+        assetInstallMode: target.assetInstallMode,
+      };
   }
 }
 
@@ -249,6 +296,23 @@ export function createRemoteTargetFromSnapshot(
       return {
         kind: "docker",
         container: snapshot.container,
+      };
+    case "sandbox":
+      return {
+        kind: "sandbox",
+        provider: snapshot.provider,
+        sandboxId: snapshot.sandboxId,
+        ssh: {
+          host: snapshot.ssh.host,
+          port: snapshot.ssh.port,
+          username: snapshot.ssh.username,
+          ...(snapshot.ssh.privateKeyPath ? { privateKeyPath: snapshot.ssh.privateKeyPath } : {}),
+          ...(credentials.password ? { password: credentials.password } : {}),
+          ...(credentials.privateKeyPassphrase
+            ? { privateKeyPassphrase: credentials.privateKeyPassphrase }
+            : {}),
+        },
+        ...(snapshot.assetInstallMode ? { assetInstallMode: snapshot.assetInstallMode } : {}),
       };
   }
 }
@@ -386,6 +450,30 @@ export function buildRemoteWorkspaceSessionMutation(params: {
     credentialsToSave.push({
       key: nextSnapshot.privateKeyPassphraseCredentialKey,
       value: params.target.privateKeyPassphrase,
+    });
+  }
+
+  if (
+    params.target.kind === "sandbox" &&
+    nextSnapshot.kind === "sandbox" &&
+    params.target.ssh.password &&
+    nextSnapshot.ssh.passwordCredentialKey
+  ) {
+    credentialsToSave.push({
+      key: nextSnapshot.ssh.passwordCredentialKey,
+      value: params.target.ssh.password,
+    });
+  }
+
+  if (
+    params.target.kind === "sandbox" &&
+    nextSnapshot.kind === "sandbox" &&
+    params.target.ssh.privateKeyPassphrase &&
+    nextSnapshot.ssh.privateKeyPassphraseCredentialKey
+  ) {
+    credentialsToSave.push({
+      key: nextSnapshot.ssh.privateKeyPassphraseCredentialKey,
+      value: params.target.ssh.privateKeyPassphrase,
     });
   }
 

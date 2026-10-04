@@ -1556,6 +1556,8 @@ function formatRemoteTargetForLog(target: RemoteTarget): string {
     }
     case "docker":
       return `docker:${target.container}`;
+    case "sandbox":
+      return `sandbox:${target.provider}:${target.sandboxId}`;
   }
 }
 

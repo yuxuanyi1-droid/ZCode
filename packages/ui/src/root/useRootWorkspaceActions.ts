@@ -4,12 +4,12 @@ import {
   DesktopCommandIds,
   type AppSettings,
   type IPlatformService,
-  type RemoteTarget,
   type UserInfo,
   type ZCodeTaskClientMode,
 } from "@zcode/shared";
 import type { IServiceAccessor } from "@zcode/services";
 import type { CreateTaskRequest } from "@/app-shell/types.js";
+import type { WizardRemoteKind } from "@/lib/remoteConnectionWizard.js";
 import { useConfirmDialog } from "@/hooks/useConfirmDialog.js";
 import { reportAppTelemetryEvent } from "@/lib/appTelemetry.js";
 import { resolveLogoutProviderFamilyDomain } from "@/lib/providerFamilyDomainSettings.js";
@@ -32,7 +32,7 @@ import { useWorkbenchGroupStore } from "@/v4/workbenchGroupStore.js";
 import { persistV4ComposerDraft, V4_DRAFT_SCOPE_ROOT } from "@/v4/composer/composerDraftStore.js";
 
 interface OpenRemoteConnectionPreference {
-  preferredKind?: RemoteTarget["kind"];
+  preferredKind?: WizardRemoteKind;
   preferredWslDistro?: string;
 }
 

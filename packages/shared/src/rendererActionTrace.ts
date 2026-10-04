@@ -70,7 +70,7 @@ export const rendererActionTraceAttributesSchema = z
     section_id: boundedIdentifierSchema.optional(),
     value_after: boundedValueSchema.optional(),
     workspace_kind: z.enum(["local", "remote"]).optional(),
-    remote_kind: z.enum(["ssh", "wsl", "docker", "server"]).optional(),
+    remote_kind: z.enum(["ssh", "wsl", "docker", "sandbox", "server"]).optional(),
     admission_result: z
       .enum(["accepted", "rejected", "stale", "duplicate", "noop", "not_applicable"])
       .optional(),

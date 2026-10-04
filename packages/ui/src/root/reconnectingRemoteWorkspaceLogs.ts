@@ -24,6 +24,8 @@ function getRemoteWorkspaceReconnectLogTargetSuffix(
     }
     case "docker":
       return target.container;
+    case "sandbox":
+      return `${target.provider}-${target.sandboxId}`;
   }
 }
 

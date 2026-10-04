@@ -31,5 +31,15 @@ export async function createRemoteBackend(target: RemoteTarget): Promise<IRemote
       const { DockerBackend } = await import("./docker-backend.js");
       return new DockerBackend(target);
     }
+    case "sandbox": {
+      const { SandboxBackend } = await import("./sandbox-backend.js");
+      let privateKey: string | Buffer | undefined;
+      if (target.ssh.privateKeyPath) {
+        const keyPath = target.ssh.privateKeyPath.replace(/^~/, homedir());
+        privateKey = await readFile(keyPath);
+      }
+
+      return new SandboxBackend(target, privateKey);
+    }
   }
 }

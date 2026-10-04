@@ -122,6 +122,10 @@ function buildConnectionKey(target: RemoteTarget, remoteSessionId: string): stri
     case "docker":
       // Docker 保持现有 dedicated logical session 生命周期，不按 target 复用。
       return `${target.kind}:dedicated:${remoteSessionId}`;
+    case "sandbox":
+      // 沙箱是稳定的执行环境，按 target 复用连接（与 ssh/wsl 一致），
+      // 且必须与 buildRemoteEnvironmentKey 的键一致。
+      return `sandbox:${target.provider}:${target.sandboxId}`;
   }
 }
 

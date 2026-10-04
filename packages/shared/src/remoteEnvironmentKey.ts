@@ -12,5 +12,7 @@ export function buildRemoteEnvironmentKey(target: RemoteTarget): string {
       return `wsl:${target.distro?.trim() || "<default>"}\0${target.user?.trim() || "<default>"}`;
     case "docker":
       return `docker:${target.container.trim()}`;
+    case "sandbox":
+      return `sandbox:${target.provider}:${target.sandboxId.trim()}`;
   }
 }

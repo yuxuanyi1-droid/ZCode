@@ -7,8 +7,14 @@ type WizardIntlLike = {
   formatMessage: (descriptor: { id: string }, values?: Record<string, string>) => string;
 };
 
+/**
+ * 向导只负责 ssh/wsl/docker；sandbox target 由外部 provisioner 直接提供，
+ * 不走表单（因此这里收窄 kind，避免为不可达分支编造校验逻辑）。
+ */
+export type WizardRemoteKind = Exclude<RemoteTarget["kind"], "sandbox">;
+
 interface RemoteConnectionFormSnapshot {
-  kind: RemoteTarget["kind"];
+  kind: WizardRemoteKind;
   host: string;
   port: string;
   username: string;
@@ -27,7 +33,7 @@ interface RemoteConnectionFormSnapshot {
 export function getRemoteWizardStepCopy(
   intl: WizardIntlLike,
   step: RemoteWizardStep,
-  kind: RemoteTarget["kind"],
+  kind: WizardRemoteKind,
 ) {
   switch (step) {
     case "kind":

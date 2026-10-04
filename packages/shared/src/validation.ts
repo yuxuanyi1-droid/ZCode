@@ -9,6 +9,7 @@ import { zcodeProcessDiagnosticSchema } from "./process-diagnostic.js";
 import { browserCommandSchema } from "./browser-use/commands.js";
 import { browserCommandResultSchema } from "./browser-use/result.js";
 import { REMOTE_ASSET_INSTALL_MODES } from "./remoteAssetInstallMode.js";
+import { SANDBOX_PROVIDERS } from "./remoteTarget.js";
 import { PROCESS_RESOURCE_CLI_LANES } from "./processResourceTelemetry.js";
 import { isKnownRemoteResourcePackageId } from "./remoteResourcePackages.js";
 import { zcodeProviderSchema } from "./providers.js";
@@ -93,10 +94,35 @@ export const dockerConnectOptionsSchema = z.object({
   container: nonEmptyStringSchema,
 });
 
+export const sandboxSshAttachSchema = z.object({
+  host: nonEmptyStringSchema,
+  port: z.number().int().positive().max(65535).optional(),
+  username: nonEmptyStringSchema,
+  password: z.string().optional(),
+  privateKeyPath: z.string().optional(),
+  privateKeyPassphrase: z.string().optional(),
+});
+
+export const sandboxConnectOptionsSchema = z.object({
+  kind: z.literal("sandbox"),
+  provider: z.enum(SANDBOX_PROVIDERS),
+  // sandboxId 会进入 remote workspace identity 的 authority 段，含 ":" / "/" 会破坏解析，
+  // 因此在 schema 层直接挡住，而不是等 identity 构造侧静默产出坏键。
+  sandboxId: z.string().regex(/^[A-Za-z0-9._-]+$/, "sandboxId must not contain ':' or '/'"),
+  ssh: sandboxSshAttachSchema,
+  assetInstallMode: z.enum(REMOTE_ASSET_INSTALL_MODES).optional(),
+  resourcePackages: z
+    .object({
+      selectedPackageIds: z.array(z.string().refine(isKnownRemoteResourcePackageId)).optional(),
+    })
+    .optional(),
+});
+
 export const remoteTargetSchema = z.discriminatedUnion("kind", [
   sshConnectOptionsSchema,
   wslConnectOptionsSchema,
   dockerConnectOptionsSchema,
+  sandboxConnectOptionsSchema,
 ]);
 
 export const helloMessageSchema = z.object({

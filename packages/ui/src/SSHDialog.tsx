@@ -20,6 +20,7 @@ import {
   buildRemoteTarget,
   getRemoteWizardStepCopy,
   withDefaultRemoteResourcePackages,
+  type WizardRemoteKind,
 } from "@/lib/remoteConnectionWizard.js";
 import {
   getRemoteConnectionCompletionDialogState,
@@ -60,7 +61,7 @@ interface RemoteConnectionDialogProps {
   remoteWorkspaceSessions?: RemoteWorkspaceSessionEntry[];
   onFlowActiveChange?: (active: boolean) => void;
   onFlowRequestIdChange?: (requestId: string | null) => void;
-  preferredKind?: RemoteTarget["kind"];
+  preferredKind?: WizardRemoteKind;
   preferredWslDistro?: string;
 }
 
