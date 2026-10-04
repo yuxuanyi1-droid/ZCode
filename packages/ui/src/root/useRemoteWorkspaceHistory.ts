@@ -4,6 +4,7 @@ import type { Dispatch, SetStateAction } from "react";
 import type {
   AppSettings,
   BotRemoteWorkspaceReconnectedEvent,
+  ConnectSandboxRequest,
   IPlatformService,
   RemoteSessionClosedEvent,
   RemoteWorkspaceSessionEntry,
@@ -1047,6 +1048,33 @@ export function useRemoteWorkspaceHistory({
     [canUseRemoteWorkspace, connectRemoteWorkspaceTarget],
   );
 
+  const handleConnectSandbox = useCallback(
+    async (request: ConnectSandboxRequest) => {
+      if (!canUseRemoteWorkspace) {
+        throw new Error("Remote workspace is disabled in this mode");
+      }
+
+      const result = await platform.connectSandbox(request);
+      if (!result.success) {
+        throw new Error(getErrorMessage(result.error || "Connection failed"));
+      }
+      if (!result.sessionId) {
+        throw new Error("Sandbox session was not created");
+      }
+      if (!result.workspacePath) {
+        // provisioner 必须给出 checkout 目录：沙箱流程不进入选目录步骤，
+        // 缺了它就无法把工作区 tab 指到远端。
+        throw new Error("Sandbox provisioner did not return a workspace path");
+      }
+
+      // 与 connectRemote 相同：main 建好 session 后，renderer store 可能晚一拍才注册。
+      // 提前 addTab 会短暂落到本地 services，导致首屏读到错误的工作区。
+      await waitForRemoteWorkspaceSessionReady(result.sessionId);
+      return { sessionId: result.sessionId, workspacePath: result.workspacePath };
+    },
+    [canUseRemoteWorkspace, platform, waitForRemoteWorkspaceSessionReady],
+  );
+
   const handleReconnectRemoteWorkspace = useCallback(
     async (workspaceKey: string, options?: ReconnectRemoteWorkspaceOptions) => {
       await reconnectRemoteWorkspaceByKey({
@@ -1382,6 +1410,7 @@ export function useRemoteWorkspaceHistory({
     handleCancelRemoteProject,
     handleSelectRemoteProject,
     handleConnectRemote,
+    handleConnectSandbox,
     handleReconnectRemoteWorkspace,
     handleOpenRemoteWorkspaceFromHistory,
     handleRemoteWorkspaceTabsClosed,

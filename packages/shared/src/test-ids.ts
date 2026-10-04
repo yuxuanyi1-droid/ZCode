@@ -157,6 +157,16 @@ export const TID_REMOTE_KIND_SSH = "remote-kind-ssh";
 export const TID_REMOTE_KIND_WSL = "remote-kind-wsl";
 /** 远程连接方式切换到 Docker */
 export const TID_REMOTE_KIND_DOCKER = "remote-kind-docker";
+/** 远程连接方式切换到云沙箱 */
+export const TID_REMOTE_KIND_SANDBOX = "remote-kind-sandbox";
+/** 云沙箱 provider 选择框 */
+export const TID_SANDBOX_PROVIDER_SELECT = "sandbox-provider-select";
+/** 云沙箱仓库 owner 输入框 */
+export const TID_SANDBOX_REPO_OWNER_INPUT = "sandbox-repo-owner-input";
+/** 云沙箱仓库名输入框 */
+export const TID_SANDBOX_REPO_NAME_INPUT = "sandbox-repo-name-input";
+/** 云沙箱分支输入框 */
+export const TID_SANDBOX_BRANCH_INPUT = "sandbox-branch-input";
 /** SSH 主机地址输入框 */
 export const TID_SSH_HOST_INPUT = "ssh-host-input";
 /** SSH 端口号输入框 */

@@ -5,10 +5,21 @@ import type {
   RemoteAssetInstallMode,
   RemoteTarget,
   RemoteWorkspaceSessionEntry,
+  SandboxProvider,
   SSHConfigAliasOption,
   WSLDistro,
 } from "@zcode/shared";
-import { TID_REMOTE_KIND_DOCKER, TID_REMOTE_KIND_SSH, TID_REMOTE_KIND_WSL } from "@zcode/shared";
+import {
+  SANDBOX_PROVIDERS,
+  TID_REMOTE_KIND_DOCKER,
+  TID_REMOTE_KIND_SANDBOX,
+  TID_REMOTE_KIND_SSH,
+  TID_REMOTE_KIND_WSL,
+  TID_SANDBOX_BRANCH_INPUT,
+  TID_SANDBOX_PROVIDER_SELECT,
+  TID_SANDBOX_REPO_NAME_INPUT,
+  TID_SANDBOX_REPO_OWNER_INPUT,
+} from "@zcode/shared";
 import type {
   IMcpSyncService,
   IPluginSyncService,
@@ -19,6 +30,7 @@ import type {
 import {
   AlertTriangleIcon,
   ChevronRightIcon,
+  CloudIcon,
   LoaderIcon,
   MonitorCogIcon,
   ServerIcon,
@@ -29,6 +41,14 @@ import { RemoteConnectionFields } from "@/RemoteConnectionFields.js";
 import type { SSHAuthMethod } from "@/hooks/useRemoteConnectionForm.js";
 import type { WizardRemoteKind } from "@/lib/remoteConnectionWizard.js";
 import { Button } from "@/components/ui/button.js";
+import { Input } from "@/components/ui/input.js";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select.js";
 import { cn } from "@/components/lib/utils.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import {
@@ -46,6 +66,8 @@ function getKindIcon(kind: WizardRemoteKind) {
       return MonitorCogIcon;
     case "wsl":
       return TerminalIcon;
+    case "sandbox":
+      return CloudIcon;
   }
 }
 
@@ -81,7 +103,9 @@ export function RemoteConnectionKindStep({
                   ? TID_REMOTE_KIND_SSH
                   : value === "wsl"
                     ? TID_REMOTE_KIND_WSL
-                    : TID_REMOTE_KIND_DOCKER
+                    : value === "sandbox"
+                      ? TID_REMOTE_KIND_SANDBOX
+                      : TID_REMOTE_KIND_DOCKER
               }
               className={cn(
                 "flex min-h-32 flex-col items-start gap-4 rounded-2xl border p-4 text-left transition-colors",
@@ -134,6 +158,100 @@ export function RemoteConnectionKindStep({
   );
 }
 
+/**
+ * 云沙箱的连接参数与 ssh/docker/wsl 完全不同：不填 host/port，只声明
+ * 「用哪个 provider、建哪个仓库的哪个分支」。attach 信息由 provisioner 返回，
+ * 所以这里没有凭据字段，也不需要本机探测结果。
+ */
+function RemoteConnectionSandboxFields({
+  provider,
+  repoOwner,
+  repoName,
+  branch,
+  onProviderChange,
+  onRepoOwnerChange,
+  onRepoNameChange,
+  onBranchChange,
+}: {
+  provider: SandboxProvider;
+  repoOwner: string;
+  repoName: string;
+  branch: string;
+  onProviderChange: (value: SandboxProvider) => void;
+  onRepoOwnerChange: (value: string) => void;
+  onRepoNameChange: (value: string) => void;
+  onBranchChange: (value: string) => void;
+}) {
+  const { intl } = useZCodeIntl();
+
+  return (
+    <div className="space-y-3">
+      <p className="text-ui-base text-foreground-subtle">
+        {intl.formatMessage({ id: "sandbox.description" })}
+      </p>
+      <div>
+        <label className="mb-1 block text-ui-base text-foreground-subtle">
+          {intl.formatMessage({ id: "sandbox.provider" })}
+        </label>
+        <Select
+          value={provider}
+          onValueChange={(value) => onProviderChange(value as SandboxProvider)}
+        >
+          <SelectTrigger size="lg" className="h-9 w-full" data-testid={TID_SANDBOX_PROVIDER_SELECT}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent align="start">
+            {SANDBOX_PROVIDERS.map((value) => (
+              <SelectItem key={value} value={value}>
+                {intl.formatMessage({ id: `sandbox.provider.${value}` })}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div>
+        <label className="mb-1 block text-ui-base text-foreground-subtle">
+          {intl.formatMessage({ id: "sandbox.repositoryOwner" })}
+        </label>
+        <Input
+          size="lg"
+          className="h-9 text-ui-base"
+          value={repoOwner}
+          onChange={(event) => onRepoOwnerChange(event.target.value)}
+          data-testid={TID_SANDBOX_REPO_OWNER_INPUT}
+          placeholder={intl.formatMessage({ id: "sandbox.repositoryOwnerPlaceholder" })}
+        />
+      </div>
+      <div>
+        <label className="mb-1 block text-ui-base text-foreground-subtle">
+          {intl.formatMessage({ id: "sandbox.repositoryName" })}
+        </label>
+        <Input
+          size="lg"
+          className="h-9 text-ui-base"
+          value={repoName}
+          onChange={(event) => onRepoNameChange(event.target.value)}
+          data-testid={TID_SANDBOX_REPO_NAME_INPUT}
+          placeholder={intl.formatMessage({ id: "sandbox.repositoryNamePlaceholder" })}
+        />
+      </div>
+      <div>
+        <label className="mb-1 block text-ui-base text-foreground-subtle">
+          {intl.formatMessage({ id: "sandbox.branch" })}
+        </label>
+        <Input
+          size="lg"
+          className="h-9 text-ui-base"
+          value={branch}
+          onChange={(event) => onBranchChange(event.target.value)}
+          data-testid={TID_SANDBOX_BRANCH_INPUT}
+          placeholder={intl.formatMessage({ id: "sandbox.branchPlaceholder" })}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function RemoteConnectionSettingsStep({
   kind,
   host,
@@ -157,10 +275,18 @@ export function RemoteConnectionSettingsStep({
   selectedSshConfigAlias,
   currentRuntimeOptionsLoading,
   currentRuntimeOptionsError,
+  sandboxProvider,
+  sandboxRepoOwner,
+  sandboxRepoName,
+  sandboxBranch,
   remoteWorkspaceSessions = [],
   validationMessage,
   loading,
   onBack,
+  onSandboxProviderChange,
+  onSandboxRepoOwnerChange,
+  onSandboxRepoNameChange,
+  onSandboxBranchChange,
   onHostChange,
   onPortChange,
   onUsernameChange,
@@ -200,10 +326,18 @@ export function RemoteConnectionSettingsStep({
   selectedSshConfigAlias: string | null;
   currentRuntimeOptionsLoading: boolean;
   currentRuntimeOptionsError: string;
+  sandboxProvider: SandboxProvider;
+  sandboxRepoOwner: string;
+  sandboxRepoName: string;
+  sandboxBranch: string;
   remoteWorkspaceSessions?: RemoteWorkspaceSessionEntry[];
   validationMessage: string;
   loading: boolean;
   onBack: () => void;
+  onSandboxProviderChange: (value: SandboxProvider) => void;
+  onSandboxRepoOwnerChange: (value: string) => void;
+  onSandboxRepoNameChange: (value: string) => void;
+  onSandboxBranchChange: (value: string) => void;
   onHostChange: (value: string) => void;
   onPortChange: (value: string) => void;
   onUsernameChange: (value: string) => void;
@@ -238,45 +372,58 @@ export function RemoteConnectionSettingsStep({
           </div>
         ) : null}
 
-        <RemoteConnectionFields
-          kind={kind}
-          host={host}
-          port={port}
-          username={username}
-          sshAuthMethod={sshAuthMethod}
-          assetInstallMode={assetInstallMode}
-          password={password}
-          privateKeyPath={privateKeyPath}
-          privateKeyPassphrase={privateKeyPassphrase}
-          wslDistro={wslDistro}
-          wslUser={wslUser}
-          wslDistros={wslDistros}
-          dockerContainer={dockerContainer}
-          manualDockerContainer={manualDockerContainer}
-          dockerContainers={dockerContainers}
-          dockerAvailable={dockerAvailable}
-          sshConfigAliases={sshConfigAliases}
-          sshConfigAliasesLoading={sshConfigAliasesLoading}
-          sshConfigAliasesError={sshConfigAliasesError}
-          selectedSshConfigAlias={selectedSshConfigAlias}
-          runtimeOptionsLoading={currentRuntimeOptionsLoading}
-          remoteWorkspaceSessions={remoteWorkspaceSessions}
-          applySshConfigAlias={onApplySshConfigAlias}
-          clearSelectedSshConfigAlias={onClearSelectedSshConfigAlias}
-          setHost={onHostChange}
-          setPort={onPortChange}
-          setUsername={onUsernameChange}
-          setSshAuthMethod={onSshAuthMethodChange}
-          setAssetInstallMode={onAssetInstallModeChange}
-          setPassword={onPasswordChange}
-          setPrivateKeyPath={onPrivateKeyPathChange}
-          setPrivateKeyPassphrase={onPrivateKeyPassphraseChange}
-          setWslDistro={onWslDistroChange}
-          setWslUser={onWslUserChange}
-          setDockerContainer={onDockerContainerChange}
-          setManualDockerContainer={onManualDockerContainerChange}
-          refreshDockerContainers={onDockerContainersRefresh}
-        />
+        {kind === "sandbox" ? (
+          <RemoteConnectionSandboxFields
+            provider={sandboxProvider}
+            repoOwner={sandboxRepoOwner}
+            repoName={sandboxRepoName}
+            branch={sandboxBranch}
+            onProviderChange={onSandboxProviderChange}
+            onRepoOwnerChange={onSandboxRepoOwnerChange}
+            onRepoNameChange={onSandboxRepoNameChange}
+            onBranchChange={onSandboxBranchChange}
+          />
+        ) : (
+          <RemoteConnectionFields
+            kind={kind}
+            host={host}
+            port={port}
+            username={username}
+            sshAuthMethod={sshAuthMethod}
+            assetInstallMode={assetInstallMode}
+            password={password}
+            privateKeyPath={privateKeyPath}
+            privateKeyPassphrase={privateKeyPassphrase}
+            wslDistro={wslDistro}
+            wslUser={wslUser}
+            wslDistros={wslDistros}
+            dockerContainer={dockerContainer}
+            manualDockerContainer={manualDockerContainer}
+            dockerContainers={dockerContainers}
+            dockerAvailable={dockerAvailable}
+            sshConfigAliases={sshConfigAliases}
+            sshConfigAliasesLoading={sshConfigAliasesLoading}
+            sshConfigAliasesError={sshConfigAliasesError}
+            selectedSshConfigAlias={selectedSshConfigAlias}
+            runtimeOptionsLoading={currentRuntimeOptionsLoading}
+            remoteWorkspaceSessions={remoteWorkspaceSessions}
+            applySshConfigAlias={onApplySshConfigAlias}
+            clearSelectedSshConfigAlias={onClearSelectedSshConfigAlias}
+            setHost={onHostChange}
+            setPort={onPortChange}
+            setUsername={onUsernameChange}
+            setSshAuthMethod={onSshAuthMethodChange}
+            setAssetInstallMode={onAssetInstallModeChange}
+            setPassword={onPasswordChange}
+            setPrivateKeyPath={onPrivateKeyPathChange}
+            setPrivateKeyPassphrase={onPrivateKeyPassphraseChange}
+            setWslDistro={onWslDistroChange}
+            setWslUser={onWslUserChange}
+            setDockerContainer={onDockerContainerChange}
+            setManualDockerContainer={onManualDockerContainerChange}
+            refreshDockerContainers={onDockerContainersRefresh}
+          />
+        )}
       </div>
 
       <div className="flex items-center justify-end gap-3">

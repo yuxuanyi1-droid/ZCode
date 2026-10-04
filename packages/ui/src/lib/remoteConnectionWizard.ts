@@ -1,4 +1,9 @@
-import type { RemoteAssetInstallMode, RemoteTarget } from "@zcode/shared";
+import type {
+  RemoteAssetInstallMode,
+  RemoteTarget,
+  SandboxProvisionRequest,
+  SandboxProvider,
+} from "@zcode/shared";
 import { isValidWslUser, normalizeRemoteResourcePackageSelection } from "@zcode/shared";
 import type { SSHAuthMethod } from "@/hooks/useRemoteConnectionForm.js";
 import type { RemoteWizardStep } from "@/RemoteConnectionWizardChrome.js";
@@ -8,13 +13,19 @@ type WizardIntlLike = {
 };
 
 /**
- * 向导只负责 ssh/wsl/docker；sandbox target 由外部 provisioner 直接提供，
- * 不走表单（因此这里收窄 kind，避免为不可达分支编造校验逻辑）。
+ * 向导里可供用户选择的连接类型，含 sandbox：沙箱也在同一个选择页里挑，
+ * 只是它不填 host/port，而是提交后由外部 provisioner 返回 attach 信息。
  */
-export type WizardRemoteKind = Exclude<RemoteTarget["kind"], "sandbox">;
+export type WizardRemoteKind = RemoteTarget["kind"];
+
+/**
+ * buildRemoteTarget 能同步构造出 target 的类型。
+ * sandbox 的 target 要先请求 provisioner 才知道，因此排除在外，单独走 buildSandboxProvisionRequest。
+ */
+export type FormRemoteKind = Exclude<WizardRemoteKind, "sandbox">;
 
 interface RemoteConnectionFormSnapshot {
-  kind: WizardRemoteKind;
+  kind: FormRemoteKind;
   host: string;
   port: string;
   username: string;
@@ -148,6 +159,48 @@ export function buildRemoteTarget(
       };
     }
   }
+}
+
+interface SandboxConnectionFormSnapshot {
+  sandboxProvider: SandboxProvider;
+  sandboxRepoOwner: string;
+  sandboxRepoName: string;
+  sandboxBranch: string;
+}
+
+/**
+ * 沙箱表单只收集「在哪建、建哪个仓库的哪个分支」。
+ * attach 信息（sandboxId / ssh）由 provisioner 决定，不在客户端凭空拼出来。
+ */
+export function buildSandboxProvisionRequest(
+  intl: WizardIntlLike,
+  snapshot: SandboxConnectionFormSnapshot,
+): { request?: SandboxProvisionRequest; errorMessage?: string } {
+  const owner = snapshot.sandboxRepoOwner.trim();
+  const name = snapshot.sandboxRepoName.trim();
+  const branch = snapshot.sandboxBranch.trim();
+
+  if (!owner || !name || !branch) {
+    return {
+      errorMessage: intl.formatMessage({ id: "sandbox.validation.required" }),
+    };
+  }
+
+  // repo_name 是 /workspace 下的单段目录名；带分隔符会让 clone 目标逃出预期目录。
+  // owner 允许含 "/"（GitLab 子组），所以这里只校验 name。
+  if (name.includes("/") || name.includes(":")) {
+    return {
+      errorMessage: intl.formatMessage({ id: "sandbox.validation.repoNameInvalid" }),
+    };
+  }
+
+  return {
+    request: {
+      provider: snapshot.sandboxProvider,
+      repository: { owner, name },
+      branch,
+    },
+  };
 }
 
 export function withDefaultRemoteResourcePackages(target: RemoteTarget): RemoteTarget {

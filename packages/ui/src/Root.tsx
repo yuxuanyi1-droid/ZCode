@@ -546,6 +546,7 @@ function RootInner({
     handleCancelRemoteProject,
     handleSelectRemoteProject,
     handleConnectRemote,
+    handleConnectSandbox,
     handleReconnectRemoteWorkspace,
     handleRemoteWorkspaceTabsClosed,
   } = useRemoteWorkspaceHistory({
@@ -911,6 +912,7 @@ function RootInner({
   const remoteConnectionDialog = allowRemoteWorkspace ? (
     <SSHDialog
       onConnect={handleConnectRemote}
+      onConnectSandbox={handleConnectSandbox}
       onSelectProject={handleSelectRemoteProject}
       onCancelSession={handleCancelRemoteProject}
       localWorkspacePath={localWorkspacePathForRemoteConnection}

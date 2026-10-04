@@ -1,6 +1,11 @@
 /* eslint-disable max-lines -- 远程连接向导的状态编排暂集中在同一组件，后续有独立拆分计划。 */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { createUuid, type RemoteTarget, type RemoteWorkspaceSessionEntry } from "@zcode/shared";
+import {
+  createUuid,
+  type ConnectSandboxRequest,
+  type RemoteTarget,
+  type RemoteWorkspaceSessionEntry,
+} from "@zcode/shared";
 import {
   TID_SSH_CONNECT_TRIGGER,
   TID_SSH_DIALOG,
@@ -18,6 +23,7 @@ import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { getErrorMessage } from "@/lib/errorMessage.js";
 import {
   buildRemoteTarget,
+  buildSandboxProvisionRequest,
   getRemoteWizardStepCopy,
   withDefaultRemoteResourcePackages,
   type WizardRemoteKind,
@@ -47,6 +53,14 @@ import type { VariantProps } from "class-variance-authority";
 
 interface RemoteConnectionDialogProps {
   onConnect: (options: RemoteTarget, requestId?: string) => Promise<string>;
+  /**
+   * 沙箱连接与 ssh/wsl/docker 不同：target 要先由 provisioner 建出来。
+   * 因此这里传入的是「建沙箱的请求」，返回 provisioner 决定的 workspacePath。
+   */
+  onConnectSandbox?: (request: ConnectSandboxRequest) => Promise<{
+    sessionId: string;
+    workspacePath: string;
+  }>;
   onSelectProject: (sessionId: string, path: string, localWorkspacePath?: string) => Promise<void>;
   onCancelSession: (sessionId: string) => Promise<void>;
   localWorkspacePath?: string;
@@ -67,6 +81,7 @@ interface RemoteConnectionDialogProps {
 
 export function RemoteConnectionDialog({
   onConnect,
+  onConnectSandbox,
   onSelectProject,
   onCancelSession,
   localWorkspacePath,
@@ -95,6 +110,11 @@ export function RemoteConnectionDialog({
   const [connectedSessionId, setConnectedSessionId] = useState<string | null>(null);
   const [connectingRequestId, setConnectingRequestId] = useState<string | null>(null);
   const [pendingRemoteTarget, setPendingRemoteTarget] = useState<RemoteTarget | null>(null);
+  // 沙箱建好后 provisioner 返回的 checkout 目录。重试「打开工作区」时用得上：
+  // 沙箱已经存在，重试必须重新 attach，而不是再建一个。
+  const [pendingSandboxWorkspacePath, setPendingSandboxWorkspacePath] = useState<string | null>(
+    null,
+  );
   const [selectingDirectory, setSelectingDirectory] = useState(false);
   const selectingDirectoryRef = useRef(false);
   const { connectionLogs, resetConnectionLogs } = useRemoteConnectionLogs(connectingRequestId);
@@ -113,6 +133,10 @@ export function RemoteConnectionDialog({
     wslUser,
     dockerContainer,
     manualDockerContainer,
+    sandboxProvider,
+    sandboxRepoOwner,
+    sandboxRepoName,
+    sandboxBranch,
     sshConfigAliases,
     sshConfigAliasesLoading,
     sshConfigAliasesError,
@@ -134,6 +158,10 @@ export function RemoteConnectionDialog({
     setWslUser,
     setDockerContainer,
     setManualDockerContainer,
+    setSandboxProvider,
+    setSandboxRepoOwner,
+    setSandboxRepoName,
+    setSandboxBranch,
     refreshDockerContainers,
     applySshConfigAlias,
     clearSelectedSshConfigAlias,
@@ -144,6 +172,8 @@ export function RemoteConnectionDialog({
     isWindowsDesktop,
     preferredKind,
     preferredWslDistro,
+    // 只有真正接上 provisioner 的入口才展示云沙箱卡片，避免出现点了必然失败的选项。
+    supportsSandbox: Boolean(onConnectSandbox),
   });
   const directoryBrowserServices = useRemoteWorkspaceSessionStore((state) =>
     connectedSessionId ? (state.sessionsById[connectedSessionId]?.services ?? null) : null,
@@ -218,6 +248,7 @@ export function RemoteConnectionDialog({
       setCurrentStep("kind");
       setConnectedSessionId(null);
       setPendingRemoteTarget(null);
+      setPendingSandboxWorkspacePath(null);
       updateConnectingRequestId(null);
       applyOpenState(false);
     },
@@ -307,10 +338,90 @@ export function RemoteConnectionDialog({
     }
   };
 
+  const startSandboxConnection = async () => {
+    if (loading) {
+      // 与 startRemoteConnection 同样的并发保护。沙箱比 SSH 更贵：重复点击会真的
+      // 让 provisioner 建出多个沙箱，而只有最后一个会被 attach，其余的只能等 TTL 回收。
+      return;
+    }
+
+    const { request, errorMessage } = buildSandboxProvisionRequest(intl, {
+      sandboxProvider,
+      sandboxRepoOwner,
+      sandboxRepoName,
+      sandboxBranch,
+    });
+    if (!request) {
+      setValidationMessage(errorMessage ?? "Connection failed");
+      return;
+    }
+    if (!onConnectSandbox) {
+      // 正常情况下选择页不会展示沙箱卡片；这里兜底，避免未来有人接了 kind 却忘了接 connector。
+      setValidationMessage(intl.formatMessage({ id: "sandbox.unsupported" }));
+      return;
+    }
+
+    resetFeedback();
+    resetConnectionLogs();
+    setLoading(true);
+    const requestId = createUuid();
+    updateConnectingRequestId(requestId);
+    setCurrentStep("connecting");
+    const trace = startUserAction({
+      featureId: "workspace.remote.lifecycle",
+      action: "connect",
+      trigger: "button",
+      workspaceKind: "remote",
+      remoteKind: "sandbox",
+    });
+    try {
+      const { sessionId, workspacePath } = await onConnectSandbox({
+        provision: request,
+        requestId,
+        connectTrigger: "new",
+      });
+      trace.complete({ resultSource: "platform_result" });
+
+      // provisioner 决定了 checkout 目录，所以沙箱流程不进入选目录步骤，
+      // 直接用返回的 workspacePath 打开工作区。
+      setConnectedSessionId(sessionId);
+      setPendingSandboxWorkspacePath(workspacePath);
+      try {
+        await onSelectProject(sessionId, workspacePath);
+      } catch (selectionError) {
+        // 沙箱与 session 都已经就绪，只是打开工作区这一步失败。
+        // 保持在 connecting 步骤显示错误：session 仍挂在 store 上，用户可以重试，
+        // 关闭弹窗时也会走既有的释放逻辑，不需要（也不能）由客户端销毁沙箱。
+        setError(getErrorMessage(selectionError));
+        return;
+      }
+      resetConnectionLogs();
+      setCurrentStep("kind");
+      setConnectedSessionId(null);
+      setPendingRemoteTarget(null);
+      setPendingSandboxWorkspacePath(null);
+      updateConnectingRequestId(null);
+      applyOpenState(false);
+    } catch (connectError) {
+      const completionState = getRemoteConnectionCompletionDialogState("error");
+      setError(getErrorMessage(connectError));
+      setCurrentStep(completionState.step);
+      applyOpenState(completionState.open);
+      trace.fail({ failureStage: "remote_connect" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleConnect = async () => {
     if (loading) {
       // React 还没来得及把按钮置 disabled 时，快速重复点击会启动多个 SSH host process。
       // 这里在事件入口再做一次并发保护，避免同一个 dialog 产生多条部署流并把上传进度混在一起。
+      return;
+    }
+
+    if (kind === "sandbox") {
+      await startSandboxConnection();
       return;
     }
 
@@ -343,13 +454,42 @@ export function RemoteConnectionDialog({
   };
 
   const handleStartPendingRemoteConnection = useCallback(() => {
+    if (pendingSandboxWorkspacePath && connectedSessionId) {
+      // 「重试」发生在沙箱已建好、只是打开工作区失败的时候。
+      // 这里必须重新 attach 同一个沙箱，再走一遍 handleConnect 会真的再建一个。
+      void (async () => {
+        resetFeedback();
+        try {
+          await onSelectProject(connectedSessionId, pendingSandboxWorkspacePath);
+        } catch (selectionError) {
+          setError(getErrorMessage(selectionError));
+          return;
+        }
+        resetConnectionLogs();
+        setCurrentStep("kind");
+        setConnectedSessionId(null);
+        setPendingSandboxWorkspacePath(null);
+        updateConnectingRequestId(null);
+        applyOpenState(false);
+      })();
+      return;
+    }
+
     if (!pendingRemoteTarget) {
       void handleConnect();
       return;
     }
 
     void startRemoteConnection(pendingRemoteTarget);
-  }, [handleConnect, pendingRemoteTarget, startRemoteConnection]);
+  }, [
+    connectedSessionId,
+    handleConnect,
+    onSelectProject,
+    pendingRemoteTarget,
+    pendingSandboxWorkspacePath,
+    startRemoteConnection,
+    updateConnectingRequestId,
+  ]);
 
   const handleBackToConnection = useCallback(async () => {
     if (!connectedSessionId) {
@@ -535,6 +675,10 @@ export function RemoteConnectionDialog({
                     selectedSshConfigAlias={selectedSshConfigAlias}
                     currentRuntimeOptionsLoading={currentRuntimeOptionsLoading}
                     currentRuntimeOptionsError={currentRuntimeOptionsError}
+                    sandboxProvider={sandboxProvider}
+                    sandboxRepoOwner={sandboxRepoOwner}
+                    sandboxRepoName={sandboxRepoName}
+                    sandboxBranch={sandboxBranch}
                     remoteWorkspaceSessions={remoteWorkspaceSessions}
                     validationMessage={validationMessage}
                     loading={loading}
@@ -542,6 +686,10 @@ export function RemoteConnectionDialog({
                       resetFeedback();
                       setCurrentStep("kind");
                     }}
+                    onSandboxProviderChange={setSandboxProvider}
+                    onSandboxRepoOwnerChange={setSandboxRepoOwner}
+                    onSandboxRepoNameChange={setSandboxRepoName}
+                    onSandboxBranchChange={setSandboxBranch}
                     onHostChange={setHost}
                     onPortChange={setPort}
                     onUsernameChange={setUsername}
