@@ -52,7 +52,17 @@ export type {
   SandboxProvisionResult,
   SandboxRepositoryRef,
 } from "./sandboxProvisioner.js";
-export { toSandboxConnectOptions } from "./sandboxProvisioner.js";
+export {
+  DEFAULT_SANDBOX_TIMEOUT_SECONDS,
+  SANDBOX_HEALTH_PATH,
+  SANDBOX_PROVISION_PATH,
+  SANDBOX_SSH_PORT,
+  SANDBOX_WORKSPACE_ROOT,
+  isSandboxWorkspacePathWithinRoot,
+  resolveSandboxTimeoutSeconds,
+  resolveSandboxWorkspacePath,
+  toSandboxConnectOptions,
+} from "./sandboxProvisioner.js";
 export { buildSshRemoteHostKey } from "./remoteSshHostKey.js";
 export { buildRemoteEnvironmentKey } from "./remoteEnvironmentKey.js";
 export type {

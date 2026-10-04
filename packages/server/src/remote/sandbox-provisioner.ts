@@ -1,4 +1,5 @@
 import {
+  SANDBOX_PROVISION_PATH,
   ZCODE_SANDBOX_PROVISIONER_TOKEN_ENV_KEY,
   ZCODE_SANDBOX_PROVISIONER_URL_ENV_KEY,
   formatZodError,
@@ -7,8 +8,8 @@ import {
   type SandboxProvisionResult,
 } from "@zcode/shared";
 
-/** provisioner 侧创建沙箱的固定路径；这是 ZCode 与 provisioner 之间唯一的写契约。 */
-export const SANDBOX_PROVISION_PATH = "/sandboxes";
+/** provisioner 侧创建沙箱的固定路径；定义在 shared，两端共用同一份。 */
+export { SANDBOX_PROVISION_PATH };
 
 /**
  * 创建沙箱包含拉镜像 + clone，慢是常态；这个超时是**整个请求**的上限，
