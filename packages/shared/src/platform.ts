@@ -5,6 +5,7 @@ import type {
   SSHConnectOptions,
   WSLConnectOptions,
 } from "./remoteTarget.js";
+import type { SandboxProvisionRequest } from "./sandboxProvisioner.js";
 import type {
   LoadCliMcpFromUserDirectoryRequest,
   LoadCliMcpFromUserDirectoryResult,
@@ -469,6 +470,23 @@ export interface ConnectRemoteRequest {
   connectTrigger?: import("./remoteUsageTelemetry.js").RemoteWorkspaceConnectTrigger;
 }
 
+export interface ConnectSandboxRequest {
+  /** 仓库/分支/规格；沙箱内的 checkout 由 provisioner 负责。 */
+  provision: SandboxProvisionRequest;
+  requestId?: string;
+  connectTrigger?: import("./remoteUsageTelemetry.js").RemoteWorkspaceConnectTrigger;
+}
+
+export interface ConnectSandboxResult {
+  success: boolean;
+  error?: string;
+  /** 建连成功后的远程 session id（与 connectRemote 同一个 id 空间）。 */
+  sessionId?: string;
+  sandboxId?: string;
+  /** provisioner 决定的 checkout 目录；调用方直接用它开 tab，不再走目录选择。 */
+  workspacePath?: string;
+}
+
 export interface CancelPendingRemoteConnectionRequest {
   requestId?: string;
 }
@@ -598,6 +616,14 @@ export interface IPlatformService {
       connectTrigger?: import("./remoteUsageTelemetry.js").RemoteWorkspaceConnectTrigger;
     },
   ): Promise<{ success: boolean; error?: string; sessionId?: string }>;
+
+  /**
+   * 由 provisioner 建沙箱并 attach（Plan A：ZCode 只 attach，不拥有沙箱生命周期）。
+   *
+   * 与 connectRemote 的区别只有"target 从哪来"：这里传仓库/分支，沙箱和 checkout
+   * 由 provisioner 负责，所以成功后 workspacePath 是已知的，不需要再走目录选择。
+   */
+  connectSandbox(request: ConnectSandboxRequest): Promise<ConnectSandboxResult>;
 
   /** 取消当前窗口尚未建立完成的远程连接（可选：Web 平台可忽略） */
   cancelPendingRemoteConnection?(requestId?: string): Promise<void>;

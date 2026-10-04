@@ -65,6 +65,10 @@ declare global {
           connectTrigger?: import("@zcode/shared").RemoteWorkspaceConnectTrigger;
         },
       ): Promise<{ success: boolean; error?: string; sessionId?: string }>;
+      /** 请求 provisioner 建沙箱并 attach；成功后返回 provisioner 决定的 workspacePath */
+      connectSandbox(
+        request: import("@zcode/shared").ConnectSandboxRequest,
+      ): Promise<import("@zcode/shared").ConnectSandboxResult>;
       /** 取消当前窗口尚未建立完成的远程连接 */
       cancelPendingRemoteConnection?(requestId?: string): Promise<void>;
       /** 绑定远程 logical session 的 canonical workspace context */

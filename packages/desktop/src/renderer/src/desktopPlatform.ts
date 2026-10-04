@@ -22,6 +22,7 @@ export function createDesktopPlatform(options: {
       window.zcode.activateOrSetWorkspace?.(path) ?? Promise.resolve({ activated: false }),
     connectRemote: (remoteOptions, requestId, context) =>
       window.zcode.connectRemote(remoteOptions, requestId, context),
+    connectSandbox: (request) => window.zcode.connectSandbox(request),
     cancelPendingRemoteConnection: (requestId) =>
       window.zcode.cancelPendingRemoteConnection?.(requestId) ?? Promise.resolve(),
     bindRemoteWorkspaceSessionContext: (context) =>

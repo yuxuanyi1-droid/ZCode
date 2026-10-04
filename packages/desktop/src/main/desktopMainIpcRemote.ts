@@ -5,6 +5,7 @@ import {
   armsCustomEventPayloadSchema,
   buildRemoteWorkspaceConnectResultTelemetry,
   classifyRemoteUsageError,
+  connectSandboxRequestSchema,
   formatZodError,
   normalizeUnknownError,
   InternalChannels,
@@ -13,6 +14,7 @@ import {
   PlatformChannels,
   remoteTargetSchema,
   rendererTelemetryEventPayloadSchema,
+  toSandboxConnectOptions,
   type ArmsRumEnv,
   type RemoteTarget,
   type TelemetryEventPayload,
@@ -485,6 +487,92 @@ export function registerRemoteIpcHandlers(options: {
         rendererId: event.sender.id,
         result: "failure",
         remoteKind: result.data.kind,
+        connectTrigger,
+        errorCategory,
+      });
+      return { success: false, error: normalizedError.message };
+    }
+  });
+
+  ipcMain.handle(PlatformChannels.ConnectSandbox, async (event, rawPayload: unknown) => {
+    const parsed = connectSandboxRequestSchema.safeParse(rawPayload);
+    if (!parsed.success) {
+      const error = `Invalid connect-sandbox payload: ${formatZodError(parsed.error)}`;
+      options.logger.warn("[connect-sandbox]", error);
+      return { success: false, error };
+    }
+
+    const { provision, requestId } = parsed.data;
+    const connectTrigger = parsed.data.connectTrigger ?? "new";
+
+    // provisioner 配置来自宿主 env；未配置就明确失败，不退化成"随便连一个"。
+    const { createSandboxProvisionerFromEnv } = await import("@zcode/server/remote");
+    const provisioner = createSandboxProvisionerFromEnv();
+    if (!provisioner) {
+      return {
+        success: false,
+        error: "Sandbox provisioner is not configured (set ZCODE_SANDBOX_PROVISIONER_URL).",
+      };
+    }
+
+    try {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (!win) {
+        throw new Error("未找到当前窗口，无法创建沙箱 session");
+      }
+
+      const provisioned = await provisioner.create(provision);
+      const target = toSandboxConnectOptions(provision.provider, provisioned);
+      // workspacePath 由 provisioner 决定，直接透传给 session，跳过目录选择步骤。
+      // 这里**不**在失败时销毁沙箱：沙箱归 provisioner，回收走它自己的到期策略。
+      const sessionId = await options.createRemoteWorkspaceSession(
+        win,
+        target,
+        requestId,
+        { workspacePath: provisioned.workspacePath },
+        { remoteUsageTelemetryEligible: true },
+      );
+      reportRemoteUsageEvent(
+        event.sender.id,
+        buildRemoteWorkspaceConnectResultTelemetry({
+          result: "success",
+          remoteKind: target.kind,
+          connectTrigger,
+        }),
+      );
+      reportRemoteConnectResultToArmsSafely({
+        rendererId: event.sender.id,
+        result: "success",
+        remoteKind: target.kind,
+        connectTrigger,
+      });
+      return {
+        success: true,
+        sessionId,
+        sandboxId: provisioned.sandboxId,
+        workspacePath: provisioned.workspacePath,
+      };
+    } catch (error) {
+      const normalizedError = normalizeUnknownError(error);
+      const errorCategory = classifyRemoteUsageError(error);
+      options.logger.error("[connect-sandbox] caught error:", {
+        message: normalizedError.message,
+        code: normalizedError.code,
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+      reportRemoteUsageEvent(
+        event.sender.id,
+        buildRemoteWorkspaceConnectResultTelemetry({
+          result: "failure",
+          remoteKind: "sandbox",
+          connectTrigger,
+          errorCategory,
+        }),
+      );
+      reportRemoteConnectResultToArmsSafely({
+        rendererId: event.sender.id,
+        result: "failure",
+        remoteKind: "sandbox",
         connectTrigger,
         errorCategory,
       });

@@ -212,6 +212,16 @@ function createWebPlatform(): IPlatformService {
         error: `Remote connect is not supported in Web mode yet: ${options.kind}`,
       });
     },
+    // 服务端已有 POST /api/connect-sandbox，但 Web 端拿到的 sessionId 暂时打不开，
+    // 原因与上面的 connectRemote 相同：远程 WebSocket 只暴露部分 service，
+    // 打开 ?remote=<id> 会卡在项目向导。等 web-remote-workspace 打通后，
+    // 这里换成 fetch("/api/connect-sandbox") 即可，不需要再动平台接口。
+    connectSandbox() {
+      return Promise.resolve({
+        success: false,
+        error: "Sandbox workspaces are not supported in Web mode yet",
+      });
+    },
     cancelPendingRemoteConnection: (_requestId?: string) => Promise.resolve(),
     disposeRemoteSession: () => Promise.resolve(),
     isDockerAvailable: () => Promise.resolve(false),

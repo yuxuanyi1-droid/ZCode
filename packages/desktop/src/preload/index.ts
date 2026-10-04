@@ -259,6 +259,8 @@ contextBridge.exposeInMainWorld("zcode", {
       requestId,
       ...(context ? context : {}),
     }),
+  connectSandbox: (request: import("@zcode/shared").ConnectSandboxRequest) =>
+    ipcRenderer.invoke(PlatformChannels.ConnectSandbox, request),
   cancelPendingRemoteConnection: (requestId?: string): Promise<void> =>
     ipcRenderer.invoke(PlatformChannels.CancelPendingRemoteConnection, {
       requestId,

@@ -199,6 +199,8 @@ export type {
   ChromeBrowserDataImportOptions,
   ChromeBrowserDataImportResult,
   ConnectRemoteRequest,
+  ConnectSandboxRequest,
+  ConnectSandboxResult,
   CreateTempTextAttachmentRequest,
   CreateTempTextAttachmentResult,
   SaveFileRequest,

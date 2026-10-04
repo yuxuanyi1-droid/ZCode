@@ -155,6 +155,14 @@ export const sandboxProvisionResultSchema = z.object({
   expiresAt: z.number().int().nonnegative().optional(),
 });
 
+export const remoteWorkspaceConnectTriggerSchema = z.enum(["new", "reconnect", "restore"]);
+
+export const connectSandboxRequestSchema = z.object({
+  provision: sandboxProvisionRequestSchema,
+  requestId: nonEmptyStringSchema.optional(),
+  connectTrigger: remoteWorkspaceConnectTriggerSchema.optional(),
+});
+
 export const helloMessageSchema = z.object({
   type: z.literal("zcode-hello"),
   version: z.string(),

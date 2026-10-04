@@ -37,6 +37,8 @@ import type {
   BrowserViewRestoreTabsRequest,
   BrowserViewViewportChangedPayload,
   ConnectRemoteRequest,
+  ConnectSandboxRequest,
+  ConnectSandboxResult,
   DesktopCommandId,
   DesktopTitleBarTheme,
   DockerContainerInfo,
@@ -181,6 +183,8 @@ export const PlatformChannels = {
   ActivateOrSetWorkspace: "zcode:activate-or-set-workspace",
   /** 建立 SSH 远程连接 */
   ConnectRemote: "zcode:connect-remote",
+  /** 请求 provisioner 建沙箱并 attach（Plan A） */
+  ConnectSandbox: "zcode:connect-sandbox",
   /** 取消当前窗口正在进行中的远程连接 */
   CancelPendingRemoteConnection: "zcode:cancel-pending-remote-connection",
   /** Renderer → Main：绑定远程 logical session 的 canonical workspace context */
@@ -723,6 +727,10 @@ export interface PlatformChannelMap {
   [PlatformChannels.ConnectRemote]: {
     request: ConnectRemoteRequest;
     response: { success: boolean; error?: string; sessionId?: string };
+  };
+  [PlatformChannels.ConnectSandbox]: {
+    request: ConnectSandboxRequest;
+    response: ConnectSandboxResult;
   };
   [PlatformChannels.CancelPendingRemoteConnection]: {
     request: CancelPendingRemoteConnectionRequest;
