@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cloud Agent 目标架构流程图（决议⑧：host 本体 = 云服务端）</title>
+    <style>
+      :root {
+        --bg: #f6f7f9;
+        --card: #ffffff;
+        --line: #c8ccd4;
+        --ink: #1c1f26;
+        --muted: #5c6470;
+        --host: #2563eb;
+        --cloud: #7c3aed;
+        --sandbox: #0f766e;
+        --gh: #b45309;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 28px 24px 48px;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          14px/1.6 "PingFang SC",
+          "Microsoft YaHei",
+          "Noto Sans CJK SC",
+          system-ui,
+          sans-serif;
+      }
+      h1 {
+        font-size: 19px;
+        margin: 0 0 6px;
+      }
+      .sub {
+        color: var(--muted);
+        margin: 0 0 22px;
+        font-size: 13px;
+      }
+      .flow {
+        max-width: 900px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+      .node {
+        background: var(--card);
+        border: 1.5px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 14px;
+        text-align: center;
+        box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
+      }
+      .node .t {
+        font-weight: 600;
+      }
+      .node .d {
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      .row {
+        display: flex;
+        gap: 16px;
+        justify-content: center;
+        align-items: stretch;
+        width: 100%;
+      }
+      .group {
+        background: var(--card);
+        border: 1.5px dashed var(--line);
+        border-radius: 12px;
+        padding: 12px;
+        width: 100%;
+      }
+      .group > .cap {
+        text-align: center;
+        font-weight: 600;
+        margin-bottom: 10px;
+      }
+      .group.inner {
+        display: flex;
+        gap: 14px;
+        border: none;
+        background: transparent;
+        padding: 0;
+      }
+      .box {
+        flex: 1;
+        border: 1.5px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: var(--card);
+      }
+      .box.host {
+        border-color: var(--host);
+      }
+      .box.cloud {
+        border-color: var(--cloud);
+      }
+      .box h3 {
+        margin: 0 0 6px;
+        font-size: 14px;
+      }
+      .box.host h3 {
+        color: var(--host);
+      }
+      .box.cloud h3 {
+        color: var(--cloud);
+      }
+      .box ul {
+        margin: 0;
+        padding-left: 16px;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      .arrow {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        color: var(--muted);
+        font-size: 12.5px;
+        padding: 6px 0;
+      }
+      .arrow .line2 {
+        width: 6px;
+        height: 6px;
+        border-right: 2px solid var(--muted);
+        border-bottom: 2px solid var(--muted);
+        transform: rotate(45deg);
+        margin-top: 2px;
+      }
+      .n {
+        display: inline-flex;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #e8ecf3;
+        color: #334155;
+        font-size: 11.5px;
+        align-items: center;
+        justify-content: center;
+        margin-right: 4px;
+      }
+      .badge {
+        font-size: 11.5px;
+        padding: 1px 6px;
+        border-radius: 999px;
+        background: #eef2ff;
+        color: #3730a3;
+        margin-left: 6px;
+      }
+      .legend {
+        margin-top: 26px;
+        max-width: 900px;
+      }
+      .legend h2 {
+        font-size: 15px;
+        margin: 0 0 8px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 13px;
+        background: var(--card);
+      }
+      th,
+      td {
+        border: 1px solid var(--line);
+        padding: 6px 9px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: #eef1f5;
+        font-weight: 600;
+      }
+      .note {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin-top: 10px;
+      }
+      pre {
+        background: #0f172a;
+        color: #e2e8f0;
+        padding: 14px;
+        border-radius: 10px;
+        overflow: auto;
+        font-size: 12.5px;
+      }
+      details {
+        margin-top: 22px;
+      }
+      summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Cloud Agent 目标架构（决议⑧：云服务端 = 标准 ZCode host 本体 + cloud 叠加）</h1>
+    <p class="sub">
+      浏览器用两条语义不同的通道接同一个云服务端进程；账号域与执行域各有唯一所有者。对应
+      <code>specs/cloud-agent/00-overview.md §3</code> 与
+      <code>07-connection-architecture.md §3</code>。
+    </p>
+
+    <div class="flow">
+      <div class="node" style="min-width: 420px">
+        <div class="t">浏览器（Web / 手机浏览器，单用户部署）</div>
+        <div class="d">原 ZCode Web UI 原样复用：首页输入框、侧栏、会话、设置页</div>
+      </div>
+
+      <div class="row" style="max-width: 720px">
+        <div class="arrow" style="flex: 1">
+          <div><span class="n">1</span>host /ws?token=（lite-token，同源）</div>
+          <div class="line2"></div>
+        </div>
+        <div class="arrow" style="flex: 1">
+          <div><span class="n">2</span>/ws/cloud/tasks/:taskId</div>
+          <div class="line2"></div>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="cap">云服务端进程（ZCode 直接跑在服务器上，公网 origin，强制认证）</div>
+        <div class="group inner">
+          <div class="box host">
+            <h3>host 本体 <span class="badge">零改动</span></h3>
+            <ul>
+              <li>createLocalServices + HTTP/WS（同 entry-http.ts）</li>
+              <li>oauthService：官方模型登录 / Coding Plan</li>
+              <li>credentialService（加密凭据，数据目录 = 云持久卷）</li>
+              <li>settingService / usageStatsService / provider registry（模型目录）</li>
+              <li>providerProvisioningSource：导出账号事实</li>
+            </ul>
+          </div>
+          <div class="box cloud">
+            <h3>cloud 编排叠加层 <span class="badge">packages/server/src/cloud</span></h3>
+            <ul>
+              <li>Task / Run / 配额 / durable input outbox</li>
+              <li>projection ingest / 历史 / attachment registry</li>
+              <li>provider 生命周期（E2B / Modal / Daytona）</li>
+              <li>GitHub App：分支、PR、git-grant broker</li>
+              <li>持久库 cloud.db + 受控附件存储</li>
+            </ul>
+          </div>
+        </div>
+        <div class="arrow" style="padding-top: 10px">
+          <div>
+            <span class="n">3</span>host 本体 → 叠加层：providerProvisioningSource 组
+            envelope（账号态 或 静态 config 二选一）
+          </div>
+          <div class="line2"></div>
+        </div>
+      </div>
+
+      <div class="row" style="max-width: 760px">
+        <div class="arrow" style="flex: 1">
+          <div>
+            <span class="n">4</span>生命周期 adapter：create / inspect / extend / terminate<br />+
+            bootstrap（ticket、ref、envelope 经自举通道安装）
+          </div>
+          <div class="line2"></div>
+        </div>
+        <div class="arrow" style="flex: 1">
+          <div>
+            <span class="n">5</span>沙箱主动出站 WSS：/ws/cloud/bridge/:runId<br />（RPC 转接 +
+            结构化投影 ingest）
+          </div>
+          <div class="line2"></div>
+        </div>
+      </div>
+
+      <div class="group" style="border-style: solid; border-color: var(--sandbox)">
+        <div class="cap" style="color: var(--sandbox)">
+          每任务独占沙箱（run 代际 + connection epoch 双重围栏）
+        </div>
+        <div class="group inner">
+          <div class="box" style="border-color: var(--sandbox)">
+            <h3 style="color: var(--sandbox)">常驻 bridge / supervisor</h3>
+            <ul>
+              <li>网络 facade 与 stdio 生命周期分离</li>
+              <li>投影 WAL、断线重连、run-scoped 认证</li>
+            </ul>
+          </div>
+          <div class="box" style="border-color: var(--sandbox)">
+            <h3 style="color: var(--sandbox)">zcode-server + CLI runtime</h3>
+            <ul>
+              <li>与 SSH 模式同构：同一 stdio RPC、命令信封、provisioning 安装</li>
+              <li>CommandInbox：串行 admission、幂等、权限裁决</li>
+              <li>git grant 单次兑换（read/write 分权）</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="max-width: 760px">
+        <div class="arrow" style="flex: 1">
+          <div><span class="n">6</span>受控 push：checkpoint → taskBranch</div>
+          <div class="line2"></div>
+        </div>
+        <div class="arrow" style="flex: 1">
+          <div><span class="n">7</span>GitHub App API：分支 / PR / checks</div>
+          <div class="line2"></div>
+        </div>
+      </div>
+
+      <div class="node" style="min-width: 420px; border-color: var(--gh)">
+        <div class="t" style="color: var(--gh)">GitHub</div>
+        <div class="d">
+          taskBranch 与 draft PR（base=baseBranch，head=taskBranch）；产物唯一持久来源
+        </div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <h2>链路语义（与 spec 对应的硬边界）</h2>
+      <table>
+        <tr>
+          <th>#</th>
+          <th>链路</th>
+          <th>所有者 / 边界</th>
+        </tr>
+        <tr>
+          <td>1</td>
+          <td>浏览器 → host /ws</td>
+          <td>
+            账号域（登录、套餐、设置、模型目录）。web 模式同款服务通道，零新增装配；token
+            正文不进浏览器
+          </td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td>浏览器 → /ws/cloud/tasks/:taskId</td>
+          <td>
+            沙箱 attachment：按 capability 白名单代理执行域；无 secret read、无 provisioning
+            target、无本机 fallback
+          </td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td>host → cloud 叠加层</td>
+          <td>
+            run envelope：账号登录态（含套餐 <code>zhipu-account</code>）或静态
+            config，二选一互斥；白名单凭据
+          </td>
+        </tr>
+        <tr>
+          <td>4</td>
+          <td>cloud 叠加层 → 沙箱生命周期</td>
+          <td>
+            provider 是唯一生命周期 owner；创建用持久 operation 幂等键，结果未知走对账，不盲建第二个
+          </td>
+        </tr>
+        <tr>
+          <td>5</td>
+          <td>沙箱 → cloud 叠加层（出站 WSS）</td>
+          <td>
+            bridge 认证绑定 run/generation/epoch；投影 ingest 后才 ACK；断网只释放网络
+            facade，不等于 Agent 结束
+          </td>
+        </tr>
+        <tr>
+          <td>6</td>
+          <td>沙箱 → GitHub（受控 push）</td>
+          <td>git grant 单次兑换、60s、绑定 task/run/repo/purpose；只推 taskBranch</td>
+        </tr>
+        <tr>
+          <td>7</td>
+          <td>cloud 叠加层 → GitHub（App API）</td>
+          <td>App 私钥不出云服务端；PR/checks 由叠加层 effect worker 执行</td>
+        </tr>
+      </table>
+      <p class="note">
+        关键点：云服务端<strong>确实运行 host 本体</strong>（所以"禁本机"不是"不装配"），但<strong
+          >云任务与浏览器执行请求的落点只有沙箱 attachment</strong
+        >，部署机 host 执行域不构成任何隐式 fallback（03 §2）。
+      </p>
+
+      <details>
+        <summary>mermaid 源码（可直接粘进任意 mermaid 渲染器）</summary>
+        <pre>
+flowchart LR
+    subgraph Client[浏览器：Web / 手机浏览器]
+        B1[原 Web UI：登录 / 套餐 / 模型设置]
+        B2[原 Web UI：项目 / 任务 / 工作区]
+    end
+    subgraph Server[云服务端 = 标准 ZCode host 本体 + cloud 叠加，同一进程]
+        H[host 本体 createLocalServices&lt;br/&gt;oauth / credential / usage / setting / provider registry / provisioning source]
+        O[cloud 编排叠加层&lt;br/&gt;Task / Run / outbox / projection / GitHub / provider 生命周期]
+        DB[(cloud.db + 受控附件存储)]
+    end
+    B1 --&gt;|host /ws?token=，web 模式同款服务通道| H
+    B2 --&gt;|/ws/cloud/tasks/:taskId| O
+    H -.->|providerProvisioningSource 导出 envelope| O
+    O --&gt; DB
+    O --&gt;|生命周期 adapter| P[Sandbox Provider]
+    S[沙箱 bridge 与常驻 RPC supervisor] --&gt;|主动出站 WSS| O
+    S --&gt; R[远端 zcode-server]
+    R --&gt; A[CLI runtime / CommandInbox]
+    A --&gt;|受控 Git publication| G[GitHub 分支与 PR]
+    O --&gt;|GitHub App API| G</pre
+        >
+      </details>
+    </div>
+  </body>
+</html>

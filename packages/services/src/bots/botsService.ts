@@ -281,7 +281,7 @@ interface BotsServiceDeps {
   modelSelectionService: Pick<IModelSelectionService, "getView">;
   remoteWorkspaceService?: BotRemoteWorkspaceService;
   // 修复原因：desktop-attached 远端启动阶段不应抢跑 bot 轮询、runtime lock 和模型候选缓存；
-  // 这些后台任务属于本地桌面 host，不属于 SSH/Docker 远端首屏连接路径。
+  // 这些后台任务属于本地桌面 host，不属于 SSH 远端首屏连接路径。
   runStartupBackgroundTasks?: boolean;
 }
 

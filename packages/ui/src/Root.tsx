@@ -16,6 +16,9 @@ import { DirectoryBrowser } from "@/DirectoryBrowser.js";
 import { useTabPersistence } from "@/hooks/useTabPersistence.js";
 import { useTokenRefresh } from "@/hooks/useTokenRefresh.js";
 import { useWorkspaceServices } from "@/hooks/useWorkspaceServices.js";
+import { useCloudWorkspaceServices } from "@/hooks/cloud/useCloudWorkspaceServices.js";
+import { useCloudTaskTabOpener } from "@/hooks/cloud/useCloudTaskTabOpener.js";
+import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { SSHDialog } from "@/SSHDialog.js";
 import { SettingsPage } from "@/SettingsPage.js";
@@ -85,10 +88,6 @@ import {
 } from "@/v4/telemetry/ConversationTelemetryAttachment.js";
 
 const DEFAULT_LUCIDE_STROKE_WIDTH = 1.5;
-interface RemoteConnectionOpenPreference {
-  preferredKind?: RemoteTarget["kind"];
-  preferredWslDistro?: string;
-}
 
 type WelcomeScreenOpenReason =
   | "startup-provider-required"
@@ -229,8 +228,6 @@ function RootInner({
     [services.modelSelectionService],
   );
   const [remoteConnectionDialogOpen, setRemoteConnectionDialogOpen] = useState(false);
-  const [remoteConnectionOpenPreference, setRemoteConnectionOpenPreference] =
-    useState<RemoteConnectionOpenPreference | null>(null);
   const [directoryBrowserOpen, setDirectoryBrowserOpen] = useState(false);
   const [remoteConnectionInProgress, setRemoteConnectionInProgress] = useState(false);
   const [remoteConnectionRequestId, setRemoteConnectionRequestId] = useState<string | null>(null);
@@ -350,6 +347,7 @@ function RootInner({
     workspaceShellPath,
     workspaceIdentity: workspaceShellIdentity,
     workspaceRemoteSessionId: workspaceShellRemoteSessionId,
+    isCloudTaskWorkspace: isCloudWorkspaceShell,
   } = resolveRootWorkspaceShellTarget({
     activeWorkspaceTab,
     activeWorkspacePath,
@@ -357,11 +355,30 @@ function RootInner({
     // Settings 覆盖时仍使用被覆盖 tab 的完整远程身份，避免通知与侧栏建立重复订阅。
     workspaceTabs: windowWorkspaceTabs,
   });
+  // 云任务 run ready 前没有 checkout 路径（`workspaceShellPath` 为空串），外壳仍必须渲染：
+  // 草稿 composer 走原布局，执行类入口由 capability 门控成不可用（04 §3.0/§3.3）。
+  // 本地 / SSH / 已配对远控的路径非空，判据与之前完全等价。
+  //
+  // 云入口额外一条：**没有选中任何任务时也必须渲染外壳**。本地入口启动就会从
+  // `/api/server-info` 拿到初始工作区，所以"无工作区"分支从不触发；云模式按 04 §3.0
+  // 复用原 UI 且不挂该端点，于是 `hasWorkspaceShell=false` 会落到下面"渲染 null"的分支，
+  // 表现为引导页走完后整页空白（实测 rootHtmlLength 仅剩外壳包装：无报错、无异常，
+  // 只是没内容）。判据用 CloudWorkspaceProvider 是否存在，不用路径真值。
+  const isCloudEntry = useCloudWorkspaceContext() !== null;
+  const hasWorkspaceShell = Boolean(workspaceShellPath) || isCloudWorkspaceShell || isCloudEntry;
   const workspaceScopedServices = useWorkspaceServices(
     workspaceShellPath,
     workspaceShellRemoteSessionId,
     workspaceShellIdentity,
   );
+  // Cloud 服务作用域（specs/cloud-agent/04 §3.0/§4、W8 §3）：identity 为
+  // `cloud-task:<taskId>` 时，工作区服务由 CloudWorkspaceProvider 合成
+  // （host `/ws` base + 当前 Run attachment，无 attachment 时执行域显式不可用）。
+  // 非云身份返回 null，本机与已配对手机远控继续沿用上面那套解析，语义不变（W-13）。
+  // 判断只放在这一处，不把云分支塞进 useWorkspaceServices，避免影响 desktop-continuous
+  // 与 web-remote-replayable 两条既有链路。
+  const cloudWorkspaceServices = useCloudWorkspaceServices(workspaceShellIdentity);
+  const activeWorkspaceScopedServices = cloudWorkspaceServices ?? workspaceScopedServices;
 
   const localWorkspacePathForRemoteConnection = useTabStore((state) => {
     const activeTab = state.activeTabId
@@ -385,6 +402,29 @@ function RootInner({
   const addTab = useTabStore((state) => state.addTab);
   const activateTabByPath = useTabStore((state) => state.activateTabByPath);
   const tabStoreApi = useTabStoreApi();
+
+  // 深链 / 刷新恢复：主路由 `?task=<taskId>` 选中的云任务必须有自己的工作区 tab，
+  // 否则刷新后只会选中任务却看不到工作区（04 §5）。tab 已存在时是 no-op；
+  // 侧栏点击走的也是同一个 opener，两条路径不会开出第二个 tab（按 cloudTaskId 复用）。
+  const cloudSelectedTaskId = useCloudWorkspaceContext()?.selection.taskId ?? null;
+  const { openCloudTaskTab } = useCloudTaskTabOpener();
+  useEffect(() => {
+    if (!cloudSelectedTaskId) {
+      return;
+    }
+    const alreadyOpen = tabStoreApi
+      .getState()
+      .tabs.some((tab) => isWorkspaceTab(tab) && tab.cloudTaskId === cloudSelectedTaskId);
+    if (alreadyOpen) {
+      return;
+    }
+    void openCloudTaskTab(cloudSelectedTaskId).catch((error) => {
+      logger.warn("[Root] 从主路由恢复云任务工作区失败", {
+        taskId: cloudSelectedTaskId,
+        error,
+      });
+    });
+  }, [cloudSelectedTaskId, openCloudTaskTab, tabStoreApi]);
   const refreshProviderState = useRootProviderStateRefresh(services);
   useRootProviderSettingsSnapshot(services);
   useEffect(() => {
@@ -476,8 +516,7 @@ function RootInner({
 
   useBotBroadcastEffects(services, tabStoreApi);
 
-  const handleOpenRemoteConnection = useCallback((preference?: RemoteConnectionOpenPreference) => {
-    setRemoteConnectionOpenPreference(preference ?? null);
+  const handleOpenRemoteConnection = useCallback(() => {
     setRemoteConnectionDialogOpen(true);
   }, []);
   const handleOpenDirectoryBrowser = useCallback(() => {
@@ -521,7 +560,6 @@ function RootInner({
       setWelcomeScreenOpenReason("logout-provider-required");
     },
     userId: user?.id,
-    onOpenRemoteConnection: allowRemoteWorkspace ? handleOpenRemoteConnection : undefined,
   });
   const handleRemoteWorkspaceActivated = useCallback(
     ({
@@ -538,6 +576,7 @@ function RootInner({
 
   const {
     remoteWorkspaceSessions,
+    retiredRemoteWorkspaceEntries,
     reconnectingRemoteWorkspaceKeys,
     remoteWorkspaceErrorByWorkspaceKey,
     reconnectingRemoteWorkspaceLogsByWorkspaceKey,
@@ -754,7 +793,7 @@ function RootInner({
   const canEnterNativeThemeSyncSurface = Boolean(
     !isStartupRenderBlocked &&
     !welcomeScreenOpenReason &&
-    (workspaceShellPath || isSettingsTabActive),
+    (hasWorkspaceShell || isSettingsTabActive),
   );
 
   useEffect(() => {
@@ -790,7 +829,7 @@ function RootInner({
         isBootstrappingInitialWorkspace,
       }) ||
       isStartupProviderLoginEntryOpen ||
-      workspaceShellPath ||
+      hasWorkspaceShell ||
       isSettingsTabActive ||
       !allowOpenWorkspace ||
       didRequestFallbackWorkspaceRef.current
@@ -842,21 +881,21 @@ function RootInner({
     isRestoring,
     isSettingsTabActive,
     isStartupProviderLoginEntryOpen,
+    hasWorkspaceShell,
     services.fileService,
     setWorkspaceActionError,
     tabStoreApi,
-    workspaceShellPath,
   ]);
 
   useEffect(() => {
-    if (!workspaceShellPath) {
+    if (!hasWorkspaceShell) {
       return;
     }
 
     logger.info(
       `[Root] settings view ${isSettingsTabActive ? "open" : "closed"} workspace=${workspaceShellPath}`,
     );
-  }, [isSettingsTabActive, workspaceShellPath]);
+  }, [hasWorkspaceShell, isSettingsTabActive, workspaceShellPath]);
 
   useEffect(() => {
     if (!loginEntryRequest) {
@@ -875,7 +914,7 @@ function RootInner({
       await refreshAppSettings();
       if (
         welcomeScreenOpenReason !== "startup-provider-required" ||
-        workspaceShellPath ||
+        hasWorkspaceShell ||
         !allowOpenWorkspace
       ) {
         setWelcomeScreenOpenReason(null);
@@ -896,16 +935,13 @@ function RootInner({
     [
       allowOpenWorkspace,
       handleEnsureConversationWorkspace,
+      hasWorkspaceShell,
       refreshAppSettings,
       welcomeScreenOpenReason,
-      workspaceShellPath,
     ],
   );
   const handleRemoteConnectionDialogOpenChange = useCallback((open: boolean) => {
     setRemoteConnectionDialogOpen(open);
-    if (!open) {
-      setRemoteConnectionOpenPreference(null);
-    }
   }, []);
 
   const remoteConnectionDialog = allowRemoteWorkspace ? (
@@ -914,14 +950,12 @@ function RootInner({
       onSelectProject={handleSelectRemoteProject}
       onCancelSession={handleCancelRemoteProject}
       localWorkspacePath={localWorkspacePathForRemoteConnection}
-      isWindowsDesktop={isWindowsDesktop}
       remoteWorkspaceSessions={remoteWorkspaceSessions}
+      retiredRemoteWorkspaceEntries={retiredRemoteWorkspaceEntries}
       open={remoteConnectionDialogOpen}
       onOpenChange={handleRemoteConnectionDialogOpenChange}
       onFlowActiveChange={setRemoteConnectionInProgress}
       onFlowRequestIdChange={setRemoteConnectionRequestId}
-      preferredKind={remoteConnectionOpenPreference?.preferredKind}
-      preferredWslDistro={remoteConnectionOpenPreference?.preferredWslDistro}
       hideTriggerWhenClosed
     />
   ) : null;
@@ -991,7 +1025,7 @@ function RootInner({
   }
 
   if (
-    !workspaceShellPath &&
+    !hasWorkspaceShell &&
     !isDesktop &&
     initialWorkspaceAbsPath &&
     initialWorkspaceLoadingFallback
@@ -1014,12 +1048,12 @@ function RootInner({
       {directoryBrowserDialog}
       <OccupationOnboarding
         showWindowControls={Boolean(isWindowsDesktop || (isDesktop && !isMacDesktop))}
-        showChildrenWhileLoading={!workspaceShellPath && isSettingsTabActive}
+        showChildrenWhileLoading={!hasWorkspaceShell && isSettingsTabActive}
         isMacDesktop={isMacDesktop}
         isWindowsDesktop={isWindowsDesktop}
       >
         {/* 新引导属于应用级偏好；无项目时也要挂载，才能响应设置页的手动打开请求。 */}
-        {!workspaceShellPath ? (
+        {!hasWorkspaceShell ? (
           isSettingsTabActive ? (
             <ScopedErrorBoundary
               scope="settings-page"
@@ -1032,9 +1066,9 @@ function RootInner({
           ) : null
         ) : (
           <RootWorkspaceContent
-            workspaceScopedServices={workspaceScopedServices}
+            workspaceScopedServices={activeWorkspaceScopedServices}
             baseFeedbackService={services.feedbackService}
-            workspaceShellPath={workspaceShellPath}
+            workspaceShellPath={workspaceShellPath ?? ""}
             workspaceIdentity={workspaceShellIdentity}
             workspaceRemoteSessionId={workspaceShellRemoteSessionId}
             activeWorkspacePath={activeWorkspacePath}
@@ -1054,6 +1088,7 @@ function RootInner({
             handleCreateScratchWorkspace={handleCreateScratchWorkspace}
             remoteConnectionInProgress={remoteConnectionInProgress}
             remoteWorkspaceSessions={remoteWorkspaceSessions}
+            retiredRemoteWorkspaceEntries={retiredRemoteWorkspaceEntries}
             allowRemoteWorkspace={allowRemoteWorkspace}
             handleBackFromSettings={handleBackFromSettings}
             handleLogout={user ? handleLogout : undefined}
@@ -1074,7 +1109,7 @@ function RootInner({
         )}
         <ScopedErrorBoundary
           scope="onboarding-dialog"
-          resetKeys={[workspaceShellIdentity?.trim() || workspaceShellPath]}
+          resetKeys={[workspaceShellIdentity?.trim() || workspaceShellPath || "cloud-task"]}
           variant="silent"
         >
           <OnboardingDialog

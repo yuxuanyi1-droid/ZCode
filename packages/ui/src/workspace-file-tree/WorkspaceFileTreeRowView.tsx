@@ -20,7 +20,6 @@ import { useFileContextActions } from "@/hooks/useFileContextActions.js";
 import { usePlatform } from "@/hooks/usePlatform.js";
 import { FileDisplayIcon, resolveFileDisplayDescriptor } from "@/lib/fileDisplay.js";
 import { logger } from "@/logger.js";
-import { resolveWorkspaceFileManagerEditor } from "@/lib/workspaceEditorSelection.js";
 import { buildFileMentionMarkdown } from "@/mentions/mentionMarkdown.js";
 import {
   dispatchWorkspaceFileAddToChat,
@@ -104,7 +103,6 @@ export function WorkspaceFileTreeRowView({
   const relativePath = getWorkspaceFileRelativePath(workspacePath, row.path);
   const isDirectory = row.type === "directory";
   const isDeletedFile = isWorkspaceFileTreeDeletedFile(row, gitStatus);
-  const wslFileManagerEditor = resolveWorkspaceFileManagerEditor(installedEditors, remoteTarget);
   const rowStyle = {
     ...style,
     "--workspace-file-tree-depth": row.depth,
@@ -197,10 +195,6 @@ export function WorkspaceFileTreeRowView({
     onOpenBrowserUrl?.(url);
   };
   const handleRevealInFileManager = async () => {
-    if (wslFileManagerEditor) {
-      await handleOpenInEditor(wslFileManagerEditor);
-      return;
-    }
     await fileActions.revealInFileManager({
       path: row.path,
       deleted: isDeletedFile,
@@ -329,10 +323,10 @@ export function WorkspaceFileTreeRowView({
       ) : null}
     </div>
   );
-  // 普通远程路径不能交给本机文件管理器，但 WSL Explorer 会在 main 边界
-  // 转成 UNC；因此它和“打开方式 → 资源管理器”必须共享相同的可用性与执行路径。
+  // 远端（SSH）路径不能交给本机文件管理器；WSL 的 Explorer UNC 边界已随目标退役删除，
+  // “在文件管理器中显示”只在本地文件树可用。
   const canRevealInFileManager =
-    (!isDeletedFile && Boolean(wslFileManagerEditor)) ||
+    !isDeletedFile &&
     fileActions.canRevealInFileManager({
       path: row.path,
       deleted: isDeletedFile,

@@ -15,13 +15,9 @@ import { buildWriteLiteralFileCommand } from "@zcode/server/remote/posixShell.js
 import { deployDevelopmentZCodeAgentRuntime } from "@zcode/server/remote/zcodeAgentDevDeploy.js";
 import {
   buildRemoteAgentBundleWrapper,
-  isRemoteAgentBundleWrapperCurrent,
   REMOTE_AGENT_BUNDLE_NAME,
 } from "@zcode/server/remote/zcodeAgentBundleWrapper.js";
-import {
-  deployRemoteAgentWrapper,
-  isWslBackend,
-} from "@zcode/server/remote/zcodeAgentWrapperDeploy.js";
+import { deployRemoteAgentWrapper } from "@zcode/server/remote/zcodeAgentWrapperDeploy.js";
 import {
   buildRemoteAgentOfficialPluginDir,
   buildRemoteAgentOfficialPluginRequiredPaths,
@@ -94,20 +90,6 @@ async function shouldSkipZCodeAgentDeploy(params: {
       `[remote-assets] ${params.installer.mode === "remote-download" ? "download required" : "upload required"}: component=${params.componentId} reason=remote wrapper missing path=${params.remoteBinaryPath}`,
     );
     return false;
-  }
-
-  if (isWslBackend(params.backend)) {
-    try {
-      const remoteWrapper = await params.backend.readFile(params.remoteBinaryPath);
-      if (!isRemoteAgentBundleWrapperCurrent(remoteWrapper, params.runtimeResourceDir)) {
-        params.loggers.logWarn(
-          `[remote-assets] ${params.installer.mode === "remote-download" ? "download required" : "upload required"}: component=${params.componentId} reason=wsl wrapper stale path=${params.remoteBinaryPath}`,
-        );
-        return false;
-      }
-    } catch {
-      return false;
-    }
   }
 
   // wrapper 在、但 zcode.cjs 缺失（被清理 / 旧原生二进制部署残留）时也要重新部署。
@@ -256,7 +238,7 @@ export async function deployZCodeAgentRuntime(
     });
 
   if (permissionRepairSucceeded) {
-    // 1) 正常路径保持原部署顺序，避免改变健康 SSH / Docker / WSL 的时序语义。
+    // 1) 正常路径保持原部署顺序，避免改变健康 SSH 远端的时序语义。
     await installBundle();
     // 2) 安装随 agent bundle 发布的官方插件源资源，供远端 agent bootstrap seed builtin plugin。
     await installOfficialPluginPackages();

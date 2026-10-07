@@ -418,7 +418,7 @@ export async function deployServer(
   if (options?.deployLockMode === "caller-serialized") {
     // 桌面 SSH 已由窗口级 shared Host readiness 保证同一 target 只有一个部署事务；
     // 若仍创建 remote lock-holder，会为无额外互斥收益的路径长期占用 SSH channel。
-    // 该模式必须由已具备 single-flight 的调用方显式注入，WSL/Docker 和其他调用继续默认远端锁。
+    // 该模式必须由已具备 single-flight 的调用方显式注入，其他调用继续默认远端锁。
     return deployUsingCurrentRemoteState();
   }
 
@@ -436,7 +436,7 @@ export async function deployServer(
   });
   let deployOutcome: { ok: true; value: boolean } | { ok: false; error: unknown };
   try {
-    // 进程内 WSL single-flight 无法覆盖不同 Desktop/build/backend。
+    // 进程外并发（多个 Desktop/build 同时部署同一远端）无法靠进程内 single-flight 覆盖。
     // 获得远端 install-root lock 后必须重新检查，等待者不能按过期判断重复覆盖部署目录。
     deployOutcome = {
       ok: true,
@@ -646,8 +646,8 @@ async function resolveReleaseDir(
       return mockReleaseDir;
     }
 
-    // WSL/SSH 开发态可能只有版本目录，但缺当前远端平台的具体组件
-    // （例如 Windows 侧 mock-cdn 只有 linux-arm64，却连接 linux-x64 WSL）。
+    // SSH 开发态可能只有版本目录，但缺当前远端平台的具体组件
+    // （例如 Windows 侧 mock-cdn 只有 linux-arm64，却连接 linux-x64 远端）。
     // 直接返回 mock 目录会在上传阶段报 local remote asset not found；
     // 有 CDN/cache 时应按组件回退到完整缓存，没有回退源时保留原错误指向缺失文件。
     loggers.logWarn(

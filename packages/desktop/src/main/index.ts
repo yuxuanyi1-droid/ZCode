@@ -146,10 +146,7 @@ import {
 import { resolveZCodeBuiltinProviderConfigFilePath } from "./desktopProviderConfig.js";
 import {
   getCredentialsDir,
-  isDockerDaemonAvailable,
   listSSHConfigAliases,
-  listAvailableDockerContainers,
-  listAvailableWSLDistros,
   loadHostProcessEnvFromLocalFiles,
   resolveBundledGlmBinaryPath,
   resolveRemoteAssetDirs,
@@ -192,7 +189,6 @@ import {
   reportRemoteDisconnectToArms,
   stopRemoteUsageArmsPeriodicSampling,
 } from "./desktopRemoteUsageArmsTelemetry.js";
-import { resolveCanonicalWslTarget } from "./desktopWslTargetResolver.js";
 import {
   listRegisteredHostAgentProcessIds,
   setBrowserUseGuestWebContentsIdsProvider,
@@ -783,7 +779,6 @@ const remoteSessionManager = createRemoteWorkspaceSessionManager({
   windowHostProcessMap,
   resolveRemoteAssetDirs: () =>
     resolveRemoteAssetDirs({ locale: currentApplicationLocale }, hostProcessLocalEnv),
-  resolveWslTarget: resolveCanonicalWslTarget,
   reportRemoteConnectionStateChanged: reportRemoteConnectionStateChangedToArms,
   reportRemoteDisconnect: reportRemoteDisconnectToArms,
 });
@@ -2187,9 +2182,6 @@ app.whenReady().then(async () => {
       remoteSessionManager.cancelPendingRemoteWorkspaceSessionsForWindow,
     bindRemoteWorkspaceSessionContext: remoteSessionManager.bindRemoteWorkspaceSessionContext,
     confirmRendererAttachmentReady: remoteSessionManager.confirmRendererAttachmentReady,
-    isDockerDaemonAvailable,
-    listAvailableWSLDistros,
-    listAvailableDockerContainers,
     listSSHConfigAliases,
   });
 

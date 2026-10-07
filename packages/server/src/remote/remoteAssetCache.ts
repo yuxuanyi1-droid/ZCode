@@ -1551,7 +1551,7 @@ async function renameRemoteAssetDirectoryWithRetry(from: string, to: string): Pr
 
       // Windows 上 AppData remote-assets-cache 目录 rename 可能被 Defender、索引器
       // 或另一个刚退出的 host 进程短暂占用，表现为 EPERM/EBUSY/EACCES/ENOTEMPTY。
-      // 提权不能释放这些文件句柄，因此这里对目录提交做有限退避重试，避免缓存已下载完成却连接 WSL 失败。
+      // 提权不能释放这些文件句柄，因此这里对目录提交做有限退避重试，避免缓存已下载完成却连接失败。
       await sleep(retryDelayMs);
     }
   }

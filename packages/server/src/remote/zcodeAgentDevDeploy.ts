@@ -19,13 +19,8 @@ import {
 import { createTarGzArchive } from "@zcode/server/remote/localTarGz.js";
 import {
   buildRemoteAgentBundleWrapper,
-  isRemoteAgentBundleWrapperCurrent,
   REMOTE_AGENT_BUNDLE_NAME,
 } from "@zcode/server/remote/zcodeAgentBundleWrapper.js";
-import {
-  deployRemoteAgentWrapper,
-  isWslBackend,
-} from "@zcode/server/remote/zcodeAgentWrapperDeploy.js";
 import {
   REMOTE_AGENT_OFFICIAL_PLUGIN_DIR_NAME,
   REMOTE_AGENT_OFFICIAL_PLUGIN_INCLUDED_TOP_LEVEL_PATHS,
@@ -221,17 +216,6 @@ async function shouldSkipDevelopmentZCodeAgentDeploy(params: {
     return false;
   }
 
-  if (isWslBackend(params.backend)) {
-    try {
-      const remoteWrapper = await params.backend.readFile(params.remoteBinaryPath);
-      if (!isRemoteAgentBundleWrapperCurrent(remoteWrapper, params.runtimeResourceDir)) {
-        return false;
-      }
-    } catch {
-      return false;
-    }
-  }
-
   if (!(await params.backend.exists(params.remoteBundlePath))) {
     return false;
   }
@@ -412,24 +396,14 @@ export async function deployDevelopmentZCodeAgentRuntime(
     buildWriteLiteralFileCommand(remoteDevVersionFile, devVersion),
     buildWriteLiteralFileCommand(params.remoteVersionFile, params.runtimeVersion),
   ];
-  let markerStream;
-  if (isWslBackend(backend)) {
-    await deployRemoteAgentWrapper({
-      backend,
-      content: wrapperContent,
-      remoteWrapperPath: params.remoteBinaryPath,
-    });
-    markerStream = await backend.exec(markerCommands.join(" && "));
-  } else {
-    const remoteWrapperTempPath = `${params.remoteBinaryPath}.new`;
-    markerStream = await backend.exec(
-      [
-        buildWriteLiteralFileCommand(remoteWrapperTempPath, wrapperContent),
-        buildRemoteExecutableReplaceCommand(remoteWrapperTempPath, params.remoteBinaryPath),
-        ...markerCommands,
-      ].join(" && "),
-    );
-  }
+  const remoteWrapperTempPath = `${params.remoteBinaryPath}.new`;
+  const markerStream = await backend.exec(
+    [
+      buildWriteLiteralFileCommand(remoteWrapperTempPath, wrapperContent),
+      buildRemoteExecutableReplaceCommand(remoteWrapperTempPath, params.remoteBinaryPath),
+      ...markerCommands,
+    ].join(" && "),
+  );
   await waitForClose(markerStream);
   loggers.log(
     `[zcode-agent-deploy] ${ZCODE_AGENT_PROVIDER}: 开发态部署完成 ${devVersion.slice(0, 12)}`,

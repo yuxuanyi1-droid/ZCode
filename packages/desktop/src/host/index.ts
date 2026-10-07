@@ -37,7 +37,6 @@ import {
   IMediaPreviewService,
   IOffPeakTaskService,
   IModelSelectionService,
-  ISettingService,
   IWindowControllerService,
   IConversationShareService,
   IZCodeAgentService,
@@ -296,7 +295,7 @@ const remoteConnectionProgressContext = createRemoteConnectionProgressContext({
         message: args.map((arg) => stringifyHostLogArg(arg)).join(" "),
       });
     } catch {
-      // 连接进度上报失败不应中断 SSH/WSL/Docker 的真实连接流程。
+      // 连接进度上报失败不应中断 SSH 的真实连接流程。
     }
   },
 });
@@ -1137,7 +1136,6 @@ const workspaceTaskTracker = createHostWorkspaceTaskTracker((event) => {
     type: HostResponseTypes.WorkspaceRunningTaskCountChanged,
     ...event,
   });
-  windowRemoteConnectionRegistry.setWorkspaceRunningTaskCount(event);
   reportHostRunningTaskCount();
 });
 
@@ -1546,17 +1544,8 @@ function logRpc(message: string, ...args: unknown[]): void {
 }
 
 function formatRemoteTargetForLog(target: RemoteTarget): string {
-  switch (target.kind) {
-    case "ssh":
-      return `ssh:${target.username}@${target.host}:${target.port ?? 22}`;
-    case "wsl": {
-      const user = target.user?.trim();
-      const distro = target.distro ?? "default";
-      return user ? `wsl:${distro}:${user}` : `wsl:${distro}`;
-    }
-    case "docker":
-      return `docker:${target.container}`;
-  }
+  // 远端目标收敛为 SSH（Docker/WSL 已退役，specs/cloud-agent/06 §3.1）。
+  return `ssh:${target.username}@${target.host}:${target.port ?? 22}`;
 }
 
 console.log = (...args: unknown[]) => {
@@ -1606,29 +1595,6 @@ function requireActiveHostApiNetworkTransport(): HostApiNetworkTransport {
   return activeHostApiNetworkTransport;
 }
 
-async function resolveDesktopRemoteRuntimeNetwork(
-  target: RemoteTarget,
-): Promise<RemoteRuntimeNetworkOptions | undefined> {
-  if (target.kind !== "wsl") {
-    return undefined;
-  }
-  const settingService = activeServices?.getOptional(ISettingService);
-  if (!settingService) {
-    return undefined;
-  }
-  try {
-    const settings = await settingService.get();
-    return {
-      authoritative: true,
-      httpProxy: settings.httpProxy,
-      noProxy: settings.httpProxyNoProxy,
-    };
-  } catch {
-    // 设置读取失败时保留原有远程连接行为，不让网络增强把 WSL 工作区直接阻断。
-    return undefined;
-  }
-}
-
 async function disposeHostRemoteConnection(connection: HostRemoteConnection): Promise<void> {
   await connection.disposeAndWait({ timeoutMs: 5_000 });
 }
@@ -1653,10 +1619,10 @@ async function createWindowRemoteConnectionHandle(params: {
     params.target,
     params.remoteAssets,
     { fetch: requireActiveHostApiNetworkTransport().fetch },
-    await resolveDesktopRemoteRuntimeNetwork(params.target),
+    undefined,
     (exitCode) => notifyClose({ exitCode, signal: null }),
-    params.target.kind === "ssh" ? "caller-serialized" : "remote",
-    params.target.kind === "ssh" ? params.signal : undefined,
+    "caller-serialized",
+    params.signal,
   );
 
   if (params.signal.aborted) {
@@ -1709,7 +1675,7 @@ async function createWindowRemoteConnectionHandle(params: {
   let disposed = false;
   // 远端 workspace 的 CLI 与 MCP 样本走与本地同一条路径：远端 zcode-server → 本地 Host → main。
   // 订阅寿命等于这份远端 services 的寿命：由 connection handle 持有，registry 释放 entry
-  // （WSL idle 回收、最后一个 logical session 关闭、掉线后的 session 清理）时随 dispose 一起收口。
+  // （最后一个 logical session 关闭、掉线后的 session 清理）时随 dispose 一起收口。
   const resourceTelemetry = registerHostServiceResourceTelemetry({
     services,
     postMessage: (message) => parentPort?.postMessage(message),
@@ -1763,22 +1729,6 @@ const windowRemoteConnectionRegistry = createWindowRemoteConnectionRegistry<
 >({
   connect: (request) => createWindowRemoteConnectionHandle(request),
   createId: randomUUID,
-  releaseWorkspace: async (services, context) => {
-    await services.get(IZCodeTaskService).releaseWorkspacePreparation({
-      workspacePath: context.workspacePath,
-      ...(context.workspaceIdentity ? { workspaceIdentity: context.workspaceIdentity } : {}),
-      provider: "glm",
-    });
-    logger.info(
-      `released WSL workspace runtime, workspaceKey=${context.workspaceIdentity?.trim() || context.workspacePath}`,
-    );
-  },
-  onWorkspaceReleaseError: (context, error) => {
-    logger.warn(
-      `failed to release WSL workspace runtime, workspaceKey=${context.workspaceIdentity?.trim() || context.workspacePath}`,
-      error,
-    );
-  },
   onSessionClosed: (event) => {
     // logical session 已离线时 attachment 仍持有旧 services/订阅；后续 sessionId
     // 换代只释放 transport，无法按旧 ID 找回这些端口。Host 在失效源头统一关闭所有 clientMode。
@@ -2741,7 +2691,7 @@ parentPort.on("message", async (e: Electron.MessageEvent) => {
     }
     try {
       if (msg.scope.kind === "remote") {
-        // Bind 与 Attach 共用 parentPort，但 WSL 上一代 workspace release 可能仍在途。
+        // Bind 与 Attach 共用 parentPort，但同一 remoteSessionId 的上一代 attachment 可能仍在途。
         // 持有已转移 port 等待 Host 内 generation barrier，避免新 attachment 踩过旧 runtime 清理。
         await windowRemoteConnectionRegistry.waitForScopedServices(msg.scope);
       }
@@ -2952,7 +2902,7 @@ async function setupRemoteConnection(
     remoteAssetNetwork,
     remoteRuntimeNetwork,
     signal,
-    // SSH/Docker 远端 server 由 host process 单独启动，不能依赖桌面 main 的环境继承。
+    // SSH 远端 server 由 host process 单独启动，不能依赖桌面 main 的环境继承。
     // 这里显式透传编译期版本，避免漏导入后生成裸 ZCODE_VERSION 引用导致 SSH 初始化直接 ReferenceError。
     appVersion: ZCODE_VERSION,
     // 远端 zcode-server/agent 是独立进程，不能继承 host 里的测试/生产 endpoint 选择。

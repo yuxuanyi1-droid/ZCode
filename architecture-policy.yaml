@@ -31,6 +31,27 @@ modules:
     layers: { domain: domain, app: app, adapters: adapters }
     layerOrder: [domain, app, adapters]
     owner: desktop-settings
+  - id: cloud-control-plane
+    # Cloud 控制面（specs/cloud-agent/03 §2、W0）：云服务端内的 cloud 编排叠加层
+    # （Task/Run/输入接受/投递记录/投影副本）。只经公开契约对外；子模块
+    # cloud-execution 是更深 root，按最深归属。server：复用 remote/ 既有远端连接原语。
+    roots: [packages/server/src/cloud]
+    managed: true
+    requires: [shared, rpc, services, server, cloud-execution]
+    publicEntrypoints: [packages/server/src/cloud/contract.ts]
+    layers: { domain: domain, app: app, adapters: adapters }
+    layerOrder: [domain, app, adapters]
+    owner: cloud-control-plane
+  - id: cloud-execution
+    # 沙箱执行节点 bridge 子模块（specs/cloud-agent/00 §8、02 §1）：独立 domain/app/
+    # adapters、独立公开契约与构建入口；依赖父模块只走 cloud-control-plane 公开入口。
+    roots: [packages/server/src/cloud/execution]
+    managed: true
+    requires: [shared, rpc, services, server, cloud-control-plane]
+    publicEntrypoints: [packages/server/src/cloud/execution/contract.ts]
+    layers: { domain: domain, app: app, adapters: adapters }
+    layerOrder: [domain, app, adapters]
+    owner: cloud-control-plane
   - id: client
     roots: [packages/client/src]
     managed: false

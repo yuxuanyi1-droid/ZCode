@@ -52,7 +52,17 @@ export default defineConfig({
   onSuccess: async () => {
     await stageThirdPartyNotices(resolve(import.meta.dirname, "dist"));
   },
-  entry: { "entry-http": "src/entry-http.ts" },
+  // 三个独立产物：
+  // - entry-http：既有本地/standalone web 入口；
+  // - entry-cloud：云入口（host 本体 + cloud 叠加，specs/cloud-agent W5）；
+  // - storageWorkerMain：云控制面的 storage 子进程入口，必须独立成文件——W2 的
+  //   `storageTransport` 默认按「与自身同目录、同扩展名的 storageWorkerMain」解析，
+  //   入口名保持一致才能让打包产物开箱可用（否则需 workerEntryPath 覆盖）。
+  entry: {
+    "entry-http": "src/entry-http.ts",
+    "entry-cloud": "src/cloud/adapters/entry-cloud-main.ts",
+    storageWorkerMain: "src/cloud/adapters/storage/storageWorkerMain.ts",
+  },
   outDir: "dist",
   format: "esm",
   platform: "node",
@@ -73,4 +83,9 @@ export default defineConfig({
   define: createSharedDefines(),
   // esbuild 不认识 tsconfig.json 里的 es2025，用专门的 tsconfig.build.json 消除 warning
   tsconfig: "tsconfig.build.json",
+  // tsup 默认把 `node:xxx` 前缀剥成裸模块名（`removeNodeProtocol: true`）。这会让
+  // 只以 `node:` 形式存在的内置模块在 ESM 产物里解析失败——云控制面的 storage worker
+  // 子进程入口正是这种（`node:sqlite`，Node 22.5+），剥前缀后 `node dist/storageWorkerMain.js`
+  // 直接 ERR_MODULE_NOT_FOUND。运行时要求 Node ≥22，保留前缀是安全的。
+  removeNodeProtocol: false,
 });

@@ -404,7 +404,7 @@ export class LocalUploadAssetInstaller implements RemoteAssetInstaller {
       await waitForClose(stream);
     } catch (error) {
       // 文件替换失败时必须清理当前 owner 的 `.new-*` 文件，否则
-      // Docker 非 root 场景会把 chmod 失败的宿主 owner 文件长期留在远端。
+      // 远端非 root 场景会把 chmod 失败的宿主 owner 文件长期留在远端。
       // 取消路径可能已经释放 backend，不能用旧凭据再次 cleanup；由后续 janitor 回收。
       if (!this.options.signal?.aborted) {
         await cleanupRemoteStaging();

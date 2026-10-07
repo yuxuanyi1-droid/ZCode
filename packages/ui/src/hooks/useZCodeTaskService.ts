@@ -294,9 +294,20 @@ export function useZCodeTaskService(
   workspaceIdentity?: string | null,
 ): IZCodeTaskService {
   // ZCode task 服务按 workspace 身份解析，保证所有 task RPC 都落到对应的 host。
-  const services = workspacePath
-    ? useWorkspaceServices(workspacePath, preferredRemoteSessionId, workspaceIdentity)
-    : useServices();
+  //
+  // 修复：hook 调用必须恒定。原写法 `workspacePath ? useWorkspaceServices(...) : useServices()`
+  // 两条分支的 hook 数量不同（`useWorkspaceServices` 会读 tab / remote session store，十来个 slot；
+  // `useServices` 只读 context，没有 slot）。云任务在 run ready 前 workspaceShellPath 是空串，
+  // ready 后同一 tab 换成真实 checkout 路径（`rootWorkspaceShellTarget.ts`），已挂载的组件会在两次
+  // 渲染间切换分支，后面的 hook 全部错位，zustand `useStore` 读到上一轮别的 hook 状态后抛 TypeError。
+  // 条件只决定取哪份 services，hook 一律照常调用。
+  const contextServices = useServices();
+  const workspaceServices = useWorkspaceServices(
+    workspacePath ?? null,
+    preferredRemoteSessionId,
+    workspaceIdentity,
+  );
+  const services = workspacePath ? workspaceServices : contextServices;
   const rawService = services.zcodeTaskService;
   if (!rawService || typeof rawService !== "object") {
     return rawService;

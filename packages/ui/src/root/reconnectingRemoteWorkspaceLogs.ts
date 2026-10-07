@@ -11,26 +11,12 @@ function sanitizeRemoteWorkspaceReconnectLogLabelSegment(value: string): string 
   return value.replace(/[^\w.-]+/g, "-");
 }
 
-function getRemoteWorkspaceReconnectLogTargetSuffix(
-  target: RemoteWorkspaceSessionEntry["target"],
-): string {
-  switch (target.kind) {
-    case "ssh":
-      return target.host;
-    case "wsl": {
-      const user = target.user?.trim();
-      const distro = target.distro ?? "default";
-      return user ? `${distro}-${user}` : distro;
-    }
-    case "docker":
-      return target.container;
-  }
-}
-
 function buildRemoteWorkspaceReconnectLogLabelPrefix(
   target: RemoteWorkspaceSessionEntry["target"],
 ): string {
-  return `remote-workspace-${target.kind}-${sanitizeRemoteWorkspaceReconnectLogLabelSegment(getRemoteWorkspaceReconnectLogTargetSuffix(target))}-`;
+  // 远端目标收敛为 SSH：旧 WSL/Docker 前缀已不可能出现在新的重连日志里，
+  // 旧日志仍按 requestId 精确路由（缺少 requestId 的旧记录放弃猜测）。
+  return `remote-workspace-${target.kind}-${sanitizeRemoteWorkspaceReconnectLogLabelSegment(target.host)}-`;
 }
 
 export function resolveRemoteWorkspaceReconnectLogWorkspaceKeys({

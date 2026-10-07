@@ -3140,7 +3140,7 @@ export function createZCodeAgentService(
   // 真实 workspace 生命周期被 watchdog 回收；getOrStartReadOnlyClient 反而会把这个合成 workspace
   // 塞进 activeClientsByWorkspaceKey 并跑一遍交互偏好同步，污染会话 client map。两条路径都在本机，
   // homedir() 即用户家目录，全局根 `~/.zcode/workflows/` 因此解析到真实目录。
-  // 远程 runtime（SSH/WSL identity 或带 remoteSessionId）的 home 不是本机，绝不选它当载体。
+  // 远程 runtime（SSH identity 或带 remoteSessionId）的 home 不是本机，绝不选它当载体。
   function isLocalActiveWorkspaceClient(workspace: ZCodeAgentWorkspaceTarget): boolean {
     return (
       !workspace.remoteSessionId &&
@@ -5499,7 +5499,7 @@ export function createZCodeAgentService(
       const topic = sessionsIndexTopic(resolveWorkspaceKey(params));
       // 3.3.6 的 CLI session 未写 remote workspace_id，但同版本 host task index
       // 已按完整 identity 隔离。升级时必须用当前 workspaceKey 下的 taskId 作归属证明；
-      // 禁止只把 workspacePath 传给 CLI，否则同路径不同 SSH/WSL authority 会互相认领历史。
+      // 禁止只把 workspacePath 传给 CLI，否则同路径不同 SSH authority 会互相认领历史。
       let legacyTaskIds: string[] = [];
       if (supportsLegacyRemoteTaskAllowlist(params.workspaceIdentity)) {
         try {

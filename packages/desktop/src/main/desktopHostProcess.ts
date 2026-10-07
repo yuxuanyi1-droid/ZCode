@@ -95,7 +95,7 @@ interface SpawnHostProcessOptions {
     onHostId?: (hostId: string) => void;
   };
   onPortReady?: (port: MessagePortMain) => void;
-  /** 共享 SSH/WSL Host 初始化时不创建特殊的首个 workspace RPC port。 */
+  /** 共享 SSH Host 初始化时不创建特殊的首个 workspace RPC port。 */
   attachInitialServicePort?: boolean;
 }
 
@@ -565,7 +565,6 @@ export function spawnHostProcess(
       });
       return;
     }
-
 
     if (result.data.type === HostResponseTypes.BotRemoteWorkspaceReconnectRequest) {
       const request = result.data;

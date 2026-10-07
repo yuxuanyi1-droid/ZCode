@@ -1,14 +1,13 @@
-/* eslint-disable max-lines -- 远程连接向导的多个步骤暂集中在同一文件，避免拆分时扩大 SSH/Docker/WSL 回归面。 */
+/* eslint-disable max-lines -- 远程连接向导的多个步骤暂集中在同一文件，避免拆分时扩大 SSH 回归面。 */
 import { useState } from "react";
 import type {
-  DockerContainerInfo,
   RemoteAssetInstallMode,
   RemoteTarget,
   RemoteWorkspaceSessionEntry,
+  RetiredRemoteWorkspaceEntry,
   SSHConfigAliasOption,
-  WSLDistro,
 } from "@zcode/shared";
-import { TID_REMOTE_KIND_DOCKER, TID_REMOTE_KIND_SSH, TID_REMOTE_KIND_WSL } from "@zcode/shared";
+import { TID_REMOTE_KIND_SSH } from "@zcode/shared";
 import type {
   IMcpSyncService,
   IPluginSyncService,
@@ -16,14 +15,7 @@ import type {
   ISkillSyncService,
   IZCodeAgentService,
 } from "@zcode/services";
-import {
-  AlertTriangleIcon,
-  ChevronRightIcon,
-  LoaderIcon,
-  MonitorCogIcon,
-  ServerIcon,
-  TerminalIcon,
-} from "lucide-react";
+import { AlertTriangleIcon, ChevronRightIcon, LoaderIcon, ServerIcon } from "lucide-react";
 import { DirectoryBrowser } from "@/DirectoryBrowser.js";
 import { RemoteConnectionFields } from "@/RemoteConnectionFields.js";
 import type { SSHAuthMethod } from "@/hooks/useRemoteConnectionForm.js";
@@ -37,27 +29,15 @@ import {
 } from "@/settings/RemoteSyncActions.js";
 export { RemoteConnectionConnectingStep } from "@/remote-connection/RemoteConnectionConnectingStep.js";
 
-function getKindIcon(kind: RemoteTarget["kind"]) {
-  switch (kind) {
-    case "ssh":
-      return ServerIcon;
-    case "docker":
-      return MonitorCogIcon;
-    case "wsl":
-      return TerminalIcon;
-  }
-}
-
+/**
+ * 连接方式步骤只保留 SSH。Docker/WSL 目标已退役
+ * （specs/cloud-agent/06 §3.1）：它们不再作为可选连接方式出现，
+ * Cloud provider 选择保留在任务创建流程，不进入该向导。
+ */
 export function RemoteConnectionKindStep({
-  kind,
-  availableKinds,
-  onKindChange,
   onCancel,
   onNext,
 }: {
-  kind: RemoteTarget["kind"];
-  availableKinds: RemoteTarget["kind"][];
-  onKindChange: (value: RemoteTarget["kind"]) => void;
   onCancel: () => void;
   onNext: () => void;
 }) {
@@ -66,52 +46,24 @@ export function RemoteConnectionKindStep({
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-6 h-full">
       <div className="flex-1 min-h-0 grid content-start gap-3 md:grid-cols-2">
-        {availableKinds.map((value) => {
-          const Icon = getKindIcon(value);
-          const selected = kind === value;
-
-          return (
-            <button
-              key={value}
-              type="button"
-              onClick={() => onKindChange(value)}
-              data-testid={
-                value === "ssh"
-                  ? TID_REMOTE_KIND_SSH
-                  : value === "wsl"
-                    ? TID_REMOTE_KIND_WSL
-                    : TID_REMOTE_KIND_DOCKER
-              }
-              className={cn(
-                "flex min-h-32 flex-col items-start gap-4 rounded-2xl border p-4 text-left transition-colors",
-                selected
-                  ? "border-border-hover bg-selected"
-                  : "border-border bg-card hover:border-border-hover hover:bg-surface",
-              )}
-            >
-              <div
-                className={cn(
-                  "flex size-10 items-center justify-center rounded-xl border",
-                  selected
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-border bg-background-alt text-foreground-subtle",
-                )}
-              >
-                <Icon className="size-5" />
-              </div>
-              <div className="min-w-0 space-y-1">
-                <p className="text-ui-lg font-medium text-foreground">
-                  {intl.formatMessage({ id: `remote.kind.${value}` })}
-                </p>
-                <p className="text-ui-base leading-5 text-foreground-subtle">
-                  {intl.formatMessage({
-                    id: `remote.kind.${value}.wizardDescription`,
-                  })}
-                </p>
-              </div>
-            </button>
-          );
-        })}
+        <div
+          data-testid={TID_REMOTE_KIND_SSH}
+          className="flex min-h-32 flex-col items-start gap-4 rounded-2xl border border-border-hover bg-selected p-4 text-left"
+        >
+          <div className="flex size-10 items-center justify-center rounded-xl border border-primary bg-primary text-primary-foreground">
+            <ServerIcon className="size-5" />
+          </div>
+          <div className="min-w-0 space-y-1">
+            <p className="text-ui-lg font-medium text-foreground">
+              {intl.formatMessage({ id: "remote.kind.ssh" })}
+            </p>
+            <p className="text-ui-base leading-5 text-foreground-subtle">
+              {intl.formatMessage({
+                id: "remote.kind.ssh.wizardDescription",
+              })}
+            </p>
+          </div>
+        </div>
       </div>
 
       <div className="flex gap-3 justify-end">
@@ -134,7 +86,6 @@ export function RemoteConnectionKindStep({
 }
 
 export function RemoteConnectionSettingsStep({
-  kind,
   host,
   port,
   username,
@@ -143,20 +94,12 @@ export function RemoteConnectionSettingsStep({
   password,
   privateKeyPath,
   privateKeyPassphrase,
-  wslDistro,
-  wslUser = "",
-  wslDistros,
-  dockerContainer,
-  manualDockerContainer,
-  dockerContainers,
-  dockerAvailable,
   sshConfigAliases,
   sshConfigAliasesLoading,
   sshConfigAliasesError,
   selectedSshConfigAlias,
-  currentRuntimeOptionsLoading,
-  currentRuntimeOptionsError,
   remoteWorkspaceSessions = [],
+  retiredRemoteWorkspaceEntries = [],
   validationMessage,
   loading,
   onBack,
@@ -168,16 +111,10 @@ export function RemoteConnectionSettingsStep({
   onPasswordChange,
   onPrivateKeyPathChange,
   onPrivateKeyPassphraseChange,
-  onWslDistroChange,
-  onWslUserChange,
-  onDockerContainerChange,
-  onManualDockerContainerChange,
-  onDockerContainersRefresh,
   onApplySshConfigAlias,
   onClearSelectedSshConfigAlias,
   onConnect,
 }: {
-  kind: RemoteTarget["kind"];
   host: string;
   port: string;
   username: string;
@@ -186,20 +123,12 @@ export function RemoteConnectionSettingsStep({
   password: string;
   privateKeyPath: string;
   privateKeyPassphrase: string;
-  wslDistro: string;
-  wslUser?: string;
-  wslDistros: WSLDistro[];
-  dockerContainer: string;
-  manualDockerContainer: string;
-  dockerContainers: DockerContainerInfo[];
-  dockerAvailable: boolean | null;
   sshConfigAliases: SSHConfigAliasOption[];
   sshConfigAliasesLoading: boolean;
   sshConfigAliasesError: string;
   selectedSshConfigAlias: string | null;
-  currentRuntimeOptionsLoading: boolean;
-  currentRuntimeOptionsError: string;
   remoteWorkspaceSessions?: RemoteWorkspaceSessionEntry[];
+  retiredRemoteWorkspaceEntries?: RetiredRemoteWorkspaceEntry[];
   validationMessage: string;
   loading: boolean;
   onBack: () => void;
@@ -211,11 +140,6 @@ export function RemoteConnectionSettingsStep({
   onPasswordChange: (value: string) => void;
   onPrivateKeyPathChange: (value: string) => void;
   onPrivateKeyPassphraseChange: (value: string) => void;
-  onWslDistroChange: (value: string) => void;
-  onWslUserChange?: (value: string) => void;
-  onDockerContainerChange: (value: string) => void;
-  onManualDockerContainerChange: (value: string) => void;
-  onDockerContainersRefresh?: () => void;
   onApplySshConfigAlias: (value: SSHConfigAliasOption) => void;
   onClearSelectedSshConfigAlias: () => void;
   onConnect: () => void;
@@ -230,15 +154,7 @@ export function RemoteConnectionSettingsStep({
         // 这里把中间内容区限定为可滚动区域，让 footer 始终占据独立空间，不遮挡最后几项配置。
         className="flex-1 min-h-0 space-y-4 overflow-y-auto pr-1"
       >
-        {currentRuntimeOptionsError ? (
-          <div className="flex items-start gap-3 rounded-2xl border border-warning bg-warning px-4 py-3 text-ui-base text-warning-foreground">
-            <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
-            <span>{intl.formatMessage({ id: "remote.optionsLoadFailed" })}</span>
-          </div>
-        ) : null}
-
         <RemoteConnectionFields
-          kind={kind}
           host={host}
           port={port}
           username={username}
@@ -247,19 +163,12 @@ export function RemoteConnectionSettingsStep({
           password={password}
           privateKeyPath={privateKeyPath}
           privateKeyPassphrase={privateKeyPassphrase}
-          wslDistro={wslDistro}
-          wslUser={wslUser}
-          wslDistros={wslDistros}
-          dockerContainer={dockerContainer}
-          manualDockerContainer={manualDockerContainer}
-          dockerContainers={dockerContainers}
-          dockerAvailable={dockerAvailable}
           sshConfigAliases={sshConfigAliases}
           sshConfigAliasesLoading={sshConfigAliasesLoading}
           sshConfigAliasesError={sshConfigAliasesError}
           selectedSshConfigAlias={selectedSshConfigAlias}
-          runtimeOptionsLoading={currentRuntimeOptionsLoading}
           remoteWorkspaceSessions={remoteWorkspaceSessions}
+          retiredRemoteWorkspaceEntries={retiredRemoteWorkspaceEntries}
           applySshConfigAlias={onApplySshConfigAlias}
           clearSelectedSshConfigAlias={onClearSelectedSshConfigAlias}
           setHost={onHostChange}
@@ -270,11 +179,6 @@ export function RemoteConnectionSettingsStep({
           setPassword={onPasswordChange}
           setPrivateKeyPath={onPrivateKeyPathChange}
           setPrivateKeyPassphrase={onPrivateKeyPassphraseChange}
-          setWslDistro={onWslDistroChange}
-          setWslUser={onWslUserChange}
-          setDockerContainer={onDockerContainerChange}
-          setManualDockerContainer={onManualDockerContainerChange}
-          refreshDockerContainers={onDockerContainersRefresh}
         />
       </div>
 

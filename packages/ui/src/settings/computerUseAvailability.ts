@@ -6,8 +6,6 @@ type ComputerUseAvailabilityKind =
   | "local-windows"
   | "local-linux"
   | "remote-ssh"
-  | "remote-wsl"
-  | "remote-docker"
   | "remote-server"
   | "web";
 
@@ -39,14 +37,9 @@ export function resolveComputerUseAvailability({
     (workspaceIdentity?.trim() && isRemoteWorkspaceIdentity(workspaceIdentity.trim())),
   );
   if (isRemote) {
-    const remoteKind: ComputerUseAvailabilityKind =
-      remoteTarget?.kind === "ssh"
-        ? "remote-ssh"
-        : remoteTarget?.kind === "wsl"
-          ? "remote-wsl"
-          : remoteTarget?.kind === "docker"
-            ? "remote-docker"
-            : "remote-server";
+    // 活跃远端目标只有 SSH；其余远端形态（含退役目标的旧 identity）统一按 remote-server 处理，
+    // 全部保持 supported=false。
+    const remoteKind: ComputerUseAvailabilityKind = remoteTarget ? "remote-ssh" : "remote-server";
     return {
       kind: remoteKind,
       supported: false,

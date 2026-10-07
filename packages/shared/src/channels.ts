@@ -39,7 +39,6 @@ import type {
   ConnectRemoteRequest,
   DesktopCommandId,
   DesktopTitleBarTheme,
-  DockerContainerInfo,
   EmbeddedBrowserOpenUrlRequest,
   EditorInfo,
   CreateTempTextAttachmentRequest,
@@ -52,7 +51,6 @@ import type {
   RemoteSessionClosedEvent,
   SSHConfigAliasOption,
   TaskNotificationPayload,
-  WSLDistro,
   UpdateCheckResultPayload,
   UpdateStatePayload,
   DesktopZoomState,
@@ -187,12 +185,6 @@ export const PlatformChannels = {
   BindRemoteWorkspaceSessionContext: "zcode:bind-remote-workspace-session-context",
   /** 释放当前窗口里的远程 session */
   DisposeRemoteSession: "zcode:dispose-remote-session",
-  /** Renderer → Main：检查本机 Docker daemon 是否可用 */
-  IsDockerAvailable: "zcode:is-docker-available",
-  /** Renderer → Main：列出本机可用的 WSL 发行版 */
-  ListWSLDistros: "zcode:list-wsl-distros",
-  /** Renderer → Main：列出当前可连接的 Docker 容器 */
-  ListDockerContainers: "zcode:list-docker-containers",
   /** Renderer → Main：列出 SSH config 里可用于快速填表的 alias */
   ListSSHConfigAliases: "zcode:list-ssh-config-aliases",
   /** Renderer → Main：从用户目录加载 CLI MCP 配置 */
@@ -735,18 +727,6 @@ export interface PlatformChannelMap {
   [PlatformChannels.DisposeRemoteSession]: {
     request: string;
     response: void;
-  };
-  [PlatformChannels.IsDockerAvailable]: {
-    request: void;
-    response: boolean;
-  };
-  [PlatformChannels.ListWSLDistros]: {
-    request: void;
-    response: WSLDistro[];
-  };
-  [PlatformChannels.ListDockerContainers]: {
-    request: void;
-    response: DockerContainerInfo[];
   };
   [PlatformChannels.ListSSHConfigAliases]: {
     request: void;

@@ -32,9 +32,11 @@ import type {
 } from "@zcode/shared/zcode-protocol-v4";
 import type { IServiceAccessor } from "@zcode/services";
 import { ServiceProvider } from "@/hooks/useServices.js";
+import { useCloudWorkspaceServices } from "@/hooks/cloud/useCloudWorkspaceServices.js";
 import { usePlatform } from "@/hooks/usePlatform.js";
 import { useWorkspaceServicesResolution } from "@/hooks/useWorkspaceServices.js";
 import { createAgentConversationTransport } from "@/v4/agentConversationTransport.js";
+import { resolveV4PaneConversationServices } from "@/v4/paneConversationServices.js";
 import type { ConversationAttachmentReadParams, ConversationTransport } from "@/v4/transport.js";
 import type { PaneWorkspaceScope } from "@/v4/paneLayoutStore.js";
 import { SessionDataLayer } from "@/v4/sessionDataLayer.js";
@@ -244,6 +246,17 @@ export function V4PaneConversationProvider({ scope, children }: V4PaneConversati
     scope.remoteSessionId ?? null,
     scope.workspaceIdentity ?? null,
   );
+  // 云任务工作区（identity = `cloud-task:<taskId>`）没有、也不会有 remote session 登记：
+  // 工作区服务由 CloudWorkspaceProvider 合成（host base + 当前 Run attachment），判定与
+  // `Root` 同一处（`useCloudWorkspaceServices`；非云身份返回 null，桌面/已配对远控解析不变）。
+  // 之前这里只认通用解析：云身份的 isRemoteTarget 恒为 true，而 sessionsById 里没有对应
+  // 会话，于是永远停在 remote-waiting → rpcReady=false → 整个 pane 返回 null，
+  // 表现为点开云任务后右侧工作区空白（无报错）。选择规则收在 `resolveV4PaneConversationServices`。
+  const cloudServices = useCloudWorkspaceServices(scope.workspaceIdentity);
+  const paneServices = resolveV4PaneConversationServices({
+    cloudServices,
+    resolution: targetResolution,
+  });
   const resolvedScope = useMemo<PaneWorkspaceScope>(
     () => ({
       workspacePath: scope.workspacePath,
@@ -254,7 +267,7 @@ export function V4PaneConversationProvider({ scope, children }: V4PaneConversati
     }),
     [scope.workspaceIdentity, scope.workspacePath, targetResolution.remoteSessionId],
   );
-  if (!targetResolution.rpcReady) {
+  if (!paneServices) {
     return null;
   }
 
@@ -262,7 +275,7 @@ export function V4PaneConversationProvider({ scope, children }: V4PaneConversati
   // remoteSessionId 后若仍把原 scope 传给 registry，会以 __base__ 和远端 endpoint
   // 各建一份数据层，终态可能落到非可见 store。ready 后统一使用解析后的 scope。
   return (
-    <ReadyV4PaneConversationProvider scope={resolvedScope} services={targetResolution.services}>
+    <ReadyV4PaneConversationProvider scope={resolvedScope} services={paneServices}>
       {children}
     </ReadyV4PaneConversationProvider>
   );

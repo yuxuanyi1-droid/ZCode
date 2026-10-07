@@ -18,7 +18,6 @@ import { deployServer } from "./deploy.js";
 import type { DeployOptions } from "./deploy.js";
 import { assertSupportedRemoteEnvironment } from "@zcode/server/remote/remotePlatformSupport.js";
 import { quotePosixShellArg } from "./posixShell.js";
-import { formatWslProxyForLog } from "./wslProxy.js";
 
 const BACKEND_DISCONNECT_EXIT_CODE = -1;
 
@@ -33,7 +32,7 @@ export interface ConnectOptions extends DeployOptions {
   appVersion?: string;
   /** 远端 server/agent 需要继承的非敏感产品环境变量；调用方可传较宽的 env，server 侧会按白名单过滤。 */
   remoteRuntimeEnv?: Record<string, string | undefined>;
-  /** Desktop Host 为 desktop-attached WSL server 提供的显式 Agent 网络配置。 */
+  /** 远端 runtime 的显式 Agent 网络边界（httpProxy/noProxy）；只有能提供权威值的调用方注入。 */
   remoteRuntimeNetwork?: RemoteRuntimeNetworkOptions;
   /** 远端 stdio 关闭后的回调（用于上层感知断连并触发回收） */
   onDidRemoteClose?: (event: { code: number }) => void;
@@ -63,7 +62,7 @@ const REMOTE_RUNTIME_ENV_KEYS = [
   // 由 Desktop Main 计算并下发；远端 server 只消费，不重新计算。
   ZCODE_DESKTOP_CONTEXT_PROMPT_ENABLED_ENV,
   // 同上：本地覆盖由 Desktop Main 按构建档位写定（buildHostProcessEnv），
-  // 透传后 SSH/WSL/Docker 远端 Host 与本地 Host 得到同一档位。
+  // 透传后远端 Host 与本地 Host 得到同一档位。
   ZCODE_DYNAMIC_WORKFLOW_MODE_ENV,
 ] as const;
 
@@ -174,11 +173,7 @@ async function connectRemoteUnchecked(
   log("detected:", env);
   assertSupportedRemoteEnvironment(env);
 
-  const remoteRuntimeNetwork = await resolveRemoteRuntimeNetwork(
-    backend,
-    options?.remoteRuntimeNetwork,
-    log,
-  );
+  const remoteRuntimeNetwork = options?.remoteRuntimeNetwork;
 
   // 2. Deploy server if needed
   if (!options?.skipDeploy) {
@@ -321,41 +316,6 @@ async function connectRemoteUnchecked(
   };
 }
 
-async function resolveRemoteRuntimeNetwork(
-  backend: IRemoteBackend,
-  network: RemoteRuntimeNetworkOptions | undefined,
-  log: (...args: unknown[]) => void,
-): Promise<RemoteRuntimeNetworkOptions | undefined> {
-  if (!network || !backend.resolveRuntimeProxy) {
-    // 只有实现了远端代理解析能力的 WSL backend 才接收这条权威网络边界；
-    // SSH/Docker 即使误传 options 也保持原有启动命令。
-    return undefined;
-  }
-  if (!network.httpProxy?.trim()) {
-    return network;
-  }
-
-  try {
-    const resolvedProxy = await backend.resolveRuntimeProxy(network.httpProxy);
-    if (resolvedProxy !== network.httpProxy) {
-      log(
-        "resolved remote runtime proxy via wsl-host-gateway",
-        formatWslProxyForLog(network.httpProxy),
-        "->",
-        formatWslProxyForLog(resolvedProxy),
-      );
-    }
-    return { ...network, httpProxy: resolvedProxy };
-  } catch (error) {
-    // 代理解析只是运行时增强；解析失败时沿用设置页原值，避免把 WSL 本地工作区变成不可连接。
-    log(
-      "remote runtime proxy resolution failed; using configured endpoint",
-      error instanceof Error ? error.message : String(error),
-    );
-    return network;
-  }
-}
-
 function buildRemoteServerCommand(
   options: ConnectOptions | undefined,
   remoteRuntimeNetwork: RemoteRuntimeNetworkOptions | undefined,
@@ -371,7 +331,7 @@ function buildRemoteServerCommand(
   }
   const appVersion = options?.appVersion?.trim();
   if (appVersion) {
-    // 远端 server 是通过 SSH/WSL/Docker 单独启动的，不会继承桌面 host env。
+    // 远端 server 是独立进程，不会继承桌面 host env。
     // 这里显式把 app 版本作为远端进程 env 注入，远端 agent 才能在模型请求 header 中带上版本。
     envParts.push(`${ZCODE_APP_VERSION_ENV}=${quotePosixShellArg(appVersion)}`);
   }

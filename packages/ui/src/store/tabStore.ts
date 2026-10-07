@@ -20,6 +20,7 @@ import {
   type WorkspaceExpansionState,
 } from "@/lib/workspaceExpansionPreference.js";
 import { isSameWorkspaceTab } from "@/store/tabWorkspaceIdentity.js";
+import { findCloudTaskTabIndex } from "@/cloud/cloudTaskTab.js";
 
 export const SETTINGS_TAB_ID = "__settings__" satisfies TabId;
 
@@ -41,6 +42,14 @@ export interface WorkspaceTabState extends TabState {
   workspaceIdentity?: string;
   localWorkspacePath?: string;
   workspacePurpose?: WorkspacePurpose;
+  /**
+   * Cloud Task 身份（specs/cloud-agent 04 §3.0/§5）。
+   *
+   * 这是云任务 tab 的**唯一匹配键**：`workspacePath` 是 Run 的 checkout 路径（run ready
+   * 前为空），Run 换代 / provider 变化 / 路径变化都不应产生第二个 tab，所以不能按路径匹配。
+   * 非云 tab 不设置该字段，行为与之前完全一致。
+   */
+  cloudTaskId?: string;
 }
 
 export interface WorkspaceTabOptions {
@@ -51,6 +60,10 @@ export interface WorkspaceTabOptions {
   workspaceIdentity?: string;
   localWorkspacePath?: string;
   workspacePurpose?: WorkspacePurpose;
+  /** 见 `WorkspaceTabState.cloudTaskId`；追加字段，未传时行为不变。 */
+  cloudTaskId?: string;
+  /** 显式标签（云任务用任务标题；缺省仍按路径推导，既有调用方行为不变）。 */
+  label?: string;
 }
 
 export interface RestorableWorkspaceTab {
@@ -61,6 +74,23 @@ export interface RestorableWorkspaceTab {
   workspaceIdentity?: string;
   localWorkspacePath?: string;
   workspacePurpose?: WorkspacePurpose;
+  /** 见 `WorkspaceTabState.cloudTaskId`；追加字段，未传时行为不变。 */
+  cloudTaskId?: string;
+  /** 见 `WorkspaceTabOptions.label`。 */
+  label?: string;
+}
+
+/** `openCloudTaskTab` 的入参：身份键是 cloudTaskId，路径只作 IO/展示。 */
+export interface CloudTaskTabParams {
+  readonly cloudTaskId: string;
+  readonly workspaceIdentity: string;
+  /**
+   * Run 的 checkout 路径（04 §5「IO 单独传 workspacePath」）。
+   * run ready 前没有路径，传空串表示「当前没有可用的文件系统路径」——
+   * 不传伪路径诱发 IO，也不把 `workspaceIdentity` 当路径用。
+   */
+  readonly workspacePath: string;
+  readonly label: string;
 }
 
 export type WindowTabState = WorkspaceTabState | SettingsTabState;
@@ -111,6 +141,14 @@ export interface TabStoreState {
   addTab: (workspacePath: string, options?: WorkspaceTabOptions) => TabId;
   /** 确保 workspace 出现在任务区数据源中，但不抢走当前焦点 */
   ensureWorkspaceTab: (workspacePath: string, options?: WorkspaceTabOptions) => TabId;
+  /**
+   * 打开/激活一个 Cloud Task 工作区 tab（specs/cloud-agent 04 §3.0/§5、W8 §3）。
+   *
+   * 与 `addTab` 的差别只有匹配键：云任务**按 `cloudTaskId` 复用**，不按路径——
+   * Run ready 后 checkout 路径从空变成真实路径、换代后路径再变，都不应产生第二个 tab。
+   * 非云 tab 从不带 `cloudTaskId`，因此这条路径不会被它们命中。
+   */
+  openCloudTaskTab: (params: CloudTaskTabParams) => TabId;
   /** 关闭标签页 */
   closeTab: (tabId: TabId) => void;
   /** 激活指定标签页 */
@@ -154,13 +192,15 @@ function createWorkspaceTab(
     id: createUuid(),
     kind: "workspace",
     workspacePath,
-    label: labelFromPath(workspacePath),
+    // 显式 label 只被云任务使用（空路径推不出名字）；未传时仍按路径推导。
+    label: options?.label ?? labelFromPath(workspacePath),
     availability: options?.availability,
     remoteSessionId: options?.remoteSessionId,
     remoteTarget: options?.remoteTarget,
     workspaceIdentity: options?.workspaceIdentity,
     localWorkspacePath: options?.localWorkspacePath,
     workspacePurpose: options?.workspacePurpose,
+    cloudTaskId: options?.cloudTaskId,
   };
 }
 
@@ -334,6 +374,54 @@ export function createTabStore(storage: StorageLike | null | undefined = undefin
         // 新任务虽然已经持久化成功，侧边栏里仍然没有对应分组可渲染。这里补一个仅确保可见的入口，
         // 既让目标 workspace 进入任务区数据源，又不打断用户当前正在看的 tab / settings 上下文。
         tabs: [tab, ...state.tabs],
+        expandedWorkspacePaths: ensureWorkspaceExpanded(
+          state.expandedWorkspacePaths,
+          workspacePath,
+        ),
+      }));
+      return tab.id;
+    },
+
+    openCloudTaskTab: ({ cloudTaskId, workspaceIdentity, workspacePath, label }) => {
+      const existingWorkspaceTabs = get().tabs.filter(isWorkspaceTab);
+      const existingIndex = findCloudTaskTabIndex(existingWorkspaceTabs, cloudTaskId);
+      const existing = existingIndex === -1 ? undefined : existingWorkspaceTabs[existingIndex];
+      if (existing) {
+        // 同一个云任务：只同步真实 checkout 路径与标签，不新建 tab。
+        set((state) => ({
+          tabs: state.tabs.map((tab) =>
+            tab.id === existing.id && isWorkspaceTab(tab)
+              ? {
+                  ...tab,
+                  workspacePath,
+                  label,
+                  workspaceIdentity,
+                  workspacePurpose: "project",
+                }
+              : tab,
+          ),
+          activeTabId: existing.id,
+          activeWorkspacePath: workspacePath,
+          activeWorkspaceIdentity: workspaceIdentity,
+          expandedWorkspacePaths: ensureWorkspaceExpanded(
+            state.expandedWorkspacePaths,
+            workspacePath,
+          ),
+        }));
+        return existing.id;
+      }
+
+      const tab = createWorkspaceTab(workspacePath, {
+        cloudTaskId,
+        workspaceIdentity,
+        workspacePurpose: "project",
+        label,
+      });
+      set((state) => ({
+        tabs: [tab, ...state.tabs],
+        activeTabId: tab.id,
+        activeWorkspacePath: workspacePath,
+        activeWorkspaceIdentity: workspaceIdentity,
         expandedWorkspacePaths: ensureWorkspaceExpanded(
           state.expandedWorkspacePaths,
           workspacePath,

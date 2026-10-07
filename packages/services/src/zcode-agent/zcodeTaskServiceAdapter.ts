@@ -1768,7 +1768,7 @@ export function createZCodeTaskServiceAdapter(
 
     async releaseWorkspacePreparation(params): Promise<void> {
       // 关闭 workspace UI 只会释放 RPC 使用方，不会自动终止已预热的 Agent。
-      // WSL Host 共享后 Host 会继续存活，因此必须按 workspaceKey 显式回收对应 runtime。
+      // 共享远端 Host 会继续存活，因此必须按 workspaceKey 显式回收对应 runtime。
       await options.zcodeAgentService.disposeWorkspace(normalizeWorkspaceParams(params));
     },
 

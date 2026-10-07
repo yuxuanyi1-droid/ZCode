@@ -82,7 +82,7 @@ function encodePosixOctal(value: string): string {
 function buildRemoteDeployLockCommand(lockDir: string, ownerToken: string): string {
   const scriptPath = `${lockDir}.holder-${ownerToken}.sh`;
   const script = buildRemoteDeployLockScript(lockDir, ownerToken);
-  // wsl.exe 会先经默认 shell 重组 `bash -lc` 参数，脚本里的局部 `$var`
+  // 远端命令可能先被中间 shell 重组 `bash -lc` 参数，脚本里的局部 `$var`
   // 会在真正的 shell 执行前被展开为空。用纯八进制内容落盘后再执行，同时保留 stdin 给 release marker。
   // 锁脚本只使用 POSIX 语法，显式用 sh 执行，兼容 Alpine/BusyBox 等没有 bash 的远端。
   return [

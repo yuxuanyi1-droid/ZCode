@@ -31,6 +31,7 @@ import type { ChatComposerPasteEvent } from "@/LexicalChatInput.js";
 import type { IPromptAttachmentTransferService } from "@zcode/services";
 import type { IPlatformService } from "@zcode/shared";
 import { usePlatform } from "@/hooks/usePlatform.js";
+import { useCloudAttachmentGate } from "@/hooks/cloud/useCloudAttachmentGate.js";
 import { useServices } from "@/hooks/useServices.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { logger } from "@/logger.js";
@@ -202,6 +203,7 @@ export function useComposerAttachments(
   } = options;
   const platform = usePlatform();
   const { promptAttachmentTransferService } = useServices();
+  const cloudAttachmentGate = useCloudAttachmentGate();
   const { intl } = useZCodeIntl();
   const scopeKey = buildScopeKey(workspacePath, workspaceIdentity, scopeId);
   exposeComposerAttachmentScopeKeyForE2E(scopeKey);
@@ -311,7 +313,23 @@ export function useComposerAttachments(
         const item = readComposerAttachmentScope(targetScopeKey).find(
           (candidate) => candidate.id === attachmentId,
         );
-        if (!item || !target.sessionId) return;
+        if (!item) return;
+        // Cloud 附件门控（specs/cloud-agent 04 §3.4.1、11 §9）：非云模式返回 null，
+        // 下面的既有分支逐字不变；云模式按「session-bound 上传 / 控制面 task-owned 上传 /
+        // 明确不可用」三者之一收口，不静默停在 waitingSession、也不伪造空附件。
+        if (cloudAttachmentGate && !cloudAttachmentGate.enabled) {
+          updateItem(targetScopeKey, attachmentId, (current) => ({
+            ...current,
+            uploadStatus: "failed",
+            uploadErrorKind: "permanent",
+            uploadError: intl.formatMessage({
+              id:
+                cloudAttachmentGate.disabledMessageId ?? "chat.attachments.cloud.uploadUnavailable",
+            }),
+          }));
+          return;
+        }
+        if (!target.sessionId) return;
         if (item.localPath && isRemoteAttachmentTarget(target)) {
           if (!target.remoteSessionId) {
             updateItem(targetScopeKey, attachmentId, (current) => ({

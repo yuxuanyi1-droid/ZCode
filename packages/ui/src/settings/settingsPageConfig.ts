@@ -18,6 +18,7 @@ import {
   WandSparkles,
   Keyboard,
   FileSearch,
+  Cloud,
 } from "lucide-react";
 import { isSettingsSectionEnabled, type SettingsSectionId } from "@/lib/settingsNavigation.js";
 import type { Theme } from "@/useTheme.js";
@@ -31,7 +32,7 @@ export const THEME_MODES: Array<{
   { mode: "zai-light", icon: Sun },
 ];
 
-type SettingsSectionGroupId = "basics" | "agentCapabilities" | "dataAndStats";
+type SettingsSectionGroupId = "basics" | "agentCapabilities" | "dataAndStats" | "cloudRuntime";
 
 interface SettingsSectionDefinition {
   id: SettingsSectionId;
@@ -52,6 +53,9 @@ const BASE_SETTINGS_SECTION_GROUPS: Array<{
     titleId: "settings.sidebar.group.agentCapabilities",
   },
   { id: "dataAndStats", titleId: "settings.sidebar.group.dataAndStats" },
+  // Cloud 运行时单独成组（04 §3.1：GitHub 与 Sandbox 不能落进基础设置）。
+  // 追加在末尾，既有分组与顺序不变。
+  { id: "cloudRuntime", titleId: "settings.cloudRuntime.group" },
 ];
 
 const BASE_SETTINGS_SECTIONS: SettingsSectionDefinition[] = [
@@ -156,28 +160,47 @@ const BASE_SETTINGS_SECTIONS: SettingsSectionDefinition[] = [
     titleId: "settings.usageTitle",
     groupId: "dataAndStats",
   },
+  // 追加在末尾：既有分区顺序不变；仅在云模式下可见（见 createSettingsPageConfig 的 isCloudMode）。
+  {
+    id: "cloudRuntime",
+    icon: Cloud,
+    titleId: "settings.cloudRuntime.title",
+    groupId: "cloudRuntime",
+  },
 ];
 
 // 兼容既有只读消费者：默认配置代表不带桌面平台能力的 Web 视图；
 // macOS/Windows/Linux 必须继续通过 createSettingsPageConfig 动态加入 Computer Use。
 export const SETTINGS_SECTIONS = BASE_SETTINGS_SECTIONS.filter(
-  (section) => section.id !== "computerUse" && isSettingsSectionEnabled(section.id),
+  (section) =>
+    section.id !== "computerUse" &&
+    section.id !== "cloudRuntime" &&
+    isSettingsSectionEnabled(section.id),
 );
 
 interface SettingsPageConfigOptions {
   isDesktop?: boolean;
   isMacDesktop?: boolean;
   isWindowsDesktop?: boolean;
+  /**
+   * 当前是否处于云模式（CloudWorkspaceProvider 已挂载）。
+   *
+   * 缺省 false：本地 / SSH / 已配对远控的设置页分区与顺序**完全不变**；
+   * 云模式才追加「Cloud 运行时」分组（04 §3.1）。
+   */
+  isCloudMode?: boolean;
 }
 
 export function createSettingsPageConfig({
   isDesktop = false,
   isMacDesktop = false,
   isWindowsDesktop = false,
+  isCloudMode = false,
 }: SettingsPageConfigOptions = {}) {
   const showComputerUse = isDesktop || isMacDesktop || isWindowsDesktop;
   const settingsSections = BASE_SETTINGS_SECTIONS.filter((section) => {
     if (section.id === "computerUse" && !showComputerUse) return false;
+    if (section.id === "cloudRuntime" && !isCloudMode) return false;
     return isSettingsSectionEnabled(section.id);
   });
   const settingsSectionGroups = BASE_SETTINGS_SECTION_GROUPS.map((group) => ({

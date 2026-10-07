@@ -17,7 +17,7 @@ interface HostRemoteWorkspaceContext {
  * 保存 shared remote Host 代理层持有的 workspace 资源。
  *
  * dedicated Host 会随 tab 退出，历史 task meta 和事件监听可由进程整体回收；
- * WSL Host Pool 会跨 workspace 复用，必须按 workspace 主动清理，否则引用会随 Host 寿命持续增长。
+ * 共享远端 Host 会跨 workspace 复用，必须按 workspace 主动清理，否则引用会随 Host 寿命持续增长。
  */
 export function createHostRemoteWorkspaceProxyState(): {
   rememberTaskMeta: (meta: HostRemoteTaskMeta) => void;

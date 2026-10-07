@@ -1,10 +1,5 @@
 /* eslint-disable max-lines -- 跨端 platform contract 集中声明 renderer 能力；OAuth 与 browser lifecycle 必须保持 desktop/web 类型合同，本 MR 不拆分平台边界。 */
-import type {
-  DockerConnectOptions,
-  RemoteTarget,
-  SSHConnectOptions,
-  WSLConnectOptions,
-} from "./remoteTarget.js";
+import type { RemoteTarget, SSHConnectOptions } from "./remoteTarget.js";
 import type {
   LoadCliMcpFromUserDirectoryRequest,
   LoadCliMcpFromUserDirectoryResult,
@@ -225,10 +220,15 @@ export interface ApplicationIconRequest {
   locators: ApplicationIconLocator[];
 }
 
-export type OpenInEditorRemoteTarget =
-  | Pick<SSHConnectOptions, "kind" | "host" | "port" | "username" | "sshConfigAlias">
-  | Pick<WSLConnectOptions, "kind" | "distro" | "user">
-  | Pick<DockerConnectOptions, "kind" | "container">;
+/**
+ * 打开宿主编辑器时携带的远端目标信息。Docker/WSL 目标已退役
+ * （specs/cloud-agent/06 §3.1），只保留 SSH（VS Code Remote-SSH URI）；
+ * 本机路径继续走无 remoteTarget 的本地分支。
+ */
+export type OpenInEditorRemoteTarget = Pick<
+  SSHConnectOptions,
+  "kind" | "host" | "port" | "username" | "sshConfigAlias"
+>;
 
 export interface OpenInEditorOptions {
   remoteTarget?: OpenInEditorRemoteTarget;
@@ -276,46 +276,15 @@ export interface PrintPageToPdfResult {
 }
 
 export function createOpenInEditorRemoteTarget(target: RemoteTarget): OpenInEditorRemoteTarget {
-  switch (target.kind) {
-    case "ssh":
-      // openInEditor 只需要构造 VS Code Remote-SSH URI 的连接标识，
-      // 不应该把 password/privateKeyPassphrase 等凭据字段继续穿过 renderer/preload/main IPC。
-      return {
-        kind: "ssh",
-        host: target.host,
-        port: target.port,
-        username: target.username,
-        ...(target.sshConfigAlias?.trim() ? { sshConfigAlias: target.sshConfigAlias.trim() } : {}),
-      };
-    case "wsl": {
-      const user = target.user?.trim();
-      return {
-        kind: "wsl",
-        distro: target.distro,
-        ...(user ? { user } : {}),
-      };
-    }
-    case "docker":
-      return {
-        kind: "docker",
-        container: target.container,
-      };
-  }
-}
-
-export interface WSLDistro {
-  name: string;
-  isDefault: boolean;
-  state: string;
-  version: 1 | 2 | null;
-}
-
-export interface DockerContainerInfo {
-  id: string;
-  image: string;
-  name: string;
-  state: string;
-  status: string;
+  // openInEditor 只需要构造 VS Code Remote-SSH URI 的连接标识，
+  // 不应该把 password/privateKeyPassphrase 等凭据字段继续穿过 renderer/preload/main IPC。
+  return {
+    kind: "ssh",
+    host: target.host,
+    port: target.port,
+    username: target.username,
+    ...(target.sshConfigAlias?.trim() ? { sshConfigAlias: target.sshConfigAlias.trim() } : {}),
+  };
 }
 
 export interface SSHConfigAliasOption {
@@ -588,7 +557,7 @@ export interface IPlatformService {
       workspaceIdentity?: string;
       connectTrigger?: import("./remoteUsageTelemetry.js").RemoteWorkspaceConnectTrigger;
     },
-  ): Promise<{ success: boolean; error?: string; sessionId?: string }>;
+  ): Promise<{ success: boolean; error?: string; sessionId?: string; code?: string }>;
 
   /** 取消当前窗口尚未建立完成的远程连接（可选：Web 平台可忽略） */
   cancelPendingRemoteConnection?(requestId?: string): Promise<void>;
@@ -600,15 +569,6 @@ export interface IPlatformService {
 
   /** 释放当前窗口里已创建的远程 session */
   disposeRemoteSession(sessionId: string): Promise<void>;
-
-  /** 检查本机 Docker daemon 是否可用 */
-  isDockerAvailable(): Promise<boolean>;
-
-  /** 列出本机可用的 WSL 发行版 */
-  listWSLDistros(): Promise<WSLDistro[]>;
-
-  /** 列出当前可连接的 Docker 容器 */
-  listDockerContainers(): Promise<DockerContainerInfo[]>;
 
   /** 列出当前机器 SSH config 中可用于快速填表的 alias */
   listSSHConfigAliases(): Promise<SSHConfigAliasOption[]>;

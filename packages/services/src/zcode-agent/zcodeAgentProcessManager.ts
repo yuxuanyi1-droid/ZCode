@@ -416,7 +416,7 @@ function resolveElectronRuntimeZCodeAgentCommand(
   // 它内置的 Node runtime 与 zcode-cli 目标版本一致（Electron 41 = Node 24.x）。
   // 这里直接用 app 自带的 Electron Node 执行打进 resources/glm 的 zcode.cjs，
   // 不再随包内置一份独立 Node 二进制（体积从 ~180MB 降到 ~16MB，且跨平台同一份 JS）。
-  // 用 process.versions.electron 作为闸门：远端 SSH/WSL host 由系统 Node 运行、没有 electron，
+  // 用 process.versions.electron 作为闸门：远端 SSH host 由系统 Node 运行、没有 electron，
   // 会跳过这里继续走原生二进制兜底，桌面/远端两条链路互不影响。
   if (!process.versions.electron) {
     return null;

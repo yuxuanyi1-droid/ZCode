@@ -47,10 +47,8 @@ export function shouldShowRemoteSyncActions(params: {
   if (params.hasLocalSourceService === false) {
     return false;
   }
-  return Boolean(
-    params.remoteSessionId?.trim() &&
-    (params.remoteTarget?.kind === "ssh" || params.remoteTarget?.kind === "wsl"),
-  );
+  // 远端目标收敛为 SSH（Docker/WSL 已退役）：只有 SSH 目标展示同步动作。
+  return Boolean(params.remoteSessionId?.trim() && params.remoteTarget);
 }
 
 export function shouldStartRemoteSyncOperation(params: {

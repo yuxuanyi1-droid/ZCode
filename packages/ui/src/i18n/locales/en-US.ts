@@ -1607,11 +1607,6 @@ const enUS: Record<string, string> = {
   "workspace.openPluginsSettings": "Plugin Marketplace",
   "workspace.backToWorkspace": "Back to workspace",
   "workspace.noActiveForNewTask": "There is no available workspace yet. Open a workspace first.",
-  "workspace.wslUncPrompt.title": "Open this through WSL remote connection?",
-  "workspace.wslUncPrompt.description":
-    "You selected a WSL path:\n{path}\n\nWe recommend opening it through WSL connection, though you can still continue with the path.",
-  "workspace.wslUncPrompt.openWsl": "Open WSL connection",
-  "workspace.wslUncPrompt.continuePath": "Continue with path",
   "workspaceSidebar.workspaces": "Tasks",
   "workspaceSidebar.archivedTasks": "Archived",
   "workspaceSidebar.taskViewOptions": "Filter and sort",
@@ -1724,7 +1719,7 @@ const enUS: Record<string, string> = {
   "remote.step.directory": "Choose directory",
   "remote.kindStepTitle": "Choose method",
   "remote.kindStepDescription":
-    "Choose how you want to access this workspace, then continue with the matching connection settings.",
+    "Confirm the SSH connection, then continue with the connection settings.",
   "remote.settingsStepTitle": "Connection settings",
   "remote.settingsStepDescription":
     "Enter the details needed for your {method} connection so we can prepare the remote session.",
@@ -1749,7 +1744,7 @@ const enUS: Record<string, string> = {
   "webRemoteControl.botChannel.manageBots": "Manage bots",
   "remote.title": "Connect remote environment",
   "remote.description":
-    "Connect to a remote workspace over SSH, Server, WSL, or Docker, then choose a directory in the current window.",
+    "Connect to a remote workspace over SSH, then choose a directory in the current window.",
   "remote.step.connect": "Connect",
   "remote.step.selectDirectory": "Choose directory",
   "remote.selectDirectoryTitle": "Choose remote directory",
@@ -1758,12 +1753,12 @@ const enUS: Record<string, string> = {
   "remote.backToConnection": "Back to connection settings",
   "remote.selectedMethod": "Selected method",
   "remote.methods": "Connection method",
+  "remote.retiredHistory.title": "Retired remote targets",
+  "remote.retiredHistory.description":
+    "These history entries used the retired Docker / WSL connection targets. They are shown for reference only and cannot be reconnected or opened as local paths.",
+  "remote.retiredHistory.reason": "Invalid reason: target-retired.",
   "remote.kind.ssh": "SSH",
-  "remote.kind.wsl": "WSL",
-  "remote.kind.docker": "Docker",
   "remote.kind.ssh.wizardDescription": "Remote host",
-  "remote.kind.wsl.wizardDescription": "Windows Subsystem for Linux",
-  "remote.kind.docker.wizardDescription": "Local container",
   "remote.connect": "Connect",
   "remote.connecting": "Connecting...",
   "remote.minimize": "Minimize remote connection window",
@@ -1785,38 +1780,9 @@ const enUS: Record<string, string> = {
     "Failed to load local runtime options. You can still enter values manually.",
   "remote.log.prepare": "Wizard parameters validated. Preparing the connection request.",
   "remote.log.sshTarget": "SSH target: {username}@{host}:{port}",
-  "remote.log.dockerTarget": "Docker container target: {container}",
   "remote.log.requestingSession": "Requesting the host process to create a remote session...",
   "remote.log.sessionReady":
     "Remote session created successfully. You can choose a directory next.",
-  "wsl.description":
-    "Connect to the default distro, or choose a specific distro installed on this device.",
-  "wsl.distro": "Distribution",
-  "wsl.defaultDistro": "Default distro",
-  "wsl.user": "Linux user",
-  "wsl.defaultUser": "Default user",
-  "wsl.userDescription":
-    "Leave empty to use the distro default user. Enter root or another existing Linux user to run WSL commands as that user.",
-  "wsl.rootWarning":
-    "Root mode runs the remote host, agent, and terminal as root. Files created during the session may be owned by root.",
-  "wsl.validation.invalidUser":
-    "Linux user names cannot contain control characters, colons, slashes, or backslashes, and must be 64 characters or fewer.",
-  "wsl.loading": "Detecting WSL distros...",
-  "wsl.detectedCount": "{count} distros detected on this device.",
-  "wsl.noDistros":
-    "No WSL distros were detected. You can still connect to the default distro if WSL is installed.",
-  "docker.description": "Connect to a local container using docker exec and docker cp.",
-  "docker.container": "Container",
-  "docker.containerPlaceholder": "Enter container name or ID, e.g. my-container",
-  "docker.manualContainerHint":
-    "If the running container list is incomplete, enter a container name or ID manually to connect.",
-  "docker.selectContainer": "Choose a running container",
-  "docker.loading": "Detecting running containers...",
-  "docker.unavailable": "No running containers detected.",
-  "docker.noContainers": "No running containers detected.",
-  "docker.validation.required": "Container name or ID is required",
-
-  // Locale switch
   "locale.switchLanguage": "Switch language",
 
   // File tree
@@ -6010,7 +5976,6 @@ const enUS: Record<string, string> = {
   "feedback.module.modelCallError": "Model call error",
   "feedback.module.permissionConfigSave": "Permissions / settings save",
   "feedback.module.sshConnectionFailed": "SSH connection failed",
-  "feedback.module.wslConnectionFailed": "WSL connection failed",
   "feedback.module.uiLayoutInteraction": "UI layout / interaction",
   "feedback.module.modelSlowQuota": "Slow model response / quota",
   "feedback.module.crashInternalError": "Crash / Internal error",
@@ -6804,7 +6769,7 @@ const enUS: Record<string, string> = {
     "The Computer Use plugin is not enabled. Enable it in Plugins to use Computer Use.",
   "settings.computerUse.unsupported.title": "Computer Use is unavailable here",
   "settings.computerUse.unsupported.remoteDescription":
-    "Computer Use is not yet supported for SSH, WSL, Docker, or other remote environments. Switch to a local macOS or Windows workspace.",
+    "Computer Use is not yet supported for SSH or other remote environments. Switch to a local macOS or Windows workspace.",
   "settings.computerUse.unsupported.linuxDescription":
     "Computer Use is not yet supported on Linux desktops. Switch to a local macOS or Windows workspace.",
   "settings.computerUse.unsupported.badge": "Unavailable here",
@@ -6814,6 +6779,67 @@ const enUS: Record<string, string> = {
   "scheduledPreview.toast.running": "Running “{title}”…",
   "scheduledPreview.toast.view": "View",
   "scheduledPreview.addSchedule": "Add schedule",
+
+  // Cloud (specs/cloud-agent/W8 §3, 04 §3.1/§3.2)
+  "settings.cloudRuntime.group": "Cloud runtime",
+  "settings.cloudRuntime.title": "Cloud runtime",
+  "settings.cloudRuntime.description":
+    "Repository authorization and sandbox runtime for cloud tasks. Sign-in, plan and model catalog stay in the existing account settings.",
+  "settings.cloudRuntime.github.title": "GitHub",
+  "settings.cloudRuntime.github.description":
+    "Authorized repositories are the only source of cloud projects.",
+  "settings.cloudRuntime.github.empty": "No authorized repositories yet.",
+  "settings.cloudRuntime.github.notConfigured":
+    "The deployment has not wired the GitHub App installation projection yet.",
+  "settings.cloudRuntime.github.revoked":
+    "GitHub App authorization was revoked or lacks permission. Re-authorize to continue.",
+  "settings.cloudRuntime.github.installHint":
+    "Install and authorize the ZCode GitHub App before creating cloud projects.",
+  "settings.cloudRuntime.github.loadMore": "Load more repositories",
+  "settings.cloudRuntime.github.taskCountHint":
+    "Repositories are filtered by this account's authorization; permissions are verified server-side.",
+  "settings.cloudRuntime.sandbox.title": "Sandbox",
+  "settings.cloudRuntime.sandbox.description":
+    "Sandbox provider capabilities as reported by the control plane (read-only).",
+  "settings.cloudRuntime.sandbox.none": "The control plane reports no sandbox provider yet.",
+  "settings.cloudRuntime.sandbox.capability.createOperationLookup": "Create-result lookup",
+  "settings.cloudRuntime.sandbox.capability.inspect": "Can inspect instances",
+  "settings.cloudRuntime.sandbox.capability.extendDeadline": "Can extend deadline",
+  "settings.cloudRuntime.sandbox.capability.confirmTermination": "Can confirm termination",
+  "settings.cloudRuntime.sandbox.capability.outboundWss": "Outbound WSS",
+  "settings.cloudRuntime.sandbox.capability.deadlineSource": "Deadline source",
+  "settings.cloudRuntime.sandbox.capability.maxLifetime": "Max lifetime (s)",
+  "settings.cloudRuntime.sandbox.secretNote":
+    "Secrets and credentials are held by the deployment; this page neither reads nor displays them.",
+  "settings.cloudRuntime.retry": "Retry",
+  "settings.cloudRuntime.loading": "Loading…",
+  "settings.cloudRuntime.notCloudMode":
+    "Not in cloud mode; the Cloud runtime group is unavailable.",
+  "cloud.draftStartConfig.baseBranch": "Base branch",
+  "cloud.draftStartConfig.baseBranch.empty": "No branches available",
+  "cloud.draftStartConfig.provider": "Run provider",
+  "cloud.draftStartConfig.provider.empty": "The control plane declares no provider",
+  "cloud.draftStartConfig.templateRef": "Controlled template",
+  "cloud.projects.description":
+    "Organized by repository; expanding only reads control-plane tasks and never connects to a sandbox.",
+  "cloud.projects.remove": "Remove project",
+  "cloud.projects.pickerTitle": "Choose a repository",
+  "cloud.projects.pickerEmpty": "No authorized repositories available.",
+  "cloud.projects.pickerSearch": "Search repositories",
+  "cloud.projects.cancel": "Cancel",
+  "cloud.tasks.new": "New task",
+  "cloud.tasks.empty": "No task in this project yet.",
+  "cloud.tasks.draftBadge": "Draft",
+  "cloud.tasks.newTitleLabel": "Task title",
+  "cloud.tasks.newSubmit": "Create draft",
+  "cloud.tasks.createFailed": "Could not create the task: {reason}",
+  "cloud.tasks.openFailed": "Could not open the cloud task workspace",
+  "chat.attachments.cloud.uploadUnavailable":
+    "This deployment does not support draft attachment uploads for cloud tasks. Remove attachments before the first send.",
+  "chat.attachments.cloud.attachmentUnavailable":
+    "The connection to this task's runtime is down. Attachments resume after reconnect and are never uploaded to another environment.",
+  "chat.attachments.cloud.waitingEnvironment":
+    "The runtime is not ready yet, so attachments cannot be uploaded. This restores automatically.",
 };
 
 export default enUS;

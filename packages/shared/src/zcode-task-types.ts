@@ -162,7 +162,7 @@ export interface ZCodeWorkspaceSlashCommandsUpdate {
   workspacePath: string;
   /**
    * 远程 workspace 的 / 命令属于身份隔离状态，不能只靠 workspacePath 分发。
-   * 同一路径可能来自不同 SSH/WSL/Docker session，带上 workspaceIdentity 后 service/UI 才能按 workspaceKey 收敛。
+   * 同一路径可能来自不同 SSH session，带上 workspaceIdentity 后 service/UI 才能按 workspaceKey 收敛。
    */
   workspaceIdentity?: string;
   commands: ZCodeSlashCommand[];

@@ -39,9 +39,7 @@ import {
   taskStreamMirrorTargetSchema,
 } from "./task-realtime-core.js";
 
-export { WSL_USER_MAX_LENGTH, isValidWslUser, wslUserSchema } from "./wslUserValidation.js";
 export { zcodeTaskModeSchema } from "./zcode-task-mode-schema.js";
-import { wslUserSchema } from "./wslUserValidation.js";
 export {
   appSettingsOccupationEnum,
   appSettingsPatchSchema,
@@ -65,7 +63,14 @@ export const credentialRecordSchema = z.record(z.string(), z.string());
 export const credentialKeySchema = nonEmptyStringSchema;
 export const credentialValueSchema = z.string();
 
-export const sshConnectOptionsSchema = z.object({
+/**
+ * 活跃远端连接目标 schema。Docker/WSL 已退役，这里的活跃契约只接受 SSH
+ * （specs/cloud-agent/06 §3.1）；旧 kind 由 detectRetiredRemoteTargetKind 在入口稳定拒绝。
+ *
+ * 原 `sshConnectOptionsSchema` 名字随退役收敛删除：`pnpm dep:refs` 显示它的唯一引用
+ * 就是本别名，保留两个名字会让 schema 契约出现两个入口（也给 knip 报重复导出）。
+ */
+export const remoteTargetSchema = z.object({
   kind: z.literal("ssh"),
   host: nonEmptyStringSchema,
   port: z.number().int().positive().max(65535).optional(),
@@ -81,23 +86,6 @@ export const sshConnectOptionsSchema = z.object({
     })
     .optional(),
 });
-
-export const wslConnectOptionsSchema = z.object({
-  kind: z.literal("wsl"),
-  distro: z.string().optional(),
-  user: wslUserSchema.optional(),
-});
-
-export const dockerConnectOptionsSchema = z.object({
-  kind: z.literal("docker"),
-  container: nonEmptyStringSchema,
-});
-
-export const remoteTargetSchema = z.discriminatedUnion("kind", [
-  sshConnectOptionsSchema,
-  wslConnectOptionsSchema,
-  dockerConnectOptionsSchema,
-]);
 
 export const helloMessageSchema = z.object({
   type: z.literal("zcode-hello"),

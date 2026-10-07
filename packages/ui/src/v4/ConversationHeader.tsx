@@ -15,7 +15,7 @@ export interface PaneWorkspaceBadge {
   label: string;
   /** 完整路径（tooltip）。 */
   workspacePath: string;
-  /** 远程 workspace（SSH/WSL/Docker）标识。 */
+  /** 远程 workspace（SSH）标识。 */
   remote: boolean;
 }
 

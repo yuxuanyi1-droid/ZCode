@@ -37,7 +37,7 @@ export function clampSplitRatio(ratio: number): number {
 /**
  * pane 的 workspace 归属（= session 的 primary workspace，连接路由键）。
  * - 本地：只有 workspacePath；
- * - 远程（SSH/WSL/Docker）：workspaceIdentity 必填（Workspace Identity 约束），
+ * - 远程（SSH）：workspaceIdentity 必填（Workspace Identity 约束），
  *   remoteSessionId 指向 remoteWorkspaceSessionStore 的连接（缺省时按 identity 解析）。
  */
 export interface PaneWorkspaceScope {

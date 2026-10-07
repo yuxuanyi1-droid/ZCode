@@ -97,6 +97,8 @@ import { useSettings } from "@/hooks/useSettingService.js";
 import type { CreateTaskRequest } from "@/app-shell/types.js";
 import { useBaseWorkspaceServices } from "@/hooks/useWorkspaceServices.js";
 import { resolveModelProviderConnectivityWorkspacePath } from "@/lib/modelProviderConnectivityTarget.js";
+import { CloudRuntimeSection } from "@/settings/CloudRuntimeSection.js";
+import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
 import {
   createSettingsPageConfig,
   GeneralSectionContent,
@@ -295,14 +297,18 @@ export function SettingsPage({
   user?: UserInfo | null;
 }) {
   const { intl, localePreference, setLocalePreference } = useZCodeIntl();
+  // 云模式判定只看 CloudWorkspaceProvider 是否挂载：非云模式的设置页分区与顺序完全不变
+  // （specs/cloud-agent 04 §3.1 只在云模式下追加「Cloud 运行时」分组）。
+  const isCloudMode = useCloudWorkspaceContext() !== null;
   const { settingsSectionGroups, settingsSections } = useMemo(
     () =>
       createSettingsPageConfig({
         isDesktop: Boolean(isDesktop),
         isMacDesktop: Boolean(isMacDesktop),
         isWindowsDesktop: Boolean(isWindowsDesktop),
+        isCloudMode,
       }),
-    [isDesktop, isMacDesktop, isWindowsDesktop],
+    [isCloudMode, isDesktop, isMacDesktop, isWindowsDesktop],
   );
   const isLinuxDesktop = Boolean(isDesktop && !isMacDesktop && !isWindowsDesktop);
   const usesInlineWindowControls = Boolean(isWindowsDesktop || isLinuxDesktop);
@@ -1936,6 +1942,8 @@ export function SettingsPage({
                               handleEmbeddedBrowserAllowInsecureCertificatesChange
                             }
                           />
+                        ) : activeSection === "cloudRuntime" ? (
+                          <CloudRuntimeSection />
                         ) : activeSection === "computerUse" ? (
                           <ComputerUseSection
                             isDesktop={Boolean(isDesktop)}

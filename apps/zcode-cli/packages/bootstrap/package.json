@@ -20,7 +20,8 @@
     "clean": "node ../../scripts/clean-dist.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint src",
-    "lint:fix": "oxlint --write src"
+    "lint:fix": "oxlint --write src",
+    "test": "node --import tsx --test \"test/*.test.ts\""
   },
   "dependencies": {
     "@zcode/adapters": "workspace:*",

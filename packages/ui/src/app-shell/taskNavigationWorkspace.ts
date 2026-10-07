@@ -19,7 +19,7 @@ export function ensureTaskNavigationWorkspace(params: {
   }
 
   if (workspaceIdentity) {
-    // 远程 workspace 的 identity 只表达隔离身份，不能据此重建 SSH/WSL/Docker
+    // 远程 workspace 的 identity 只表达隔离身份，不能据此重建 SSH
     // attachment。当前窗口没有匹配 tab 时必须 fail-closed，避免创建无法连接的伪远程 tab。
     return { accepted: false, reason: "remote_attachment_missing" };
   }

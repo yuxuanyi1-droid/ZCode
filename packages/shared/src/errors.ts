@@ -29,6 +29,12 @@ export interface NormalizedUnknownError {
 
 export const ZCODE_FILE_LOCK_TIMEOUT_ERROR_CODE = "ZCODE_FILE_LOCK_TIMEOUT" as const;
 
+/**
+ * 旧远程目标 kind（Docker/WSL）在 HTTP/IPC 入口被拒绝的稳定错误码
+ * （specs/cloud-agent/06 §3.1）。请求不会被执行、也不会被转成 SSH 或本机路径。
+ */
+export const REMOTE_TARGET_RETIRED_ERROR_CODE = "remote.targetRetired" as const;
+
 export function stringifyUnknownValue(value: unknown): string {
   if (typeof value === "string") {
     return value;

@@ -82,11 +82,10 @@ export function GitPane({
   });
   const fileActions = useFileContextActions({
     canOpenLocalFileManager: Boolean(isDesktop),
+    // 远端工作区一律不做本机文件管理器 fallback（WSL UNC 边界已随目标退役删除）。
     isRemoteWorkspace:
       Boolean(workspaceRemoteSessionId || workspaceIdentity?.trim()) ||
       workspaceOpenTarget.isRemoteWorkspace,
-    remoteTarget: workspaceOpenTarget.remoteTarget,
-    workspaceIdentity,
   });
   const resolvedTheme = resolveTheme(theme);
   const [expandedPath, setExpandedPath] = useState<string | null>(null);

@@ -17,10 +17,3 @@ export function buildRemoteAgentBundleWrapper(runtimeResourceDir: string): strin
     "",
   ].join("\n");
 }
-
-export function isRemoteAgentBundleWrapperCurrent(
-  content: string,
-  runtimeResourceDir: string,
-): boolean {
-  return content.replace(/\r\n/g, "\n") === buildRemoteAgentBundleWrapper(runtimeResourceDir);
-}

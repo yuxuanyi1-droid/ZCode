@@ -14,6 +14,7 @@
     "./replay": "./src/replay.ts"
   },
   "scripts": {
+    "test": "node --import tsx --test \"test/cloud*.test.ts\" \"test/retired*.test.ts\"",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix"
   },

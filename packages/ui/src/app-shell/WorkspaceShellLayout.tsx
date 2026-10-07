@@ -37,6 +37,10 @@ import { WorkspacePluginPreview } from "@/WorkspacePluginPreview.js";
 import { useIsOfficeMode } from "@/hooks/useInterfaceMode.js";
 import { GitBranchSwitcher } from "@/GitBranchSwitcher.js";
 import { ScopedErrorBoundary } from "@/ErrorBoundary.js";
+import { CloudDraftStartConfigControl } from "@/cloud/CloudDraftStartConfigControl.js";
+import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
+import { resolveCloudTaskIdFromWorkspaceIdentity } from "@/cloud/cloudUiBootstrap.js";
+import { useCloudTaskRuntimeSession } from "@/hooks/cloud/useCloudTaskRuntimeSession.js";
 
 import { AUTOMATIONS_TOAST_ANCHOR_ID, AutomationsSection } from "@/settings/AutomationsSection.js";
 import type {
@@ -837,19 +841,30 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
     },
     [onCreateTask, showChatMainView, workspaceReadOnlyReason],
   );
+  // 云任务工作区的 pane 会话绑定（specs/cloud-agent/W8 §3、04 §3.3、08 §4.1）：
+  // v4 本地语义下 `sessionId ≡ taskId`，云任务不满足——runtime 会话是
+  // `activeRun.runtimeSessionId`（`sess_…`）。把 taskId 当会话 id 订阅会得到
+  // `fault.subscribe.sessionNotFound`（fault 里的 id 就是 taskId），右侧只剩这条错误。
+  // 因此云任务工作区一律改用 runtime 会话；run 未 ready / 首输入未 ack 时该字段缺失，
+  // 按「无会话」渲染空态，绝不用 taskId 或 workspaceIdentity 顶替。
+  // 非云工作区（本地 / SSH / 已配对远控）保持 activeTaskId 原语义不变。
+  const cloudTaskRuntimeSession = useCloudTaskRuntimeSession(workspaceIdentity);
+  const paneSessionId = cloudTaskRuntimeSession.isCloudTaskWorkspace
+    ? cloudTaskRuntimeSession.runtimeSessionId
+    : activeTaskId;
   const shellWorkbenchBinding = useMemo<WorkbenchSessionBinding | null>(
     () =>
-      activeTaskId
+      paneSessionId
         ? {
             workspaceScope: {
               workspacePath: workspaceAbsPath,
               ...(workspaceIdentity?.trim() ? { workspaceIdentity } : {}),
               ...(workspaceRemoteSessionId ? { remoteSessionId: workspaceRemoteSessionId } : {}),
             },
-            sessionId: activeTaskId,
+            sessionId: paneSessionId,
           }
         : null,
-    [activeTaskId, workspaceAbsPath, workspaceIdentity, workspaceRemoteSessionId],
+    [paneSessionId, workspaceAbsPath, workspaceIdentity, workspaceRemoteSessionId],
   );
   const handleCreateAutomationInChat = useCallback(
     (prompt: string, targetWorkspace?: { workspacePath: string; workspaceIdentity?: string }) => {
@@ -1112,6 +1127,11 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
         tab.workspacePath === workspaceAbsPath &&
         (!workspaceIdentity || tab.workspaceIdentity === workspaceIdentity),
     )?.workspacePurpose ?? "project";
+  // 云任务工作区（specs/cloud-agent 04 §3.0/§3.4.1）：只有 cloud-task 身份才启用云草稿
+  // 启动配置控件；本机 / SSH / 已配对远控的 contextHeader 完全不变。projectId 优先取
+  // 控制面选择，避免把 taskId 当路径去挂载本地组件。
+  const cloudTaskId = resolveCloudTaskIdFromWorkspaceIdentity(workspaceIdentity);
+  const cloudProjectId = useCloudWorkspaceContext()?.selection.projectId ?? null;
   const handleSelectConversationWorkspace = useCallback(async () => {
     if (!onResolveConversationWorkspace) {
       return;
@@ -1198,18 +1218,30 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
             remoteSessionId={workspaceRemoteSessionId ?? undefined}
           />
         ) : !isOfficeMode && activeWorkspacePurpose === "project" ? (
-          <GitBranchSwitcher
-            workspacePath={workspaceAbsPath}
-            gitSummary={gitState.summary}
-            dirtyFileCount={gitDirtyFileCount}
-            onRefreshGit={handleRefreshGit}
-            className="px-0 pt-0"
-            popoverClassName="w-72"
-            branchListClassName="max-h-48"
-            // 输入框区域在底部，Radix 碰撞避让会把分支菜单翻到下方。
-            // 这里锁定上方弹出，避免菜单遮挡输入区并保持操作方向稳定。
-            avoidPopoverCollisions={false}
-          />
+          cloudTaskId ? (
+            // 云任务草稿：分支/provider/受控模板由控制面 draftStartConfig 承载
+            // （specs/cloud-agent 04 §3.2、11 §5）。这里不能落回 GitBranchSwitcher——
+            // 无沙箱 draft 没有 runtime，gitService 会落到 attachment_unavailable，
+            // 而「基础分支」在云任务里是控制面事实，不是本地仓库状态（04 §3.4.1）。
+            <CloudDraftStartConfigControl
+              taskId={cloudTaskId}
+              projectId={cloudProjectId}
+              className="px-0 pt-0"
+            />
+          ) : (
+            <GitBranchSwitcher
+              workspacePath={workspaceAbsPath}
+              gitSummary={gitState.summary}
+              dirtyFileCount={gitDirtyFileCount}
+              onRefreshGit={handleRefreshGit}
+              className="px-0 pt-0"
+              popoverClassName="w-72"
+              branchListClassName="max-h-48"
+              // 输入框区域在底部，Radix 碰撞避让会把分支菜单翻到下方。
+              // 这里锁定上方弹出，避免菜单遮挡输入区并保持操作方向稳定。
+              avoidPopoverCollisions={false}
+            />
+          )
         ) : null}
       </>
     ),
@@ -1221,6 +1253,8 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
       allowOpenWorkspace,
       allowRemoteWorkspace,
       activeWorkspacePurpose,
+      cloudProjectId,
+      cloudTaskId,
       gitDirtyFileCount,
       gitState.summary,
       handleRefreshGit,
@@ -1834,6 +1868,10 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
                                   不能用 meta 派生的 activeSessionId——v4 createSession 刚建的会话
                                   不在 taskListCache/optimistic 缓存里，meta 解析为 null 会让 pane
                                   永远停在 draft。v4 语义下 sessionId ≡ taskId，meta 只服务 Header 显示。
+                                  云任务工作区是这条等式的例外：runtime 会话是
+                                  activeRun.runtimeSessionId（sess_…），taskId 订阅会被 runtime 以
+                                  fault.subscribe.sessionNotFound 拒绝，因此那里改用 paneSessionId
+                                  （无 runtime 会话时为 null → 草稿空态）。
                                   桌面主区升级为分屏宿主（Layout/Focus 两层）；primary pane
                                   绑定语义与 testid 契约（paneId=workspace-main）不变。 */}
                             <V4WorkspaceChatArea
@@ -1843,7 +1881,7 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
                               workspaceIdentity={workspaceIdentity}
                               isDesktop={isDesktop === true}
                               remoteSessionId={workspaceRemoteSessionId}
-                              sessionId={activeTaskId}
+                              sessionId={paneSessionId}
                               activeSelectionSideChatSessionId={activeSelectionSideChatSessionId}
                               provider={activeTaskProvider ?? undefined}
                               onSessionCreated={handleV4SessionCreated}

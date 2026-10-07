@@ -21,6 +21,14 @@ export {
   ZCODE_BUILTIN_PROVIDER_CONFIG_FILE_ENV,
 } from "@zcode/provider-node";
 
+export {
+  CLOUD_EXECUTION_NODE_AUTHORITY_MODE,
+  isCloudExecutionNodeMode,
+  resolveServiceAuthorityPolicy,
+  type ServiceAuthorityPolicy,
+} from "./serviceAuthorityPolicy.js";
+export { resolveZCodeAgentPresentationSurface } from "./zcode-agent/zcodeAgentPresentationSurface.js";
+
 export { createFileService } from "./file/fileService.js";
 export {
   attributeHostProcessTree,
@@ -346,6 +354,7 @@ import { createZCodeAgentService } from "./zcode-agent/zcodeAgentService.js";
 import type { ZCodeAgentCommandResolver } from "./zcode-agent/zcodeAgentProcessManager.js";
 import { buildAgentTelemetrySpawnEnv } from "./zcode-agent/agentTelemetryEnv.js";
 import { resolveZCodeAgentPresentationSurface } from "./zcode-agent/zcodeAgentPresentationSurface.js";
+import { resolveServiceAuthorityPolicy } from "./serviceAuthorityPolicy.js";
 import { createZCodeTaskServiceAdapter } from "./zcode-agent/zcodeTaskServiceAdapter.js";
 import { createZCodeSessionService } from "./zcode-session/zcodeSessionService.js";
 import { createZCodeTaskIndexSyncer } from "./zcode-agent/zcodeTaskIndexSyncer.js";
@@ -1369,6 +1378,9 @@ export function createLocalServices(options: {
   cuaOperationStateReporter?: CuaOperationStateReporter;
 }): ServiceCollection {
   const isDesktopAttachedRemote = options?.serviceAuthorityMode === "desktop-attached-remote";
+  // authority 策略是「本模式能不能做本机/账号侧的事」的唯一判据（07 §2.7/§8、12 §6）；
+  // 既有三种模式的结论与原内联判定逐项一致，cloud-execution-node 是新增列。
+  const authority = resolveServiceAuthorityPolicy(options?.serviceAuthorityMode);
   // host / remote server 以前直接沿用当前进程环境启动后续服务。
   // GUI 启动的 desktop、SSH/WSL/Docker 拉起的 remote server 往往拿不到用户 login shell 里的 PATH，
   // 导致 bun 这类只在 shell profile 里追加的命令在 ZCode Agent/终端里不可见。
@@ -1847,7 +1859,7 @@ export function createLocalServices(options: {
   // enabled 与 onCuaPipSessionLifecycle 是否挂上，都由 serviceAuthorityMode 单点决定；
   // 提出来命名，避免下面的启动期诊断与真实取值漂移。
   const cuaPipSessionEnabled =
-    process.platform === "darwin" && options?.serviceAuthorityMode === "desktop-local";
+    process.platform === "darwin" && authority.exposesDesktopLocalExecution;
   const cuaPipSessionService = createCuaPipSessionService({
     enabled: cuaPipSessionEnabled,
     resolveCredentials: async () => {
@@ -1871,7 +1883,7 @@ export function createLocalServices(options: {
     enabled: cuaPipSessionEnabled,
     platform: process.platform,
     serviceAuthorityMode: options?.serviceAuthorityMode ?? null,
-    lifecycleWired: options?.serviceAuthorityMode === "desktop-local",
+    lifecycleWired: authority.exposesDesktopLocalExecution,
   });
   // Computer Use Helper macOS 权限状态服务：renderer 经 host RPC 查询当前 Helper 的运行态与权限，并在
   // 用户授权后从明确入口精确重启一次 Helper。重启**必须走 resolver.restart()**（不是裸 host.restart），
@@ -2074,14 +2086,13 @@ export function createLocalServices(options: {
   // OffPeakTaskService 单例在下方 DI register IIFE 中创建（晚于 agent service）；
   // 用前向引用 holder 惰性绑定——offPeak/create 协议请求只会发生在服务集合装配完成后。
   let offPeakTaskServiceForAgent: OffPeakTaskService | undefined;
-  // desktop-attached-remote 装配不暴露 Off-Peak 工具面（远程不在支持范围）。
-  const offPeakToolWiring =
-    options?.serviceAuthorityMode === "desktop-attached-remote"
-      ? {}
-      : {
-          resolveOffPeakClientConfig: () => codingPlanSubscriptionService.getOffPeakClientConfig(),
-          resolveOffPeakTaskService: () => offPeakTaskServiceForAgent,
-        };
+  // host 绑定工具面（账号域 Off-Peak）：desktop-attached-remote 与云执行节点都不暴露。
+  const offPeakToolWiring = !authority.exposesHostBoundTooling
+    ? {}
+    : {
+        resolveOffPeakClientConfig: () => codingPlanSubscriptionService.getOffPeakClientConfig(),
+        resolveOffPeakTaskService: () => offPeakTaskServiceForAgent,
+      };
   const zcodeAgentService = createZCodeAgentService({
     ...(agentAccountProviderConfigSource
       ? { accountProviderConfigSource: agentAccountProviderConfigSource }
@@ -2132,7 +2143,7 @@ export function createLocalServices(options: {
       ? options?.cuaOperationStateReporter
       : undefined,
     // ZCode 只发布 turn/session 事实；面板 terminal policy 由 producer coordinator 决定。
-    ...(options?.serviceAuthorityMode === "desktop-local"
+    ...(authority.exposesDesktopLocalExecution
       ? {
           onCuaPipSessionLifecycle: (_workspace, event) => {
             void cuaPipSessionService.publishLifecycle(event);
@@ -2246,9 +2257,11 @@ export function createLocalServices(options: {
         }),
       };
     },
-    ...(isDesktopAttachedRemote
+    ...(!authority.answersRuntimePreferencesLocally
       ? { sessionRuntimePreferencesAuthority: "external" as const }
       : {
+          // 云执行节点走本地应答：设置/策略快照来自节点自身已授权快照，
+          // 不依赖浏览器在线、也不回落页面本地值（07 §8 表首行）。
           sessionRuntimePreferencesAuthority: "local" as const,
           resolveSessionRuntimePreferences: async (scope) => {
             // 预算已统一，不能把可选远端配置作为本地/手机 shared-host 建会话的前置条件。
@@ -2418,7 +2431,7 @@ export function createLocalServices(options: {
       return tokenSet?.zcodeJwtToken ?? tokenSet?.accessToken ?? null;
     },
   });
-  const conversationShareService: IConversationShareServiceType = isDesktopAttachedRemote
+  const conversationShareService: IConversationShareServiceType = !authority.exposesHostBoundTooling
     ? createUnsupportedConversationShareService({
         message: "Conversation publishing is not available for remote workspaces",
       })
@@ -2459,7 +2472,7 @@ export function createLocalServices(options: {
         remoteWorkspaceService: botRemoteWorkspaceService,
         // 远端与本地 Bot 都读取所属 Environment 的 Model Selection View。
         // 远端启动期不再轮询旧 Preset，避免重新制造一套模型候选事实。
-        runStartupBackgroundTasks: !isDesktopAttachedRemote,
+        runStartupBackgroundTasks: authority.exposesHostBoundTooling,
       }),
     )
     .register(IFileWatcherService, createFileWatcherService())
@@ -2620,7 +2633,11 @@ export function createLocalServices(options: {
   services
     .register(IProviderSettingsService, providerRuntime.providerSettings)
     .register(IModelSelectionService, providerRuntime.modelSelection);
-  if (isDesktopAttachedRemote || options.providerProvisioningTargetEnabled === true) {
+  // 云执行节点必须开启：envelope 只能经认证通道下发并由节点本地安装（12 §6 A-08）。
+  if (
+    authority.exposesProviderProvisioningTarget ||
+    options.providerProvisioningTargetEnabled === true
+  ) {
     services.register(
       IProviderProvisioningTargetService,
       createProviderProvisioningTarget({

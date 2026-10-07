@@ -11,6 +11,7 @@ import {
   appSettingsSchema,
   formatLogPrefix,
   formatZodError,
+  hasLegacyRetiredRemoteTargets,
 } from "@zcode/shared";
 import type { ISettingService } from "./setting.js";
 import { normalizeSettingsPatch } from "#src/setting/normalizeSettingsPatch.js";
@@ -104,7 +105,11 @@ function shouldPersistSettingsMigrations(rawValue: unknown): boolean {
     (needsLegacyAccountConnectionMigration(rawValue) &&
       readIncompleteLegacyTeamConnections(rawValue).length === 0) ||
     raw.closeToTrayOnWindowsMigrationInitialized !== true ||
-    raw.messageStreamShowReasoningMigrationInitialized !== true
+    raw.messageStreamShowReasoningMigrationInitialized !== true ||
+    // 旧 Docker/WSL 远端目标记录需要把只读失效投影写回磁盘（specs/cloud-agent/06 §3.3）：
+    // 读取时已由 settings schema 迁移，这里只在文件里仍存在旧 kind 时才触发一次异步原子写回，
+    // 落盘后判定不再成立，因此重复启动幂等。
+    hasLegacyRetiredRemoteTargets(rawValue)
   );
 }
 

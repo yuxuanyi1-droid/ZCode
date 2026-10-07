@@ -9,6 +9,7 @@ import type {
   IPlatformService,
   RemoteTarget,
   RemoteWorkspaceSessionEntry,
+  RetiredRemoteWorkspaceEntry,
   UpdateStatePayload,
   UserInfo,
 } from "@zcode/shared";
@@ -102,6 +103,8 @@ export interface AppProps {
   allowOpenWorkspace?: boolean;
   allowRemoteWorkspace?: boolean;
   remoteWorkspaceSessions?: RemoteWorkspaceSessionEntry[];
+  /** 已退役远端目标（Docker/WSL）的只读失效记录；仅展示，不参与连接/恢复。 */
+  retiredRemoteWorkspaceEntries?: RetiredRemoteWorkspaceEntry[];
   workspaceAbsPath: string;
   workspaceRemoteSessionId?: string;
   workspaceIdentity?: string;

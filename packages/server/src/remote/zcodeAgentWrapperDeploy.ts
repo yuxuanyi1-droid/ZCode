@@ -1,6 +1,3 @@
-import { writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { IRemoteBackend } from "@zcode/server/remote/backend.js";
 import {
   buildRemoteExecutableReplaceCommand,
@@ -8,34 +5,17 @@ import {
 } from "@zcode/server/remote/deployShared.js";
 import { buildWriteLiteralFileCommand } from "@zcode/server/remote/posixShell.js";
 
-export function isWslBackend(backend: IRemoteBackend): boolean {
-  return (backend as { kind?: string }).kind === "wsl";
-}
-
+/**
+ * 写入远端 agent wrapper。Docker/WSL 远端目标退役后，原先按 backend kind 分支的
+ * 字节上传路径（`wsl.exe -- bash -lc` 会提前展开多行参数）随之删除，
+ * SSH 统一走远端 shell 写入路径。
+ */
 export async function deployRemoteAgentWrapper(params: {
   backend: IRemoteBackend;
   content: string;
   remoteWrapperPath: string;
 }): Promise<void> {
   const remoteWrapperTempPath = `${params.remoteWrapperPath}.new`;
-  if (isWslBackend(params.backend)) {
-    const localTempPath = join(tmpdir(), `zcode-agent-wrapper-${process.pid}-${Date.now()}.sh`);
-    try {
-      // WSL 的 `wsl.exe -- bash -lc <command>` 会让多行 shell 参数里的
-      // `$HOME`、`$runtime_root`、`$@` 提前展开，生成 `exec "/node" ...` 的坏 wrapper。
-      // 仅 WSL 按字节上传临时文件，SSH 仍走远端 shell 写入路径。
-      await writeFile(localTempPath, params.content, "utf8");
-      await params.backend.upload(localTempPath, remoteWrapperTempPath);
-      const replaceStream = await params.backend.exec(
-        buildRemoteExecutableReplaceCommand(remoteWrapperTempPath, params.remoteWrapperPath),
-      );
-      await waitForClose(replaceStream);
-    } finally {
-      await rm(localTempPath, { force: true });
-    }
-    return;
-  }
-
   const stream = await params.backend.exec(
     [
       buildWriteLiteralFileCommand(remoteWrapperTempPath, params.content),

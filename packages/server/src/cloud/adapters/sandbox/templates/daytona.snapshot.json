@@ -1,0 +1,41 @@
+{
+  "$schema": "https://zcode.local/schemas/daytona-sandbox-snapshot.json",
+  "name": "zcode-sandbox-template",
+  "sourceImage": "node:24-slim",
+  "resources": {
+    "cpu": 2,
+    "memoryGiB": 4,
+    "diskGiB": 10
+  },
+  "setupCommands": [
+    "apt-get update && apt-get install -y --no-install-recommends ca-certificates git && rm -rf /var/lib/apt/lists/*",
+    "mkdir -p /opt/zcode/provider /workspace",
+    "chmod 0777 /workspace",
+    "chmod 0755 /opt/zcode/start.sh /opt/zcode/start-supervisor.sh"
+  ],
+  "stagedArtifacts": [
+    "/opt/zcode/start.sh",
+    "/opt/zcode/start-supervisor.sh",
+    "/opt/zcode/supervisor.bundle.mjs",
+    "/opt/zcode/runtimeStub.bundle.mjs",
+    "/opt/zcode/zcode-server.cjs",
+    "/opt/zcode/zcode-cli.cjs",
+    "/opt/zcode/provider/zcode-builtin.json"
+  ],
+  "createPayloadReference": {
+    "snapshot": "zcode-sandbox-template",
+    "autoStopInterval": 0,
+    "autoPauseInterval": 0,
+    "autoArchiveInterval": 0,
+    "autoDeleteInterval": -1,
+    "ttlMinutes": "由 Run 的 requestedDeadline 换算（分钟、向上取整，收敛到账号上限）"
+  },
+  "notes": [
+    "Daytona 的 stop/pause/archive 只停不删（保留磁盘与计费），只有 delete 释放资源；控制面 terminate 一律映射 DELETE（01 §4.2）。",
+    "带 snapshot 的 create 拒绝覆盖 resources（provider 明确拒绝），因此资源由本快照固定，create 不下发 input.resources（差异记录，不伪造成功）。",
+    "idle 类自动回收在 create 时显式关闭，避免 provider 自动回收抢在 checkpoint 前；硬期限统一由 ttlMinutes 收敛（01 §4.3）。",
+    "快照构建为部署动作（dashboard/API），不在运行期生成；上线后把部署配置的 ZCODE_CLOUD_SANDBOX_TEMPLATE_REF（形如 daytona:zcode-sandbox-template）指向本快照名，保持版本固定；接纳期会把该 ref 冻结进 Run recipe，部署默认值变化只影响新任务。",
+    "镜像与布局要求与 e2b.Dockerfile 等价：SSH 同构布局由 start-supervisor.sh 在启动时幂等物化（~/.zcode/server）。",
+    "supervisor 的运行状态目录由 supervisor 自建（~/.zcode/run，HOME 下、0700）：镜像不再预建 /run/zcode-bridge（旧路径已废弃，模板重建后生效）。"
+  ]
+}

@@ -3,7 +3,12 @@ import { z } from "zod";
 import type { AppSettings } from "./protocol.js";
 import { REMOTE_ASSET_INSTALL_MODES } from "./remoteAssetInstallMode.js";
 import { isKnownRemoteResourcePackageId } from "./remoteResourcePackages.js";
-import { wslUserSchema } from "./wslUserValidation.js";
+import {
+  normalizeRetiredRemoteWorkspaceEntry,
+  projectRetiredRemoteWorkspaceEntry,
+  retiredRemoteWorkspaceEntrySchema,
+  type RetiredRemoteWorkspaceEntry,
+} from "./retiredRemoteWorkspace.js";
 import { normalizeZCodeEndpointOrigin } from "./zcodeEndpoint.js";
 import {
   DEFAULT_EMBEDDED_BROWSER_VIEWPORT_PREFERENCE,
@@ -73,34 +78,22 @@ const skippedElectronUpdateVersionsSchema = z
   .partialRecord(electronReleaseChannelSchema, nonEmptyStringSchema)
   .default({});
 
-const remoteWorkspaceTargetSchema = z.discriminatedUnion("kind", [
-  z.object({
-    kind: z.literal("ssh"),
-    host: nonEmptyStringSchema,
-    port: z.number().int().positive().max(65535).optional(),
-    username: nonEmptyStringSchema,
-    sshConfigAlias: nonEmptyStringSchema.optional(),
-    privateKeyPath: z.string().optional(),
-    assetInstallMode: z.enum(REMOTE_ASSET_INSTALL_MODES).optional(),
-    resourcePackages: z
-      .object({
-        selectedPackageIds: z.array(z.string().refine(isKnownRemoteResourcePackageId)).optional(),
-      })
-      .optional(),
-    passwordCredentialKey: nonEmptyStringSchema.optional(),
-    privateKeyPassphraseCredentialKey: nonEmptyStringSchema.optional(),
-  }),
-  z.object({
-    kind: z.literal("wsl"),
-    distro: z.string().optional(),
-    // 远程历史重连会直接使用 settings 中的 WSL user，必须和连接入口共用校验，避免绕过 UI 后污染 identity/日志。
-    user: wslUserSchema.optional(),
-  }),
-  z.object({
-    kind: z.literal("docker"),
-    container: nonEmptyStringSchema,
-  }),
-]);
+const remoteWorkspaceTargetSchema = z.object({
+  kind: z.literal("ssh"),
+  host: nonEmptyStringSchema,
+  port: z.number().int().positive().max(65535).optional(),
+  username: nonEmptyStringSchema,
+  sshConfigAlias: nonEmptyStringSchema.optional(),
+  privateKeyPath: z.string().optional(),
+  assetInstallMode: z.enum(REMOTE_ASSET_INSTALL_MODES).optional(),
+  resourcePackages: z
+    .object({
+      selectedPackageIds: z.array(z.string().refine(isKnownRemoteResourcePackageId)).optional(),
+    })
+    .optional(),
+  passwordCredentialKey: nonEmptyStringSchema.optional(),
+  privateKeyPassphraseCredentialKey: nonEmptyStringSchema.optional(),
+});
 
 const appWorkspaceSessionEntrySchema = z.discriminatedUnion("kind", [
   z.object({
@@ -118,6 +111,8 @@ const appWorkspaceSessionEntrySchema = z.discriminatedUnion("kind", [
     lastConnectionStatus: z.enum(["connected", "failed"]),
     lastConnectionError: z.string().optional(),
   }),
+  // 退役远端目标的只读失效投影（specs/cloud-agent/06 §3.2）；不含可执行 target/凭据。
+  retiredRemoteWorkspaceEntrySchema,
 ]);
 
 const zcodeEndpointOriginSchema = z.preprocess((value) => {
@@ -252,11 +247,31 @@ const legacyRemoteWorkspaceHistoryEntrySchema = z.object({
   workspacePath: nonEmptyStringSchema,
   localWorkspacePath: nonEmptyStringSchema.optional(),
   workspaceIdentity: nonEmptyStringSchema.optional(),
+  // 只覆盖 SSH；更老历史里的 wsl/docker 项由 projectRetiredRemoteWorkspaceEntry 单独投影。
   target: remoteWorkspaceTargetSchema,
   lastOpenedAt: z.number().int().nonnegative(),
   lastConnectionStatus: z.enum(["connected", "failed"]),
   lastConnectionError: z.string().optional(),
 });
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * 受限 legacy reader：把旧记录读成退役只读失效记录。
+ * 只读取展示/归属字段；已经是只读投影的条目按严格 schema 复核，非法条目返回 null。
+ */
+function resolveRetiredRemoteWorkspaceEntry(value: unknown): RetiredRemoteWorkspaceEntry | null {
+  if (isRecord(value) && value.kind === "retired-remote") {
+    return normalizeRetiredRemoteWorkspaceEntry(value);
+  }
+  return projectRetiredRemoteWorkspaceEntry(value);
+}
+
+function buildRetiredRemoteWorkspaceEntryKey(entry: RetiredRemoteWorkspaceEntry): string {
+  return entry.workspaceIdentity?.trim() || entry.workspacePath;
+}
 
 function stripHistoricalRemoteResourcePackages(target: unknown): unknown {
   if (!target || typeof target !== "object" || Array.isArray(target)) {
@@ -272,6 +287,15 @@ function stripHistoricalRemoteResourcePackages(target: unknown): unknown {
   // SSH 部署固定使用完整 active 资源集；旧 setting.json 里的 resourcePackages 是历史裁剪，
   // 在配置入口清掉，避免后续重连或 tab 恢复继续读取。
   return nextTarget;
+}
+
+/**
+ * 逐条校验迁移后的会话项：单条历史记录格式非法时只丢弃该条，
+ * 绝不让一条坏记录把整份 setting.json 拖回默认值（specs/cloud-agent/06 §3.3）。
+ */
+function keepValidWorkspaceSessionEntry(value: unknown): Record<string, unknown>[] {
+  const parsed = appWorkspaceSessionEntrySchema.safeParse(value);
+  return parsed.success ? [parsed.data as Record<string, unknown>] : [];
 }
 
 function migrateLegacyWorkspaceSession(value: unknown): unknown {
@@ -301,72 +325,112 @@ function migrateLegacyWorkspaceSession(value: unknown): unknown {
     : [];
   const legacyRemoteHistoryById = new Map(
     legacyRemoteHistory.flatMap((entry) => {
-      const sanitizedEntry =
-        entry && typeof entry === "object" && !Array.isArray(entry)
-          ? {
-              ...(entry as Record<string, unknown>),
-              // 更老的 remoteWorkspaceHistory 可能保存了已退役资源包 ID。
-              // 先剥离历史选择再走 schema，避免迁移阶段误删整条远程历史。
-              target: stripHistoricalRemoteResourcePackages(
-                (entry as Record<string, unknown>).target,
-              ),
-            }
-          : entry;
+      if (!isRecord(entry)) {
+        return [];
+      }
+      const sanitizedEntry = {
+        ...entry,
+        // 更老的 remoteWorkspaceHistory 可能保存了已退役资源包 ID。
+        // 先剥离历史选择再走 schema，避免迁移阶段误删整条远程历史。
+        target: stripHistoricalRemoteResourcePackages(entry.target),
+      };
       const parsed = legacyRemoteWorkspaceHistoryEntrySchema.safeParse(sanitizedEntry);
       return parsed.success ? [[parsed.data.id, parsed.data] as const] : [];
     }),
   );
+  const legacyRetiredHistoryById = new Map(
+    legacyRemoteHistory.flatMap((entry) => {
+      if (!isRecord(entry) || typeof entry.id !== "string" || entry.id.length === 0) {
+        return [];
+      }
+      const retired = resolveRetiredRemoteWorkspaceEntry(entry);
+      return retired ? [[entry.id, retired] as const] : [];
+    }),
+  );
+  const consumedLegacyHistoryIds = new Set<string>();
+
+  // 退役目标是只读失效记录：原 kind/label/workspaceIdentity/workspacePath/最近打开时间与
+  // 显示用 authority 保留，禁止重新进入活跃 target/连接路径（specs/cloud-agent/06 §3.2）。
+  const retiredEntries: RetiredRemoteWorkspaceEntry[] = [];
+  const seenRetiredWorkspaceKeys = new Set<string>();
+  const pushRetiredEntry = (entry: RetiredRemoteWorkspaceEntry | null): void => {
+    if (!entry) {
+      return;
+    }
+    const key = buildRetiredRemoteWorkspaceEntryKey(entry);
+    if (seenRetiredWorkspaceKeys.has(key)) {
+      return;
+    }
+    seenRetiredWorkspaceKeys.add(key);
+    retiredEntries.push(entry);
+  };
 
   const migratedWorkspaceSessionEntries: Record<string, unknown>[] =
     lastWorkspaceSession.length > 0
       ? lastWorkspaceSession.flatMap((entry): Record<string, unknown>[] => {
-          if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+          if (!isRecord(entry)) {
             return [];
           }
 
-          const rawEntry = entry as Record<string, unknown>;
+          const rawEntry = entry;
+
+          // 已投影过的只读记录：严格复核后保留，不做任何连接相关投影。
+          if (rawEntry.kind === "retired-remote") {
+            pushRetiredEntry(resolveRetiredRemoteWorkspaceEntry(rawEntry));
+            return [];
+          }
+
           if (rawEntry.kind === "local" && typeof rawEntry.workspacePath === "string") {
-            return [
-              {
-                kind: "local",
-                workspacePath: rawEntry.workspacePath,
-                workspacePurpose:
-                  rawEntry.workspacePurpose === "conversation" ? "conversation" : "project",
-              },
-            ];
+            return keepValidWorkspaceSessionEntry({
+              kind: "local",
+              workspacePath: rawEntry.workspacePath,
+              workspacePurpose:
+                rawEntry.workspacePurpose === "conversation" ? "conversation" : "project",
+            });
           }
 
           if (rawEntry.kind === "remote") {
+            // WSL/Docker 旧记录先投影成退役只读记录：只保留展示/归属字段，
+            // target、连接状态和凭据都不进入活跃条目。
+            const retiredEntry = resolveRetiredRemoteWorkspaceEntry(rawEntry);
+            if (retiredEntry) {
+              pushRetiredEntry(retiredEntry);
+              return [];
+            }
+
             if (typeof rawEntry.workspacePath === "string" && rawEntry.target) {
-              return [
-                {
-                  ...rawEntry,
-                  target: stripHistoricalRemoteResourcePackages(rawEntry.target),
-                },
-              ];
+              return keepValidWorkspaceSessionEntry({
+                ...rawEntry,
+                target: stripHistoricalRemoteResourcePackages(rawEntry.target),
+              });
             }
 
             if (typeof rawEntry.historyId === "string") {
+              consumedLegacyHistoryIds.add(rawEntry.historyId);
+              const legacyRetiredEntry = legacyRetiredHistoryById.get(rawEntry.historyId);
+              if (legacyRetiredEntry) {
+                pushRetiredEntry(legacyRetiredEntry);
+                return [];
+              }
+
               const legacyRemoteEntry = legacyRemoteHistoryById.get(rawEntry.historyId);
               return legacyRemoteEntry
-                ? [
-                    {
-                      kind: "remote",
-                      workspacePath: legacyRemoteEntry.workspacePath,
-                      ...(legacyRemoteEntry.localWorkspacePath
-                        ? { localWorkspacePath: legacyRemoteEntry.localWorkspacePath }
-                        : {}),
-                      ...(legacyRemoteEntry.workspaceIdentity
-                        ? { workspaceIdentity: legacyRemoteEntry.workspaceIdentity }
-                        : {}),
-                      target: stripHistoricalRemoteResourcePackages(legacyRemoteEntry.target),
-                      lastOpenedAt: legacyRemoteEntry.lastOpenedAt,
-                      lastConnectionStatus: legacyRemoteEntry.lastConnectionStatus,
-                      ...(legacyRemoteEntry.lastConnectionError
-                        ? { lastConnectionError: legacyRemoteEntry.lastConnectionError }
-                        : {}),
-                    },
-                  ]
+                ? keepValidWorkspaceSessionEntry({
+                    kind: "remote",
+                    workspacePath: legacyRemoteEntry.workspacePath,
+                    ...(legacyRemoteEntry.localWorkspacePath
+                      ? { localWorkspacePath: legacyRemoteEntry.localWorkspacePath }
+                      : {}),
+                    ...(legacyRemoteEntry.workspaceIdentity
+                      ? { workspaceIdentity: legacyRemoteEntry.workspaceIdentity }
+                      : {}),
+                    target: stripHistoricalRemoteResourcePackages(legacyRemoteEntry.target),
+                    lastOpenedAt: legacyRemoteEntry.lastOpenedAt,
+                    lastConnectionStatus: legacyRemoteEntry.lastConnectionStatus,
+                    ...(legacyRemoteEntry.lastConnectionError
+                      ? { lastConnectionError: legacyRemoteEntry.lastConnectionError }
+                      : {}),
+                  })
                 : [];
             }
           }
@@ -374,16 +438,24 @@ function migrateLegacyWorkspaceSession(value: unknown): unknown {
           return [];
         })
       : [];
+
+  // 更老历史格式里未被 lastWorkspaceSession 引用的退役记录同样是用户历史：
+  // 它们不能再连接，但保留为只读失效投影，避免迁移时静默删除用户数据。
+  for (const [historyId, retiredEntry] of legacyRetiredHistoryById) {
+    if (consumedLegacyHistoryIds.has(historyId)) {
+      continue;
+    }
+    pushRetiredEntry(retiredEntry);
+  }
+
   const migratedLegacyLocalEntries = Array.isArray(raw.lastOpenTabs)
     ? raw.lastOpenTabs.flatMap((workspacePath) =>
         typeof workspacePath === "string"
-          ? [
-              {
-                kind: "local" as const,
-                workspacePath,
-                workspacePurpose: "project" as const,
-              },
-            ]
+          ? keepValidWorkspaceSessionEntry({
+              kind: "local",
+              workspacePath,
+              workspacePurpose: "project",
+            })
           : [],
       )
     : [];
@@ -396,8 +468,10 @@ function migrateLegacyWorkspaceSession(value: unknown): unknown {
   );
   const nextWorkspaceSession = [
     ...migratedWorkspaceSessionEntries,
+    // 退役只读投影稳定排在末尾，重复读取/写回不会改变顺序（幂等）。
+    ...retiredEntries,
     ...migratedLegacyLocalEntries.filter(
-      (entry) => !existingLocalWorkspacePaths.has(entry.workspacePath),
+      (entry) => !existingLocalWorkspacePaths.has(String(entry.workspacePath)),
     ),
   ];
 

@@ -5,6 +5,7 @@ import type {
   RemoteTarget,
   RemoteTargetSnapshot,
   RemoteWorkspaceSessionEntry,
+  RetiredRemoteWorkspaceEntry,
 } from "@zcode/shared";
 import type { WindowTabState } from "@/store/tabStore.js";
 import { isWorkspaceTab } from "@/store/tabStore.js";
@@ -35,13 +36,9 @@ function buildRemoteWorkspacePrivateKeyPassphraseCredentialKey(workspaceKey: str
 }
 
 function collectRemoteWorkspaceCredentialKeys(snapshot: RemoteTargetSnapshot): string[] {
-  if (snapshot.kind === "ssh") {
-    return [snapshot.passwordCredentialKey, snapshot.privateKeyPassphraseCredentialKey].filter(
-      (key): key is string => typeof key === "string" && key.length > 0,
-    );
-  }
-
-  return [];
+  return [snapshot.passwordCredentialKey, snapshot.privateKeyPassphraseCredentialKey].filter(
+    (key): key is string => typeof key === "string" && key.length > 0,
+  );
 }
 
 export function hasRemoteWorkspaceIdentity(entry: {
@@ -52,58 +49,41 @@ export function hasRemoteWorkspaceIdentity(entry: {
   return Boolean(entry.remoteSessionId || entry.remoteTarget || entry.workspaceIdentity);
 }
 
-type WslRemoteTargetLike = Extract<RemoteTarget | RemoteTargetSnapshot, { kind: "wsl" }>;
-
-function getWslRemoteTargetUser(target: WslRemoteTargetLike): string | undefined {
-  return target.user?.trim() || undefined;
+/** 退役记录的只读展示文本；authority 只用于显示，不参与连接。 */
+export function formatRetiredRemoteWorkspaceEntryLabel(entry: RetiredRemoteWorkspaceEntry): string {
+  const authority = entry.originalAuthority;
+  if (entry.retiredKind === "docker") {
+    return ["Docker", authority?.container].filter(Boolean).join(" · ");
+  }
+  return ["WSL", authority?.distro, authority?.user].filter(Boolean).join(" · ");
 }
 
-function formatWslRemoteTargetAuthority(target: WslRemoteTargetLike): string {
-  const user = getWslRemoteTargetUser(target);
-  if (target.distro) {
-    return user ? `wsl:${target.distro}:${user}` : `wsl:${target.distro}`;
-  }
-
-  return user ? `wsl:default:${user}` : "wsl";
+/** 读取退役远端目标的只读失效记录（不参与恢复、不参与连接）。 */
+export function readRetiredRemoteWorkspaceEntries(
+  settings: Pick<AppSettings, "lastWorkspaceSession">,
+): RetiredRemoteWorkspaceEntry[] {
+  return (settings.lastWorkspaceSession ?? []).flatMap((entry) =>
+    entry.kind === "retired-remote" ? [entry] : [],
+  );
 }
 
 export function formatRemoteWorkspaceTargetSubtitle(
   target: RemoteTarget | RemoteTargetSnapshot,
 ): string {
-  switch (target.kind) {
-    case "ssh":
-      return `SSH · ${target.username}@${target.host}${target.port ? `:${target.port}` : ""}`;
-    case "wsl": {
-      const user = getWslRemoteTargetUser(target);
-      return ["WSL", target.distro, user].filter(Boolean).join(" · ");
-    }
-    case "docker":
-      return `Docker · ${target.container}`;
-  }
+  return `SSH · ${target.username}@${target.host}${target.port ? `:${target.port}` : ""}`;
 }
 
 export function formatRemoteWorkspaceHeaderHostLabel(
   target: RemoteTarget | RemoteTargetSnapshot,
 ): string {
-  switch (target.kind) {
-    case "ssh":
-      return target.port && target.port !== 22 ? `${target.host}:${target.port}` : target.host;
-    case "wsl":
-      return formatWslRemoteTargetAuthority(target);
-    case "docker":
-      return `docker:${target.container}`;
-  }
+  return target.port && target.port !== 22 ? `${target.host}:${target.port}` : target.host;
 }
 
 export function formatRemoteWorkspaceDisplayLabel(
   label: string,
   target?: RemoteTarget | RemoteTargetSnapshot,
 ): string {
-  if (target?.kind !== "ssh") {
-    return label;
-  }
-
-  const sshConfigAlias = target.sshConfigAlias?.trim();
+  const sshConfigAlias = target?.sshConfigAlias?.trim();
   return sshConfigAlias ? `${label} [SSH: ${sshConfigAlias}]` : label;
 }
 
@@ -115,23 +95,10 @@ function normalizeWorkspacePathForIdentity(path: string): string {
 }
 
 function getRemoteWorkspaceAuthorityKey(target: RemoteTarget | RemoteTargetSnapshot): string {
-  switch (target.kind) {
-    case "ssh": {
-      const normalizedHost = target.host.trim().toLowerCase();
-      const normalizedUsername = target.username.trim();
-      const normalizedPort = target.port ?? 22;
-      return ["ssh", normalizedHost, normalizedPort, normalizedUsername].join(":");
-    }
-    case "wsl": {
-      // WSL 默认用户与 root/其他显式用户的文件权限边界不同，
-      // workspace identity 必须区分显式 user，避免 session、缓存和队列串用。
-      const user = getWslRemoteTargetUser(target);
-      const base = ["wsl", target.distro ?? "default"];
-      return user ? [...base, user].join(":") : base.join(":");
-    }
-    case "docker":
-      return ["docker", target.container].join(":");
-  }
+  const normalizedHost = target.host.trim().toLowerCase();
+  const normalizedUsername = target.username.trim();
+  const normalizedPort = target.port ?? 22;
+  return ["ssh", normalizedHost, normalizedPort, normalizedUsername].join(":");
 }
 
 export function buildRemoteWorkspaceIdentity(
@@ -178,43 +145,27 @@ function createRemoteTargetSnapshot(
   target: RemoteTarget,
   previousSnapshot?: RemoteTargetSnapshot,
 ): RemoteTargetSnapshot {
-  switch (target.kind) {
-    case "ssh":
-      return {
-        kind: "ssh",
-        host: target.host,
-        port: target.port,
-        username: target.username,
-        ...(target.sshConfigAlias?.trim() ? { sshConfigAlias: target.sshConfigAlias.trim() } : {}),
-        assetInstallMode: target.assetInstallMode,
-        privateKeyPath: target.privateKeyPath,
-        passwordCredentialKey:
-          target.password && target.password.length > 0
-            ? previousSnapshot?.kind === "ssh" && previousSnapshot.passwordCredentialKey
-              ? previousSnapshot.passwordCredentialKey
-              : buildRemoteWorkspacePasswordCredentialKey(workspaceKey)
-            : undefined,
-        privateKeyPassphraseCredentialKey:
-          target.privateKeyPassphrase && target.privateKeyPassphrase.length > 0
-            ? previousSnapshot?.kind === "ssh" && previousSnapshot.privateKeyPassphraseCredentialKey
-              ? previousSnapshot.privateKeyPassphraseCredentialKey
-              : buildRemoteWorkspacePrivateKeyPassphraseCredentialKey(workspaceKey)
-            : undefined,
-      };
-    case "wsl": {
-      const user = target.user?.trim();
-      return {
-        kind: "wsl",
-        distro: target.distro,
-        ...(user ? { user } : {}),
-      };
-    }
-    case "docker":
-      return {
-        kind: "docker",
-        container: target.container,
-      };
-  }
+  return {
+    kind: "ssh",
+    host: target.host,
+    port: target.port,
+    username: target.username,
+    ...(target.sshConfigAlias?.trim() ? { sshConfigAlias: target.sshConfigAlias.trim() } : {}),
+    assetInstallMode: target.assetInstallMode,
+    privateKeyPath: target.privateKeyPath,
+    passwordCredentialKey:
+      target.password && target.password.length > 0
+        ? previousSnapshot?.passwordCredentialKey
+          ? previousSnapshot.passwordCredentialKey
+          : buildRemoteWorkspacePasswordCredentialKey(workspaceKey)
+        : undefined,
+    privateKeyPassphraseCredentialKey:
+      target.privateKeyPassphrase && target.privateKeyPassphrase.length > 0
+        ? previousSnapshot?.privateKeyPassphraseCredentialKey
+          ? previousSnapshot.privateKeyPassphraseCredentialKey
+          : buildRemoteWorkspacePrivateKeyPassphraseCredentialKey(workspaceKey)
+        : undefined,
+  };
 }
 
 export function createRemoteTargetFromSnapshot(
@@ -224,33 +175,19 @@ export function createRemoteTargetFromSnapshot(
     privateKeyPassphrase: string | null;
   },
 ): RemoteTarget {
-  switch (snapshot.kind) {
-    case "ssh":
-      return {
-        kind: "ssh",
-        host: snapshot.host,
-        port: snapshot.port,
-        username: snapshot.username,
-        ...(snapshot.sshConfigAlias ? { sshConfigAlias: snapshot.sshConfigAlias } : {}),
-        ...(snapshot.assetInstallMode ? { assetInstallMode: snapshot.assetInstallMode } : {}),
-        ...(snapshot.privateKeyPath ? { privateKeyPath: snapshot.privateKeyPath } : {}),
-        ...(credentials.password ? { password: credentials.password } : {}),
-        ...(credentials.privateKeyPassphrase
-          ? { privateKeyPassphrase: credentials.privateKeyPassphrase }
-          : {}),
-      };
-    case "wsl":
-      return {
-        kind: "wsl",
-        distro: snapshot.distro,
-        ...(snapshot.user ? { user: snapshot.user } : {}),
-      };
-    case "docker":
-      return {
-        kind: "docker",
-        container: snapshot.container,
-      };
-  }
+  return {
+    kind: "ssh",
+    host: snapshot.host,
+    port: snapshot.port,
+    username: snapshot.username,
+    ...(snapshot.sshConfigAlias ? { sshConfigAlias: snapshot.sshConfigAlias } : {}),
+    ...(snapshot.assetInstallMode ? { assetInstallMode: snapshot.assetInstallMode } : {}),
+    ...(snapshot.privateKeyPath ? { privateKeyPath: snapshot.privateKeyPath } : {}),
+    ...(credentials.password ? { password: credentials.password } : {}),
+    ...(credentials.privateKeyPassphrase
+      ? { privateKeyPassphrase: credentials.privateKeyPassphrase }
+      : {}),
+  };
 }
 
 function upsertRemoteWorkspaceSessionEntries(
@@ -400,10 +337,11 @@ export function buildRemoteWorkspaceSessionMutation(params: {
 export function buildPersistedWorkspaceSessionEntries(
   tabs: WindowTabState[],
   remoteSessionsByWorkspaceKey: ReadonlyMap<string, RemoteWorkspaceSessionEntry>,
+  retiredRemoteEntries: readonly RetiredRemoteWorkspaceEntry[] = [],
 ): PersistedWorkspaceSessionEntry[] {
-  return tabs.reduce<PersistedWorkspaceSessionEntry[]>((entries, tab) => {
+  const entries = tabs.reduce<PersistedWorkspaceSessionEntry[]>((accumulator, tab) => {
     if (!isWorkspaceTab(tab)) {
-      return entries;
+      return accumulator;
     }
 
     if (hasRemoteWorkspaceIdentity(tab)) {
@@ -414,20 +352,36 @@ export function buildPersistedWorkspaceSessionEntries(
       // 如果这里因为 tab 断连就把 remote 项漏掉，下次启动会直接丢失“手动重连”的入口。
       // 因此只要当前 tab 具有远端身份，就必须写回完整 remote 条目。
       if (!remoteEntry) {
-        return entries;
+        return accumulator;
       }
 
-      entries.push(remoteEntry);
-      return entries;
+      accumulator.push(remoteEntry);
+      return accumulator;
     }
 
-    entries.push({
+    accumulator.push({
       kind: "local",
       workspacePath: tab.workspacePath,
       ...(tab.workspacePurpose ? { workspacePurpose: tab.workspacePurpose } : {}),
     });
-    return entries;
+    return accumulator;
   }, []);
+
+  // 退役远端目标的只读失效记录不对应 tab；写回时原样保留，避免一次会话持久化
+  // 就把用户的历史归属数据删掉（不重连、不补建 local tab）。
+  const persistedKeys = new Set(entries.map((entry) => buildWorkspaceSessionKey(entry)));
+  const retiredKeys = new Set<string>();
+  for (const retiredEntry of retiredRemoteEntries) {
+    const workspaceKey = buildWorkspaceSessionKey(retiredEntry);
+    if (persistedKeys.has(workspaceKey) || retiredKeys.has(workspaceKey)) {
+      continue;
+    }
+    // 退役 identity 是独立命名空间：同路径的活跃条目不会被它顶掉，也不会被它恢复成本地工作区。
+    retiredKeys.add(workspaceKey);
+    entries.push(retiredEntry);
+  }
+
+  return entries;
 }
 
 export function readPersistedWorkspaceSessionEntries(

@@ -1,15 +1,25 @@
+import { isCloudTaskWorkspaceIdentity } from "@zcode/shared";
+import { isCloudTaskTab } from "@/cloud/cloudTaskTab.js";
 import { buildTaskWorkspaceKey } from "@/lib/taskQueryCache.js";
 
 interface WorkspaceShellTargetTab {
   workspacePath: string;
   remoteSessionId?: string;
   workspaceIdentity?: string;
+  cloudTaskId?: string;
 }
 
 interface RootWorkspaceShellTarget {
   workspaceShellPath: string | null;
   workspaceIdentity?: string;
   workspaceRemoteSessionId?: string;
+  /**
+   * 当前外壳是否是 Cloud Task 工作区（specs/cloud-agent 04 §3.0/§5）。
+   *
+   * 云任务在 run ready 前没有 checkout 路径，`workspaceShellPath` 为空串；此时外壳仍必须
+   * 渲染（草稿 composer 要走原布局），所以「是否有工作区外壳」不能只看路径真值。
+   */
+  isCloudTaskWorkspace: boolean;
 }
 
 function normalizeOptionalString(value?: string | null): string | undefined {
@@ -30,10 +40,13 @@ export function resolveRootWorkspaceShellTarget({
   workspaceTabs: readonly WorkspaceShellTargetTab[];
 }): RootWorkspaceShellTarget {
   if (activeWorkspaceTab) {
+    const workspaceIdentity = normalizeOptionalString(activeWorkspaceTab.workspaceIdentity);
     return {
       workspaceShellPath: activeWorkspaceTab.workspacePath,
-      workspaceIdentity: normalizeOptionalString(activeWorkspaceTab.workspaceIdentity),
+      workspaceIdentity,
       workspaceRemoteSessionId: normalizeOptionalString(activeWorkspaceTab.remoteSessionId),
+      // 身份是 cloud-task 判定依据；`cloudTaskId` 与之同源，两者任一存在即为云任务 tab。
+      isCloudTaskWorkspace: isCloudTaskWorkspace(activeWorkspaceTab.cloudTaskId, workspaceIdentity),
     };
   }
 
@@ -58,5 +71,16 @@ export function resolveRootWorkspaceShellTarget({
     workspaceShellPath: activeWorkspacePath,
     workspaceIdentity,
     workspaceRemoteSessionId: normalizeOptionalString(coveredWorkspaceTab?.remoteSessionId),
+    isCloudTaskWorkspace: isCloudTaskWorkspace(coveredWorkspaceTab?.cloudTaskId, workspaceIdentity),
   };
+}
+
+function isCloudTaskWorkspace(
+  cloudTaskId: string | undefined,
+  workspaceIdentity: string | undefined,
+): boolean {
+  if (isCloudTaskTab({ cloudTaskId })) {
+    return true;
+  }
+  return workspaceIdentity !== undefined && isCloudTaskWorkspaceIdentity(workspaceIdentity);
 }

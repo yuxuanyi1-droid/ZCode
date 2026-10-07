@@ -199,8 +199,6 @@ nodes:
       - workspace identity
       - remote workspace
       - SSH
-      - WSL
-      - Docker
       - 工作区隔离
     codeSeeds:
       - file: packages/ui/src/lib/remoteWorkspaceHistory.ts

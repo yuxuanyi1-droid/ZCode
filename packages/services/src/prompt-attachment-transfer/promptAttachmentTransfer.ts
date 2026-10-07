@@ -31,7 +31,7 @@ export interface PromptAttachmentStageResult {
 }
 
 /**
- * Renderer 只消费这个 host 服务，不直接依赖 SSH/WSL/Docker backend。
+ * Renderer 只消费这个 host 服务，不直接依赖 SSH backend。
  * 本地 host 返回零拷贝路径，remote host wrapper 则先完成跨机暂存。
  */
 export interface IPromptAttachmentTransferService {

@@ -12,6 +12,12 @@ interface SSHConnectConfigInput {
   passphrase?: string;
   password?: string;
   agent?: string;
+  /**
+   * 主机密钥校验回调（可选；缺省 = 保持既有行为，不做 host key 校验）。
+   * 云控制面 SSH attachment 必须注入（07 §11 host-key 验证前置），桌面/Host
+   * 既有 SSH 连接不传该字段，行为完全不变。
+   */
+  hostVerifier?: ConnectConfig["hostVerifier"];
 }
 
 function isMissingPrivateKeyPassphraseMessage(message: string): boolean {
@@ -38,6 +44,7 @@ export function buildSSHConnectConfig(input: SSHConnectConfigInput): ConnectConf
     passphrase: input.passphrase,
     password: hasPassword ? input.password : undefined,
     agent: resolvedAgent,
+    ...(input.hostVerifier === undefined ? {} : { hostVerifier: input.hostVerifier }),
     // ssh2 默认 readyTimeout 是 20s，公网弱网或服务端抖动时容易误判超时。
     // 这里显式放宽连接握手超时，既给真实慢连接机会，也让错误归一化能和实际配置保持一致。
     readyTimeout: SSH_READY_TIMEOUT_MS,

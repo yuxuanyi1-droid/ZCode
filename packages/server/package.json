@@ -12,6 +12,8 @@
     "dev": "tsup --watch --onSuccess 'node dist/entry-http.js'",
     "build": "tsup && pnpm run build:remote",
     "build:remote": "tsx build-remote.ts",
+    "build:sandbox-assets": "node src/cloud/adapters/sandbox/assets/buildAssets.mjs",
+    "test": "node --import tsx --test \"test/cloud*.test.ts\"",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix"
   },
@@ -28,6 +30,7 @@
     "@zcode/shared": "workspace:*",
     "axios": "^1.13.6",
     "combined-stream": "^1.0.8",
+    "e2b": "^2.52.1",
     "follow-redirects": "^1.16.0",
     "form-data": "^4.0.5",
     "hono": "^4.12.9",

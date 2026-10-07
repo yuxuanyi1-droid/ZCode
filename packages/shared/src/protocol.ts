@@ -1,5 +1,6 @@
 import type { RemoteAssetInstallMode } from "./remoteAssetInstallMode.js";
 import type { RemoteResourcePackageSelection } from "./remoteResourcePackages.js";
+import type { RetiredRemoteWorkspaceEntry } from "./retiredRemoteWorkspace.js";
 import type { ProviderFamilyDomain } from "./model-provider-family.js";
 import type { ProviderFamilyConnectionSelectionSettings } from "./provider-family-connection-selection.js";
 import type { ZCodeProvider } from "./zcode-task-types-core.js";
@@ -145,21 +146,11 @@ export interface SSHRemoteTargetSnapshot {
   privateKeyPassphraseCredentialKey?: string;
 }
 
-export interface WSLRemoteTargetSnapshot {
-  kind: "wsl";
-  distro?: string;
-  user?: string;
-}
-
-export interface DockerRemoteTargetSnapshot {
-  kind: "docker";
-  container: string;
-}
-
-export type RemoteTargetSnapshot =
-  | SSHRemoteTargetSnapshot
-  | WSLRemoteTargetSnapshot
-  | DockerRemoteTargetSnapshot;
+/**
+ * 活跃远端目标快照只有 SSH。Docker/WSL 目标已退役（specs/cloud-agent/06 §3.1），
+ * 旧记录不再进入活跃快照，改以 ./retiredRemoteWorkspace.js 的只读失效记录持久化。
+ */
+export type RemoteTargetSnapshot = SSHRemoteTargetSnapshot;
 
 export interface RemoteWorkspaceSessionSnapshot {
   /** 远程 workspace 的真实绝对路径 */
@@ -189,9 +180,14 @@ export interface RemoteWorkspaceSessionEntry extends RemoteWorkspaceSessionSnaps
   kind: "remote";
 }
 
+/**
+ * 持久会话条目：活跃本地/SSH 记录 + 已退役远端目标的只读失效投影。
+ * 退役记录（kind="retired-remote"）只用于展示与用户数据归属，禁止重连/启动任务/打开本地同路径。
+ */
 export type PersistedWorkspaceSessionEntry =
   | LocalWorkspaceSessionEntry
-  | RemoteWorkspaceSessionEntry;
+  | RemoteWorkspaceSessionEntry
+  | RetiredRemoteWorkspaceEntry;
 
 // ── Process Monitor ──
 

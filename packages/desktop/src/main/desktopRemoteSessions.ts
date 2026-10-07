@@ -66,62 +66,18 @@ interface PendingProviderProvisioningExecution {
   readonly reject: (error: Error) => void;
 }
 
-function normalizeServerRemoteUrlForComparison(url: string): string {
-  try {
-    const parsed = new URL(url.trim());
-    if (parsed.protocol === "ws:") parsed.protocol = "http:";
-    if (parsed.protocol === "wss:") parsed.protocol = "https:";
-    parsed.hash = "";
-    parsed.search = "";
-    const normalizedPath = parsed.pathname.replace(/\/+$/g, "");
-    parsed.pathname = normalizedPath.endsWith("/ws")
-      ? normalizedPath.slice(0, -"/ws".length) || "/"
-      : normalizedPath || "/";
-    return parsed.toString().replace(/\/$/g, "");
-  } catch {
-    return url.trim().replace(/\/+$/g, "");
-  }
-}
-
 function isSameRemoteTarget(left: RemoteTarget, right: RemoteTarget): boolean {
-  if (left.kind !== right.kind) return false;
-  switch (left.kind) {
-    case "ssh":
-      return (
-        right.kind === "ssh" &&
-        left.host.trim().toLowerCase() === right.host.trim().toLowerCase() &&
-        (left.port ?? 22) === (right.port ?? 22) &&
-        left.username.trim() === right.username.trim() &&
-        (left.privateKeyPath ?? "") === (right.privateKeyPath ?? "")
-      );
-    case "wsl":
-      return (
-        right.kind === "wsl" &&
-        (left.distro?.trim() || "default") === (right.distro?.trim() || "default") &&
-        (left.user?.trim() ?? "") === (right.user?.trim() ?? "")
-      );
-    case "docker":
-      return right.kind === "docker" && left.container === right.container;
-    case "server":
-      return (
-        right.kind === "server" &&
-        normalizeServerRemoteUrlForComparison(left.url) ===
-          normalizeServerRemoteUrlForComparison(right.url)
-      );
-  }
+  // 远端目标收敛为 SSH（Docker/WSL 已退役，specs/cloud-agent/06 §3.1）。
+  return (
+    left.host.trim().toLowerCase() === right.host.trim().toLowerCase() &&
+    (left.port ?? 22) === (right.port ?? 22) &&
+    left.username.trim() === right.username.trim() &&
+    (left.privateKeyPath ?? "") === (right.privateKeyPath ?? "")
+  );
 }
 
 function buildRemoteTargetTelemetryKey(target: RemoteTarget): string {
-  switch (target.kind) {
-    case "ssh":
-      return `ssh:${buildSshRemoteHostKey(target)}`;
-    case "wsl":
-      return `wsl:${target.distro?.trim() || "default"}\0${target.user?.trim() ?? ""}`;
-    case "docker":
-      return `docker:${target.container}`;
-    case "server":
-      return `server:${normalizeServerRemoteUrlForComparison(target.url)}`;
-  }
+  return `ssh:${buildSshRemoteHostKey(target)}`;
 }
 
 function closeMessagePort(port: MessagePortMain | undefined): void {
@@ -141,9 +97,6 @@ export function createRemoteWorkspaceSessionManager(options: {
   };
   windowHostProcessMap: Map<number, ElectronUtilityProcess>;
   resolveRemoteAssetDirs: () => RemoteAssetDirs;
-  resolveWslTarget?: (
-    target: Extract<RemoteTarget, { kind: "wsl" }>,
-  ) => Promise<Extract<RemoteTarget, { kind: "wsl" }>>;
   createMessageChannel?: () => { port1: MessagePortMain; port2: MessagePortMain };
   rendererAttachmentReadyTimeoutMs?: number;
   reportRemoteConnectionStateChanged?: (params: {
@@ -678,13 +631,9 @@ export function createRemoteWorkspaceSessionManager(options: {
       throw new Error("应用正在退出，无法创建远程工作区连接");
     }
     const child = getWindowHost(win);
-    const resolvedTarget =
-      target.kind === "wsl" && options.resolveWslTarget
-        ? await options.resolveWslTarget(target)
-        : target;
     if (appShutdownStarted) {
-      // WSL identity 解析跨 await，期间退出屏障可能已清空 Main 请求关联并开始回收 Host。
-      // 恢复后必须重新验证生命周期，禁止在 shutdown barrier 之后注册迟到请求。
+      // 建连前的异步步骤若跨越退出屏障，恢复后必须重新验证生命周期，
+      // 禁止在 shutdown barrier 之后注册迟到请求。
       throw new Error("应用正在退出，无法创建远程工作区连接");
     }
     if (win.isDestroyed() || win.webContents.isDestroyed()) {
@@ -698,7 +647,7 @@ export function createRemoteWorkspaceSessionManager(options: {
     emitConnectionLog(win, {
       requestId: resolvedRequestId,
       level: "info",
-      message: `正在通过窗口 Host 连接 ${resolvedTarget.kind} workspace`,
+      message: `正在通过窗口 Host 连接 ${target.kind} workspace`,
     });
     return new Promise<string>((resolve, reject) => {
       pendingByRequestKey.set(key, {
@@ -712,7 +661,7 @@ export function createRemoteWorkspaceSessionManager(options: {
       child.postMessage({
         type: HostMessageTypes.ConnectRemoteWorkspace,
         requestId: resolvedRequestId,
-        target: resolvedTarget,
+        target,
         remoteAssets: options.resolveRemoteAssetDirs(),
         ...(context?.workspacePath ? { workspacePath: context.workspacePath } : {}),
         ...(context?.workspaceIdentity ? { workspaceIdentity: context.workspaceIdentity } : {}),

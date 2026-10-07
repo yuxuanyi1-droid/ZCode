@@ -1,4 +1,8 @@
-import type { AppSettings, RemoteWorkspaceSessionEntry } from "@zcode/shared";
+import type {
+  AppSettings,
+  RemoteWorkspaceSessionEntry,
+  RetiredRemoteWorkspaceEntry,
+} from "@zcode/shared";
 import { resolveStartupLocalWorkspaceSessionIndex } from "@zcode/shared";
 import {
   buildPersistedWorkspaceSessionEntries,
@@ -25,11 +29,13 @@ function getRestorableWorkspaceKey(tab: string | RestorableWorkspaceTab): string
 export function buildRemoteWorkspacePersistPatch(
   state: TabStoreState,
   remoteSessions: readonly RemoteWorkspaceSessionEntry[],
+  retiredRemoteEntries: readonly RetiredRemoteWorkspaceEntry[] = [],
 ): Partial<AppSettings> {
   const remoteSessionMap = buildRemoteWorkspaceSessionEntryMap(remoteSessions);
   const serializedWorkspaceSessions = buildPersistedWorkspaceSessionEntries(
     state.tabs,
     remoteSessionMap,
+    retiredRemoteEntries,
   );
   const serializedRemoteWorkspaceKeys = new Set(
     serializedWorkspaceSessions.flatMap((entry) =>
@@ -144,6 +150,12 @@ export function restorePersistedRemoteWorkspaceSessions({
       ) {
         restoredActiveIndex = restoredIndex;
       }
+      continue;
+    }
+
+    if (persistedEntry.kind === "retired-remote") {
+      // 退役远端目标的只读失效记录不恢复 tab：不重连、不打开本地同路径、不补建 local tab
+      // （specs/cloud-agent/06 §3.2/§4）。记录本身仍保留在 setting.json 里供展示。
       continue;
     }
 

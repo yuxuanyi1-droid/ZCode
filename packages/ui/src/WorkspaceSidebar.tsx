@@ -72,6 +72,7 @@ import {
 } from "@/components/ui/dropdown-menu.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { logger } from "@/logger.js";
+import { toast } from "@/components/ui/toast.js";
 import { NewTaskButtonGroup } from "@/NewTaskButtonGroup.js";
 import { selectWorkspaceZCodeState, useZCodeSessionStore } from "@/store/zcodeSessionStore.js";
 import { useZCodeStore } from "@/store/StoreProvider.js";
@@ -115,6 +116,16 @@ import { WorkspaceFileTree } from "@/WorkspaceFileTree.js";
 import { WorkspaceArchivedTasksFlatSection } from "@/WorkspaceArchivedTasksFlatSection.js";
 import { WorkspaceSidebarFooter } from "@/WorkspaceSidebarFooter.js";
 import { WorkspacePinnedTasksSection } from "@/WorkspacePinnedTasksSection.js";
+import { CloudProjectTaskSection } from "@/cloud/CloudProjectTaskSection.js";
+import { useCloudTaskTabOpener } from "@/hooks/cloud/useCloudTaskTabOpener.js";
+import { isCloudTaskTab } from "@/cloud/cloudTaskTab.js";
+import {
+  dispatchCloudNewTaskAction,
+  resolveCloudNewTaskAction,
+  resolveCloudSidebarSectionPlan,
+} from "@/cloud/cloudSidebarSections.js";
+import { useCloudProjects } from "@/hooks/cloud/useCloudProjects.js";
+import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
 import { WorkspaceTimelineTasksSection } from "@/WorkspaceTimelineTasksSection.js";
 import { WorkspaceGroupedTasksSection } from "@/WorkspaceGroupedTasksSection.js";
 import { StickyGroupHeaderSlot } from "@/workspace-grouped-tasks/sticky-group-header-slot.js";
@@ -370,9 +381,44 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebarComponent({
   const collapseAllWorkspaceTabs = useTabStore((state) => state.collapseAllWorkspaceTabs);
 
   const workspaceTabs = useMemo(() => tabs.filter(isWorkspaceTab), [tabs]);
-  const { conversationWorkspaceTabs, projectWorkspaceTabs } = useMemo(
-    () => partitionWorkspaceTabsByPurpose(workspaceTabs),
+  // Cloud Task tab 只在 Cloud 项目分组里呈现（specs/cloud-agent 04 §3.0.1：不复用本地 CLI
+  // 的空任务区）。本地 / SSH / 已配对远控 tab 不设 `cloudTaskId`，因此这个过滤对它们恒为空集，
+  // 列表顺序、拖拽与展开逻辑一律不变。
+  const taskSectionWorkspaceTabs = useMemo(
+    () => workspaceTabs.filter((tab) => !isCloudTaskTab(tab)),
     [workspaceTabs],
+  );
+  // ── Cloud 项目 → 任务（specs/cloud-agent 04 §3.0/§3.1）──
+  // 侧栏是原组件，云能力只以外挂分组的形式接入：非云模式（没有 CloudWorkspaceProvider）
+  // 时 context 为 null，整个分组不渲染，原行为逐字节不变。
+  const cloudWorkspaceContext = useCloudWorkspaceContext();
+  // 判据是「是否云入口」（CloudWorkspaceProvider 是否挂载），不是路径真值：
+  // 云任务在 run ready 前没有 checkout 路径，用路径判断会把 draft 误判成本地
+  // （specs/cloud-agent 04 §3.0/§3.0.1）。
+  const isCloudMode = cloudWorkspaceContext !== null;
+  const cloudActiveTaskId = cloudWorkspaceContext?.selection.taskId ?? null;
+  const [cloudRepositoryPickerOpen, setCloudRepositoryPickerOpen] = useState(false);
+  // 云 Project 投影在侧栏只取一份：顶部「新建任务」与项目区共用（避免第二次
+  // `GET /api/cloud/projects`）。本地模式下没有控制面端口，这个 hook 不发任何请求。
+  const cloudProjects = useCloudProjects();
+  const [cloudCreateTaskProjectId, setCloudCreateTaskProjectId] = useState<string | null>(null);
+  const { openCloudTaskTab } = useCloudTaskTabOpener();
+  const handleOpenCloudTask = useCallback(
+    (taskId: string) => {
+      // 打开成**原工作区 tab**：匹配键是 taskId，路径取 Run 的真实 checkout 路径
+      // （run ready 前为空串，不伪造路径）。控制面选择与主路由回写由 opener/控制器完成，
+      // 侧栏不自己写 URL，也不把 taskId 当路径挂载原组件（04 §3.0/§5）。
+      void openCloudTaskTab(taskId).catch((error) => {
+        // 打开失败必须可见：只写日志会让用户点了没反应（控制面不可达 / 已撤权 / run 未就绪）。
+        logger.warn("[WorkspaceSidebar] 打开云任务工作区失败", { taskId, error });
+        toast(intl.formatMessage({ id: "cloud.tasks.openFailed" }), { variant: "warning" });
+      });
+    },
+    [intl, openCloudTaskTab],
+  );
+  const { conversationWorkspaceTabs, projectWorkspaceTabs } = useMemo(
+    () => partitionWorkspaceTabsByPurpose(taskSectionWorkspaceTabs),
+    [taskSectionWorkspaceTabs],
   );
   const workspacePaths = useMemo(
     () => projectWorkspaceTabs.map((tab) => tab.workspacePath),
@@ -399,6 +445,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebarComponent({
   const [purposeSectionPreferences, setPurposeSectionPreferences] = useState(
     readSidebarPurposeSectionPreferences,
   );
+
   const [workspaceTaskOrganizeBy, setWorkspaceTaskOrganizeBy] = useState<
     Extract<TaskOrganizeBy, "project" | "chronological">
   >(() => {
@@ -566,7 +613,19 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebarComponent({
     showArchivedTasks,
     taskOrganizeBy,
   });
-  const effectiveTaskViewMode = taskViewMode;
+  // 云模式下的侧栏分区规则（含「只保留项目区 / 强制 workspace 视图 / 不渲染本地视图工具条」）
+  // 抽在 `cloudSidebarSections.ts`，本地模式逐项原样透传。
+  const cloudSidebarPlan = useMemo(
+    () =>
+      resolveCloudSidebarSectionPlan({
+        isCloudMode,
+        purposeSectionOrder: purposeSectionPreferences.sectionOrder,
+        taskViewMode,
+      }),
+    [isCloudMode, purposeSectionPreferences.sectionOrder, taskViewMode],
+  );
+  const purposeSectionOrder = cloudSidebarPlan.purposeSectionOrder;
+  const effectiveTaskViewMode: SidebarTaskViewMode = cloudSidebarPlan.taskViewMode;
   const visibleWorkspaceTaskKeys = useMemo(
     () =>
       resolveVisibleWorkspaceTaskKeys({
@@ -607,6 +666,48 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebarComponent({
   const handleCreateDraftTaskActionChange = useCallback((action: (() => void) | null) => {
     setCreateGroupedTaskDraftAction(() => action);
   }, []);
+
+  // 顶部「新建任务」的去向（specs/cloud-agent 03 §2、04 §3.0）：
+  // 本地 / SSH / 已配对远控逐字走原 `onCreateTask`；云模式改走云任务草稿，
+  // **不再触达本机 onCreateTask**——那在云入口里是一条指向本机执行域的入口。
+  const handleNewTaskAction = useCallback(() => {
+    dispatchCloudNewTaskAction(
+      resolveCloudNewTaskAction({
+        isCloudMode,
+        projects: cloudProjects.projects,
+        selectedProjectId: cloudWorkspaceContext?.selection.projectId ?? null,
+      }),
+      {
+        onCreateTask: () => {
+          if (workspaceReadOnly) {
+            return;
+          }
+          if (taskViewMode === "grouped") {
+            if (createGroupedTaskDraftAction) {
+              createGroupedTaskDraftAction();
+              return;
+            }
+            onCreateTask({ groupedDraftPlacement: { type: "top" } });
+            return;
+          }
+          onCreateTask({ createSource: "project" });
+        },
+        onRequestAddRepository: () => setCloudRepositoryPickerOpen(true),
+        onOpenCloudDraft: (projectId) => {
+          cloudWorkspaceContext?.selectProject(projectId);
+          setCloudCreateTaskProjectId(projectId);
+        },
+      },
+    );
+  }, [
+    cloudProjects.projects,
+    cloudWorkspaceContext,
+    createGroupedTaskDraftAction,
+    isCloudMode,
+    onCreateTask,
+    taskViewMode,
+    workspaceReadOnly,
+  ]);
   const shouldShowPinnedTasks =
     // grouped 主体会主动过滤 pinned task；如果同页不渲染全局置顶区，
     // 从 Header 置顶当前任务后整条 row 会无处展示，看起来像 session 被删除。
@@ -1265,23 +1366,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebarComponent({
         >
           <div className={cn("flex flex-col gap-1 px-2", isWindowsDesktop ? "py-2" : "py-3")}>
             <WorkspaceNewTaskTooltip disabledReason={workspaceReadOnlyReason}>
-              <NewTaskButtonGroup
-                disabled={workspaceReadOnly}
-                onCreateTask={() => {
-                  if (workspaceReadOnly) {
-                    return;
-                  }
-                  if (taskViewMode === "grouped") {
-                    if (createGroupedTaskDraftAction) {
-                      createGroupedTaskDraftAction();
-                      return;
-                    }
-                    onCreateTask({ groupedDraftPlacement: { type: "top" } });
-                    return;
-                  }
-                  onCreateTask({ createSource: "project" });
-                }}
-              />
+              <NewTaskButtonGroup disabled={workspaceReadOnly} onCreateTask={handleNewTaskAction} />
             </WorkspaceNewTaskTooltip>
             <Button
               variant="ghost"
@@ -1358,12 +1443,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebarComponent({
               }
               style={workspaceScrollMaskStyle}
             >
-              {workspaceTaskToolbar()}
+              {cloudSidebarPlan.showsLocalTaskViewToolbar ? workspaceTaskToolbar() : null}
               {shouldShowPinnedTasks ? (
                 // 归档切换主任务区时不应隐藏 pinned。
                 // pinned 是全局置顶区，归档态保持置顶区可见。
                 <WorkspacePinnedTasksSection
-                  workspaceTabs={workspaceTabs}
+                  workspaceTabs={taskSectionWorkspaceTabs}
                   activeWorkspacePath={workspacePath}
                   activeWorkspaceIdentity={workspaceIdentity}
                   activeTaskId={activeTaskId}
@@ -1379,7 +1464,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebarComponent({
                 {taskViewMode === "archived" ? (
                   <WorkspaceArchivedTasksFlatSection
                     actionsContainer={archivedActionsContainer}
-                    workspaceTabs={workspaceTabs}
+                    workspaceTabs={taskSectionWorkspaceTabs}
                     activeWorkspacePath={workspacePath}
                     activeWorkspaceIdentity={workspaceIdentity}
                     activeTaskId={activeTaskId}
@@ -1388,7 +1473,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebarComponent({
                   />
                 ) : taskViewMode === "grouped" ? (
                   <WorkspaceGroupedTasksSection
-                    workspaceTabs={workspaceTabs}
+                    workspaceTabs={taskSectionWorkspaceTabs}
                     activeWorkspacePath={workspacePath}
                     activeWorkspaceIdentity={workspaceIdentity}
                     activeTaskId={activeTaskId}
@@ -1408,7 +1493,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebarComponent({
                   />
                 ) : taskViewMode === "timeline" ? (
                   <WorkspaceTimelineTasksSection
-                    workspaceTabs={workspaceTabs}
+                    workspaceTabs={taskSectionWorkspaceTabs}
                     activeWorkspacePath={workspacePath}
                     activeWorkspaceIdentity={workspaceIdentity}
                     activeTaskId={activeTaskId}
@@ -1423,11 +1508,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebarComponent({
                     onDragEnd={handlePurposeSectionDragEnd}
                   >
                     <SortableContext
-                      items={purposeSectionPreferences.sectionOrder}
+                      items={[...purposeSectionOrder]}
                       strategy={verticalListSortingStrategy}
                     >
                       <div data-purpose-section-list="true">
-                        {purposeSectionPreferences.sectionOrder.map((sectionId) =>
+                        {purposeSectionOrder.map((sectionId) =>
                           sectionId === "projects" ? (
                             <WorkspacePurposeSection
                               key={sectionId}
@@ -1447,47 +1532,84 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebarComponent({
                               onOpenChange={handleProjectSectionOpenChange}
                               testId={TID_PROJECT_SECTION}
                               action={
-                                <DropdownMenu>
+                                isCloudMode ? (
+                                  // 云模式：项目区就是云 Project 投影，「添加」= 选已授权仓库，
+                                  // 仍走**原 Dialog 组件**（specs/cloud-agent 04 §3.0.1）。
                                   <ControlHintTooltip
                                     title={intl.formatMessage({
                                       id: "workspaceSidebar.addProject",
                                     })}
                                   >
-                                    <DropdownMenuTrigger asChild>
-                                      <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="icon-sm"
-                                        className="text-foreground-subtle hover:text-foreground data-[state=open]:text-foreground"
-                                        aria-label={intl.formatMessage({
-                                          id: "workspaceSidebar.addProject",
-                                        })}
-                                        data-testid={TID_PROJECT_ADD}
-                                      >
-                                        <Plus className="size-3.5" />
-                                      </Button>
-                                    </DropdownMenuTrigger>
-                                  </ControlHintTooltip>
-                                  <DropdownMenuContent align="end" className="min-w-44">
-                                    <DropdownMenuItem onSelect={onOpenFolderFromWorkspaceMenu}>
-                                      <FolderOpen className="size-4" />
-                                      {intl.formatMessage({
-                                        id: "workspace.openFolder",
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="icon-sm"
+                                      className="text-foreground-subtle hover:text-foreground"
+                                      aria-label={intl.formatMessage({
+                                        id: "workspaceSidebar.addProject",
                                       })}
-                                    </DropdownMenuItem>
-                                    {onOpenRemoteWorkspace ? (
-                                      <DropdownMenuItem onSelect={onOpenRemoteWorkspace}>
-                                        <Cloud className="size-4" />
+                                      data-testid={TID_PROJECT_ADD}
+                                      onClick={() => setCloudRepositoryPickerOpen(true)}
+                                    >
+                                      <Plus className="size-3.5" />
+                                    </Button>
+                                  </ControlHintTooltip>
+                                ) : (
+                                  <DropdownMenu>
+                                    <ControlHintTooltip
+                                      title={intl.formatMessage({
+                                        id: "workspaceSidebar.addProject",
+                                      })}
+                                    >
+                                      <DropdownMenuTrigger asChild>
+                                        <Button
+                                          type="button"
+                                          variant="ghost"
+                                          size="icon-sm"
+                                          className="text-foreground-subtle hover:text-foreground data-[state=open]:text-foreground"
+                                          aria-label={intl.formatMessage({
+                                            id: "workspaceSidebar.addProject",
+                                          })}
+                                          data-testid={TID_PROJECT_ADD}
+                                        >
+                                          <Plus className="size-3.5" />
+                                        </Button>
+                                      </DropdownMenuTrigger>
+                                    </ControlHintTooltip>
+                                    <DropdownMenuContent align="end" className="min-w-44">
+                                      <DropdownMenuItem onSelect={onOpenFolderFromWorkspaceMenu}>
+                                        <FolderOpen className="size-4" />
                                         {intl.formatMessage({
-                                          id: "remote.trigger",
+                                          id: "workspace.openFolder",
                                         })}
                                       </DropdownMenuItem>
-                                    ) : null}
-                                  </DropdownMenuContent>
-                                </DropdownMenu>
+                                      {onOpenRemoteWorkspace ? (
+                                        <DropdownMenuItem onSelect={onOpenRemoteWorkspace}>
+                                          <Cloud className="size-4" />
+                                          {intl.formatMessage({
+                                            id: "remote.trigger",
+                                          })}
+                                        </DropdownMenuItem>
+                                      ) : null}
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
+                                )
                               }
                             >
-                              {projectWorkspaceTabs.length === 0 ? (
+                              {isCloudMode ? (
+                                // 云模式：原项目区的**同一容器/分组头**承载云 Project → Task
+                                // 投影（04 §3.0.1「原 sidebar 项目区域消费 Project → Task 投影」）。
+                                // 展开才查控制面 Task，不连沙箱。
+                                <CloudProjectTaskSection
+                                  activeTaskId={cloudActiveTaskId}
+                                  onOpenTask={handleOpenCloudTask}
+                                  repositoryPickerOpen={cloudRepositoryPickerOpen}
+                                  onRepositoryPickerOpenChange={setCloudRepositoryPickerOpen}
+                                  projects={cloudProjects}
+                                  createTaskProjectId={cloudCreateTaskProjectId}
+                                  onCreateTaskProjectIdChange={setCloudCreateTaskProjectId}
+                                />
+                              ) : projectWorkspaceTabs.length === 0 ? (
                                 <div className="px-3 py-2 text-ui-base text-foreground-subtle">
                                   {intl.formatMessage({
                                     id: "workspaceSidebar.noProjects",

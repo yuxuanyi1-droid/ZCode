@@ -125,9 +125,9 @@ export function createBotRemoteWorkspaceService(params: {
     if (!entry || entry.kind !== "remote") {
       return null;
     }
-    if (entry.target.kind !== "ssh") {
-      return entry.target;
-    }
+    // 活跃远端目标只有 SSH（Docker/WSL 已退役，specs/cloud-agent/06 §3.1）：
+    // 旧的 wsl/docker 记录在 settings 迁移时已变成 retired-remote 只读投影，
+    // 不会再以 kind="remote" 出现在这里，因此这里不再有按 target kind 的分支。
     return {
       kind: "ssh",
       host: entry.target.host,

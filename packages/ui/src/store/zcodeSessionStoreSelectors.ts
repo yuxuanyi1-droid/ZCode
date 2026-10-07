@@ -129,7 +129,7 @@ export function getWorkspaceState(
 
   // workspaceIdentity 表示远程/隔离 workspace 身份，path 桶只用于本地 fallback
   // 和 identity 桶首次写入前的一次性迁移起点。identity 桶一旦存在，就不能再动态合并
-  // path task maps，否则同一路径的不同 SSH/WSL/Docker 窗口会互相读到 task config、队列和错误态。
+  // path task maps，否则同一路径的不同 SSH 窗口会互相读到 task config、队列和错误态。
   return identityState;
 }
 

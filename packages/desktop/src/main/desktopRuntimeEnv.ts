@@ -91,21 +91,6 @@ export type RemoteAssetDirs = Pick<
 >;
 type LocalRuntimeEnv = Record<string, string | undefined>;
 
-export async function isDockerDaemonAvailable(): Promise<boolean> {
-  const { isDockerAvailable } = await import("@zcode/server/remote");
-  return isDockerAvailable();
-}
-
-export async function listAvailableWSLDistros() {
-  const { listWSLDistros } = await import("@zcode/server/remote");
-  return listWSLDistros();
-}
-
-export async function listAvailableDockerContainers() {
-  const { listDockerContainers } = await import("@zcode/server/remote");
-  return listDockerContainers();
-}
-
 export async function listSSHConfigAliases() {
   return await listSSHConfigAliasesFromLocalConfig();
 }
@@ -208,7 +193,7 @@ function resolveAvailableDevelopmentMockCdnDir(): string | undefined {
   const mockCdnDir = resolveDevelopmentMockCdnDir();
   const releaseDir = join(mockCdnDir, "releases", ZCODE_VERSION);
   // 开发态 mock-cdn 是可选离线缓存。当前版本目录不存在时继续传 mockCdnDir，
-  // 会让 WSL/SSH 重连先命中一个必然缺失的本地路径，遮蔽已有的 CDN/cache fallback。
+  // 会让 SSH 重连先命中一个必然缺失的本地路径，遮蔽已有的 CDN/cache fallback。
   return existsSync(releaseDir) ? mockCdnDir : undefined;
 }
 

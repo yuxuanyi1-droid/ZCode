@@ -44,6 +44,7 @@ import {
   resolveWorkspaceKey,
   type RemoteTarget,
   type RemoteWorkspaceSessionEntry,
+  type RetiredRemoteWorkspaceEntry,
   type WorkspacePurpose,
 } from "@zcode/shared";
 import { runUserAction, runUserActionAsync } from "@/lib/userActionTelemetry.js";
@@ -169,7 +170,9 @@ function filterVisibleWorkspaceMenuTabs({
 export function ChatEmptyWorkspacePreviewMenu({
   workspacePath,
   workspaceIdentity,
-  isWindowsDesktop = false,
+  // WSL 目标退役后，远程向导不再按宿主平台排序目标（06 §3.1），
+  // 保留 props 形状供既有调用方传入，但本组件不再消费。
+  isWindowsDesktop: _isWindowsDesktop = false,
   workspaceTabs,
   allowConversationWorkspaceSelection = true,
   allowConversationWorkspaceDetach = allowConversationWorkspaceSelection,
@@ -179,6 +182,7 @@ export function ChatEmptyWorkspacePreviewMenu({
   allowOpenWorkspace = true,
   allowRemoteWorkspace = true,
   remoteWorkspaceSessions = [],
+  retiredRemoteWorkspaceEntries = [],
   onConnectRemote,
   onSelectRemoteProject,
   onCancelRemoteProject,
@@ -199,6 +203,7 @@ export function ChatEmptyWorkspacePreviewMenu({
   allowOpenWorkspace?: boolean;
   allowRemoteWorkspace?: boolean;
   remoteWorkspaceSessions?: RemoteWorkspaceSessionEntry[];
+  retiredRemoteWorkspaceEntries?: RetiredRemoteWorkspaceEntry[];
   onConnectRemote: (options: RemoteTarget, requestId?: string) => Promise<string>;
   onSelectRemoteProject: (
     sessionId: string,
@@ -452,8 +457,8 @@ export function ChatEmptyWorkspacePreviewMenu({
           onSelectProject={onSelectRemoteProject}
           onCancelSession={onCancelRemoteProject}
           localWorkspacePath={localWorkspacePathForRemoteConnection}
-          isWindowsDesktop={isWindowsDesktop}
           remoteWorkspaceSessions={remoteWorkspaceSessions}
+          retiredRemoteWorkspaceEntries={retiredRemoteWorkspaceEntries}
           open={sshDialogOpen}
           onOpenChange={setSshDialogOpen}
           hideTriggerWhenClosed

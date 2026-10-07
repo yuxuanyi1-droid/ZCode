@@ -71,12 +71,8 @@ export function formatRemoteSkillSyncTarget(
   remoteTarget: RemoteTarget,
   workspacePath: string,
 ): string {
-  const target =
-    remoteTarget.kind === "ssh"
-      ? `${remoteTarget.username}@${remoteTarget.host}${remoteTarget.port ? `:${remoteTarget.port}` : ""}`
-      : remoteTarget.kind === "wsl"
-        ? ["WSL", remoteTarget.distro, remoteTarget.user?.trim()].filter(Boolean).join(" · ")
-        : remoteTarget.kind;
+  // 远端目标收敛为 SSH（Docker/WSL 已退役）；这里不再为退役 kind 生成标签。
+  const target = `${remoteTarget.username}@${remoteTarget.host}${remoteTarget.port ? `:${remoteTarget.port}` : ""}`;
   return workspacePath ? `${target} · ${workspacePath}` : target;
 }
 

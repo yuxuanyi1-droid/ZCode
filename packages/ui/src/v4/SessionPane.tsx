@@ -122,6 +122,7 @@ import {
 import type { ConversationDropTargetController } from "@/v4/composer/conversationDropTarget.js";
 import { shouldIgnoreEscapeForStopGeneration } from "@/v4/composer/escapeStop.js";
 import { ConversationDraftEmptyState } from "@/v4/ConversationDraftEmptyState.js";
+import { useCloudComposerSubmit } from "@/hooks/cloud/useCloudComposerSubmit.js";
 import { ConversationDraftSuggestedPromptsContainer } from "@/v4/ConversationDraftSuggestedPromptsContainer.js";
 import { ConversationHeader, type PaneWorkspaceBadge } from "@/v4/ConversationHeader.js";
 import { ConversationQueuePanel } from "@/v4/ConversationQueuePanel.js";
@@ -2278,8 +2279,12 @@ export function SessionPane({
   // ── 草稿态 v4 draft session 预热（m5）──
   // pane 未绑定会话时后台建 phase=draft 会话作预热载体：配置写 CAS 直达、首发复用。
   // 对外绑定语义不变（shell activeTaskId 仍 null），预热会话只是 pane 内部 effective 订阅目标。
+  // Cloud 工作区（specs/cloud-agent 04 §3.4.1、11 §9）例外：云 draft **禁止 runtime 预热**，
+  // 没有 session 就是没有 session——用预热会话当附件宿主会绕开「task-owned 上传」边界。
+  const cloudComposerSubmit = useCloudComposerSubmit(workspaceIdentity);
+  const isCloudWorkspace = cloudComposerSubmit.enabled;
   const { binding: prewarmBinding } = useDraftSessionPrewarm({
-    enabled: sessionId === null && draftAgentStartupAllowed,
+    enabled: sessionId === null && draftAgentStartupAllowed && !isCloudWorkspace,
     workspaceKey,
     paneId,
     invalidationVersion: draftRuntimeInvalidationVersion,
@@ -2964,6 +2969,46 @@ export function SessionPane({
       text: string,
       options?: ConversationComposerSendOptions,
     ): Promise<ConversationComposerSendResult> => {
+      // Cloud 工作区（specs/cloud-agent 04 §3.4、03 §7.2）：首发与补充都走同一条
+      // durable input application port，**不能**落到下面的 createSession/sendText
+      // 本机路径——那会绕开控制面、把输入直接发给 CLI，并让「关页后仍执行」与
+      // 「同 commandId 不重复」失去依据。非云工作区完全不受影响。
+      if (cloudComposerSubmit.enabled) {
+        try {
+          const result = await cloudComposerSubmit.send(text);
+          if (result === "sent") {
+            setSendSubmissionError(null);
+            focusTimelineToLatest();
+            return "sent";
+          }
+          if (result === "unknown") {
+            // 结果不明：保留正文并提示待对账，绝不显示成功（03 §5）。
+            setSendSubmissionError({
+              code: "CLOUD_INPUT_UNKNOWN",
+              message: intl.formatMessage({ id: "chat.error.sendFailed" }),
+              detail: cloudComposerSubmit.errorDetail ?? "cloud input result unknown",
+            });
+            return "blocked";
+          }
+          if (cloudComposerSubmit.errorDetail) {
+            setSendSubmissionError({
+              code: "CLOUD_INPUT_REJECTED",
+              message: intl.formatMessage({ id: "chat.error.sendFailed" }),
+              detail: cloudComposerSubmit.errorDetail,
+            });
+          }
+          return "blocked";
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          setSendSubmissionError({
+            code: "SEND_FAILED",
+            message: intl.formatMessage({ id: "chat.error.sendFailed" }),
+            detail,
+          });
+          throw error;
+        }
+      }
+
       // 发送前冻结本次 admission 预期：command ACK 回来时 projection 可能已经切到 running，
       // 不能用更新后的 enqueue mode 反推刚提交的 prompt 是否原本立即发送。
       const shouldFocusLatest = shouldFocusTimelineAfterComposerSend({
@@ -2999,7 +3044,7 @@ export function SessionPane({
         throw error;
       }
     },
-    [dispatchSendText, focusTimelineToLatest, intl, sessionId],
+    [cloudComposerSubmit, dispatchSendText, focusTimelineToLatest, intl, sessionId],
   );
 
   const handleComposerDraftStateChange = useCallback(

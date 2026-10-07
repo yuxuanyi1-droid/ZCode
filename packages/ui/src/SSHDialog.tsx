@@ -1,6 +1,11 @@
 /* eslint-disable max-lines -- 远程连接向导的状态编排暂集中在同一组件，后续有独立拆分计划。 */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { createUuid, type RemoteTarget, type RemoteWorkspaceSessionEntry } from "@zcode/shared";
+import {
+  createUuid,
+  type RemoteTarget,
+  type RemoteWorkspaceSessionEntry,
+  type RetiredRemoteWorkspaceEntry,
+} from "@zcode/shared";
 import {
   TID_SSH_CONNECT_TRIGGER,
   TID_SSH_DIALOG,
@@ -56,12 +61,11 @@ interface RemoteConnectionDialogProps {
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   hideTriggerWhenClosed?: boolean;
-  isWindowsDesktop?: boolean;
   remoteWorkspaceSessions?: RemoteWorkspaceSessionEntry[];
+  /** 已退役远端目标（Docker/WSL）的只读失效记录，仅用于展示，不可连接。 */
+  retiredRemoteWorkspaceEntries?: RetiredRemoteWorkspaceEntry[];
   onFlowActiveChange?: (active: boolean) => void;
   onFlowRequestIdChange?: (requestId: string | null) => void;
-  preferredKind?: RemoteTarget["kind"];
-  preferredWslDistro?: string;
 }
 
 export function RemoteConnectionDialog({
@@ -76,12 +80,10 @@ export function RemoteConnectionDialog({
   open: controlledOpen,
   onOpenChange,
   hideTriggerWhenClosed = false,
-  isWindowsDesktop = false,
   remoteWorkspaceSessions = [],
+  retiredRemoteWorkspaceEntries = [],
   onFlowActiveChange,
   onFlowRequestIdChange,
-  preferredKind,
-  preferredWslDistro,
 }: RemoteConnectionDialogProps) {
   const { intl } = useZCodeIntl();
   const confirmDialog = useConfirmDialog();
@@ -108,19 +110,10 @@ export function RemoteConnectionDialog({
     password,
     privateKeyPath,
     privateKeyPassphrase,
-    wslDistro,
-    wslUser,
-    dockerContainer,
-    manualDockerContainer,
     sshConfigAliases,
     sshConfigAliasesLoading,
     sshConfigAliasesError,
     selectedSshConfigAlias,
-    dockerAvailable,
-    wslDistros,
-    dockerContainers,
-    availableKinds,
-    setKind,
     setHost,
     setPort,
     setUsername,
@@ -129,21 +122,9 @@ export function RemoteConnectionDialog({
     setPassword,
     setPrivateKeyPath,
     setPrivateKeyPassphrase,
-    setWslDistro,
-    setWslUser,
-    setDockerContainer,
-    setManualDockerContainer,
-    refreshDockerContainers,
     applySshConfigAlias,
     clearSelectedSshConfigAlias,
-    currentRuntimeOptionsLoading,
-    currentRuntimeOptionsError,
-  } = useRemoteConnectionForm({
-    open,
-    isWindowsDesktop,
-    preferredKind,
-    preferredWslDistro,
-  });
+  } = useRemoteConnectionForm({ open });
   const directoryBrowserServices = useRemoteWorkspaceSessionStore((state) =>
     connectedSessionId ? (state.sessionsById[connectedSessionId]?.services ?? null) : null,
   );
@@ -324,10 +305,6 @@ export function RemoteConnectionDialog({
       privateKeyPath,
       privateKeyPassphrase,
       selectedSshConfigAlias,
-      wslDistro,
-      wslUser,
-      dockerContainer,
-      manualDockerContainer,
     });
     if (!nextTarget) {
       // 必填项缺失属于表单校验，不应该和真实连接失败共用 destructive 错误样式。
@@ -488,7 +465,7 @@ export function RemoteConnectionDialog({
                 <div
                   data-testid={TID_SSH_ERROR}
                   // 远程连接的错误提示以前直接拼接颜色 token，和全局状态反馈样式不一致。
-                  // 这里统一改成 destructive 语义色对，避免 SSH/Docker 两种模式出现不同的错误视觉。
+                  // 这里统一改成 destructive 语义色对，保证连接失败的错误视觉一致。
                   className="flex items-start gap-3 rounded-xl bg-destructive px-4 py-3 text-ui-base text-destructive-foreground"
                 >
                   <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
@@ -499,9 +476,6 @@ export function RemoteConnectionDialog({
               <div className="w-full min-h-0 flex-1">
                 {currentStep === "kind" ? (
                   <RemoteConnectionKindStep
-                    kind={kind}
-                    availableKinds={availableKinds}
-                    onKindChange={setKind}
                     onCancel={() => closeDialog()}
                     onNext={() => {
                       resetFeedback();
@@ -512,7 +486,6 @@ export function RemoteConnectionDialog({
 
                 {currentStep === "settings" ? (
                   <RemoteConnectionSettingsStep
-                    kind={kind}
                     host={host}
                     port={port}
                     username={username}
@@ -521,20 +494,12 @@ export function RemoteConnectionDialog({
                     password={password}
                     privateKeyPath={privateKeyPath}
                     privateKeyPassphrase={privateKeyPassphrase}
-                    wslDistro={wslDistro}
-                    wslUser={wslUser}
-                    wslDistros={wslDistros}
-                    dockerContainer={dockerContainer}
-                    manualDockerContainer={manualDockerContainer}
-                    dockerContainers={dockerContainers}
-                    dockerAvailable={dockerAvailable}
                     sshConfigAliases={sshConfigAliases}
                     sshConfigAliasesLoading={sshConfigAliasesLoading}
                     sshConfigAliasesError={sshConfigAliasesError}
                     selectedSshConfigAlias={selectedSshConfigAlias}
-                    currentRuntimeOptionsLoading={currentRuntimeOptionsLoading}
-                    currentRuntimeOptionsError={currentRuntimeOptionsError}
                     remoteWorkspaceSessions={remoteWorkspaceSessions}
+                    retiredRemoteWorkspaceEntries={retiredRemoteWorkspaceEntries}
                     validationMessage={validationMessage}
                     loading={loading}
                     onBack={() => {
@@ -549,11 +514,6 @@ export function RemoteConnectionDialog({
                     onPasswordChange={setPassword}
                     onPrivateKeyPathChange={setPrivateKeyPath}
                     onPrivateKeyPassphraseChange={setPrivateKeyPassphrase}
-                    onWslDistroChange={setWslDistro}
-                    onWslUserChange={setWslUser}
-                    onDockerContainerChange={setDockerContainer}
-                    onManualDockerContainerChange={setManualDockerContainer}
-                    onDockerContainersRefresh={refreshDockerContainers}
                     onApplySshConfigAlias={applySshConfigAlias}
                     onClearSelectedSshConfigAlias={clearSelectedSshConfigAlias}
                     onConnect={() => {

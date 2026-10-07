@@ -51,7 +51,7 @@ export function useGitAutoRefresh({
     platform: string;
   } | null>(null);
   // workspaceScopedServices 在远程 workspace 下指向远端 Host，因此这里获取的是
-  // WSL/SSH/Docker 的真实运行平台，而不是桌面应用本身的平台。service identity
+  // SSH 的真实运行平台，而不是桌面应用本身的平台。service identity
   // 参与状态匹配，避免 Windows workspace 的旧 platform 泄漏到刚切换的 Linux workspace。
   const workspacePlatform =
     workspacePlatformState?.service === systemService ? workspacePlatformState.platform : null;

@@ -21,7 +21,6 @@ import type {
   BrowserViewRestoreTabsRequest,
   BrowserViewportSize,
   ChromeBrowserDataImportResult,
-  DockerContainerInfo,
   EmbeddedBrowserOpenUrlRequest,
   EditorInfo,
   ApplicationIconInfo,
@@ -42,7 +41,6 @@ import type {
   TaskNotificationPayload,
   WindowScreenshotResult,
   EmbeddedBrowserDataClearResult,
-  WSLDistro,
   UpdateCheckResultPayload,
   UpdateStatePayload,
   OpenInEditorOptions,
@@ -75,12 +73,6 @@ declare global {
       }): Promise<BrowserGuestAttachResult>;
       /** 释放当前窗口里的远程 session */
       disposeRemoteSession(sessionId: string): Promise<void>;
-      /** 检查本机 Docker daemon 是否可用 */
-      isDockerAvailable(): Promise<boolean>;
-      /** 列出本机可用的 WSL 发行版 */
-      listWSLDistros(): Promise<WSLDistro[]>;
-      /** 列出当前可连接的 Docker 容器 */
-      listDockerContainers(): Promise<DockerContainerInfo[]>;
       /** 列出当前机器 SSH config 里可用于快速填表的 alias */
       listSSHConfigAliases(): Promise<SSHConfigAliasOption[]>;
       /** renderer 日志通过 IPC 传到 main 进程统一存储 */

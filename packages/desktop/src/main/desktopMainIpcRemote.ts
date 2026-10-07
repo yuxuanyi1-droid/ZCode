@@ -7,8 +7,10 @@ import {
   classifyRemoteUsageError,
   formatZodError,
   normalizeUnknownError,
+  detectRetiredRemoteTargetKind,
   InternalChannels,
   isTrustedCodingPlanWebviewOrigin,
+  REMOTE_TARGET_RETIRED_ERROR_CODE,
   resolveZaiBusinessBaseUrl,
   PlatformChannels,
   remoteTargetSchema,
@@ -192,9 +194,6 @@ export function registerRemoteIpcHandlers(options: {
     webContentsId: number,
     payload: { sessionId: string; attachmentId: string },
   ) => void;
-  isDockerDaemonAvailable: () => Promise<boolean>;
-  listAvailableWSLDistros: () => Promise<unknown[]>;
-  listAvailableDockerContainers: () => Promise<unknown[]>;
   listSSHConfigAliases: () => Promise<unknown[]>;
 }) {
   function reportRemoteUsageEvent(rendererId: number, event: TelemetryEventPayload): void {
@@ -408,6 +407,16 @@ export function registerRemoteIpcHandlers(options: {
             connectTrigger?: unknown;
           })
         : { target: rawPayload, requestId: undefined };
+    // 旧 Docker/WSL target 必须稳定拒绝：不执行 docker/wsl 命令、不转成 SSH/本地请求（specs/cloud-agent/06 §3.1）。
+    const retiredKind = detectRetiredRemoteTargetKind(wrappedPayload.target);
+    if (retiredKind) {
+      options.logger.warn("[connect-remote]", REMOTE_TARGET_RETIRED_ERROR_CODE, retiredKind);
+      return {
+        success: false,
+        code: REMOTE_TARGET_RETIRED_ERROR_CODE,
+        error: `${REMOTE_TARGET_RETIRED_ERROR_CODE}: ${retiredKind} remote target is no longer supported`,
+      };
+    }
     const result = remoteTargetSchema.safeParse(wrappedPayload.target);
     if (!result.success) {
       const error = `Invalid connect-remote payload: ${formatZodError(result.error)}`;
@@ -544,33 +553,6 @@ export function registerRemoteIpcHandlers(options: {
 
   ipcMain.handle(PlatformChannels.DisposeRemoteSession, async (_event, sessionId: string) => {
     options.disposeRemoteWorkspaceSession(sessionId, `dispose-remote-session:${sessionId}`, 150);
-  });
-
-  ipcMain.handle(PlatformChannels.IsDockerAvailable, async () => {
-    try {
-      return await options.isDockerDaemonAvailable();
-    } catch (error) {
-      options.logger.warn("[is-docker-available] detect failed:", error);
-      return false;
-    }
-  });
-
-  ipcMain.handle(PlatformChannels.ListWSLDistros, async () => {
-    try {
-      return await options.listAvailableWSLDistros();
-    } catch (error) {
-      options.logger.warn("[list-wsl-distros] detect failed:", error);
-      return [];
-    }
-  });
-
-  ipcMain.handle(PlatformChannels.ListDockerContainers, async () => {
-    try {
-      return await options.listAvailableDockerContainers();
-    } catch (error) {
-      options.logger.warn("[list-docker-containers] detect failed:", error);
-      return [];
-    }
   });
 
   ipcMain.handle(PlatformChannels.ListSSHConfigAliases, async () => {

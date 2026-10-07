@@ -1,0 +1,19 @@
+# E2B 模板定义（specs/cloud-agent/01 §4.2、§6.1）。
+# 字段遵循 E2B CLI `template build` 的 e2b.toml 约定（template_id/dockerfile/
+# cpu_count/memory_mb/start_cmd）。
+#
+# 构建：在构建上下文目录执行 `npx @e2b/cli template build`（上下文组装见 README.md）。
+# 上线：把部署配置的 ZCODE_CLOUD_SANDBOX_TEMPLATE_REF（形如 e2b:zcode-sandbox-template）
+# 指向本模板，**保持版本/digest 固定**
+# （01 §5.1 第 2 条禁止 latest 漂移；Run recipe 固定模板版本，不读新部署默认值）。
+template_id = "zcode-sandbox-template"
+dockerfile = "e2b.Dockerfile"
+
+# 资源基线（01 §6.1 目标 2vCPU/4GiB）：是待基准测试的配置，不是已验证的 OOM 数据；
+# provider 上限更小时按账号计划收敛并在部署配置里显式覆盖。
+cpu_count = 2
+memory_mb = 4096
+
+# 常驻占位（01 §6.2 方案 A）：真实 supervisor 由控制面经 envd 命令通道拉起，
+# 模板内不内置任何凭据——自举要素全部由 create 之后的命令 env 注入。
+start_cmd = "/opt/zcode/start.sh"

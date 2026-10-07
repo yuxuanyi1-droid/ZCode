@@ -28,7 +28,7 @@ export function resolveWorkspaceRemoteSessionId<TServices>(
   const candidateSessionIds = [
     target.remoteSessionId,
     workspaceIdentity ? state.sessionIdByWorkspaceIdentity[workspaceIdentity] : undefined,
-    // 同一路径可能同时存在于多个 SSH/WSL/Docker endpoint。已有 identity 时若
+    // 同一路径可能同时存在于多个 SSH endpoint。已有 identity 时若
     // 精确绑定尚未恢复，按 path fallback 会借用另一 endpoint 的 services，导致 sessions-index、
     // provider 和 task RPC 串到错误 Host。identity 缺失时保持 remote-waiting；只有旧版无
     // identity 的 remote tab 才继续使用 path 兼容恢复。

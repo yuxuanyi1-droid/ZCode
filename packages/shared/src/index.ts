@@ -36,13 +36,23 @@ export type {
   RemoteResourcePackageId,
   RemoteResourcePackageSelection,
 } from "./remoteResourcePackages.js";
-export type {
-  DockerConnectOptions,
-  RemoteTarget,
-  SSHConnectOptions,
-  WSLConnectOptions,
+export type { RemoteTarget, RetiredRemoteTargetKind, SSHConnectOptions } from "./remoteTarget.js";
+export {
+  RETIRED_REMOTE_TARGET_KINDS,
+  detectRetiredRemoteTargetKind,
+  isRetiredRemoteTargetKind,
+  stripRemoteTargetSecrets,
 } from "./remoteTarget.js";
-export { stripRemoteTargetSecrets } from "./remoteTarget.js";
+export type {
+  RetiredRemoteWorkspaceEntry,
+  RetiredRemoteWorkspaceOriginalAuthority,
+} from "./retiredRemoteWorkspace.js";
+export {
+  hasLegacyRetiredRemoteTargets,
+  normalizeRetiredRemoteWorkspaceEntry,
+  projectRetiredRemoteWorkspaceEntry,
+  retiredRemoteWorkspaceEntrySchema,
+} from "./retiredRemoteWorkspace.js";
 export { buildSshRemoteHostKey } from "./remoteSshHostKey.js";
 export { buildRemoteEnvironmentKey } from "./remoteEnvironmentKey.js";
 export type {
@@ -199,7 +209,6 @@ export type {
   CuaOsSupport,
   DesktopWindowChromeState,
   DesktopTitleBarTheme,
-  DockerContainerInfo,
   EditorInfo,
   ApplicationIconInfo,
   ApplicationIconLocator,
@@ -219,7 +228,6 @@ export type {
   TaskNotificationPayload,
   UpdateCheckResultPayload,
   UpdateStatePayload,
-  WSLDistro,
   ZCodeStdioTapDevState,
 } from "./platform.js";
 export type {
@@ -306,3 +314,6 @@ export * from "./clientConfig.js";
 export * from "./pluginStoreOrdering.js";
 export * from "./session-debug.js";
 export { redactFeedbackText } from "./feedbackPrivacy.js";
+// Cloud Agent 跨包 wire 契约（specs/cloud-agent/00 §8、W0）：地址/控制帧/RPC 帧/
+// 端点与响应信封/领域状态/错误码。唯一事实源在 ./cloud/index.js。
+export * from "./cloud/index.js";

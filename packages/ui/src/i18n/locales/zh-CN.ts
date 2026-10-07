@@ -1491,11 +1491,6 @@ const zhCN: Record<string, string> = {
   "workspace.openPluginsSettings": "插件市场",
   "workspace.backToWorkspace": "返回工作区",
   "workspace.noActiveForNewTask": "当前还没有可用的工作区，请先打开一个工作区。",
-  "workspace.wslUncPrompt.title": "建议通过 WSL 远程连接打开",
-  "workspace.wslUncPrompt.description":
-    "你选择的是 WSL 路径：\n{path}\n\n建议通过 WSL 连接打开，也可以继续按路径打开。",
-  "workspace.wslUncPrompt.openWsl": "打开 WSL 连接",
-  "workspace.wslUncPrompt.continuePath": "继续按路径打开",
   "workspaceSidebar.workspaces": "任务",
   "workspaceSidebar.archivedTasks": "归档任务",
   "workspaceSidebar.taskViewOptions": "筛选和排序",
@@ -1606,7 +1601,7 @@ const zhCN: Record<string, string> = {
   "remote.step.connecting": "连接中",
   "remote.step.directory": "选择目录",
   "remote.kindStepTitle": "选择连接方式",
-  "remote.kindStepDescription": "选择进入当前工作区的连接方式，然后继续填写对应的连接配置。",
+  "remote.kindStepDescription": "确认使用 SSH 连接，然后继续填写连接配置。",
   "remote.settingsStepTitle": "填写连接配置",
   "remote.settingsStepDescription": "填写建立 {method} 连接所需的信息，我们会据此准备远程会话。",
   "remote.history.empty": "没有匹配的历史连接",
@@ -1628,8 +1623,7 @@ const zhCN: Record<string, string> = {
   "webRemoteControl.botChannel.configure": "去 Bot Channels 配置",
   "webRemoteControl.botChannel.manageBots": "机器人管理",
   "remote.title": "连接远程环境",
-  "remote.description":
-    "通过 SSH、Server、WSL 或 Docker 连接远程工作区，并在当前窗口中继续选择目录。",
+  "remote.description": "通过 SSH 连接远程工作区，并在当前窗口中继续选择目录。",
   "remote.step.connect": "连接环境",
   "remote.step.selectDirectory": "选择目录",
   "remote.selectDirectoryTitle": "选择远程目录",
@@ -1637,12 +1631,12 @@ const zhCN: Record<string, string> = {
   "remote.backToConnection": "返回连接配置",
   "remote.selectedMethod": "当前连接方式",
   "remote.methods": "连接方式",
+  "remote.retiredHistory.title": "已退役的远程目标",
+  "remote.retiredHistory.description":
+    "以下历史记录使用已下线的 Docker / WSL 连接目标，仅保留展示，不能再连接或打开本地同路径。",
+  "remote.retiredHistory.reason": "失效原因：目标已退役（target-retired）。",
   "remote.kind.ssh": "SSH",
-  "remote.kind.wsl": "WSL",
-  "remote.kind.docker": "Docker",
   "remote.kind.ssh.wizardDescription": "远程主机",
-  "remote.kind.wsl.wizardDescription": "Windows Linux 子系统",
-  "remote.kind.docker.wizardDescription": "本地容器",
   "remote.connect": "连接",
   "remote.connecting": "正在连接...",
   "remote.minimize": "收起远程连接窗口",
@@ -1663,34 +1657,8 @@ const zhCN: Record<string, string> = {
   "remote.optionsLoadFailed": "加载本机运行环境列表失败，你仍然可以手动输入连接目标。",
   "remote.log.prepare": "已校验向导参数，准备发起连接。",
   "remote.log.sshTarget": "目标 SSH 节点：{username}@{host}:{port}",
-  "remote.log.dockerTarget": "目标 Docker 容器：{container}",
   "remote.log.requestingSession": "正在请求宿主进程创建远程 session...",
   "remote.log.sessionReady": "远程 session 已创建完成，接下来可以选择目录。",
-  "wsl.description": "连接默认 distro，或选择这台设备上已安装的指定 distro。",
-  "wsl.distro": "发行版",
-  "wsl.defaultDistro": "默认 distro",
-  "wsl.user": "Linux 用户",
-  "wsl.defaultUser": "默认用户",
-  "wsl.userDescription":
-    "留空使用 distro 默认用户；填写 root 或其他已存在的 Linux 用户后，将以该用户运行 WSL 命令。",
-  "wsl.rootWarning":
-    "Root 模式会以 root 运行远程 host、agent 和终端；本次会话创建的文件可能归 root 所有。",
-  "wsl.validation.invalidUser":
-    "Linux 用户名不能包含控制字符、冒号、斜杠或反斜杠，且长度不能超过 64 个字符。",
-  "wsl.loading": "正在检测 WSL 发行版...",
-  "wsl.detectedCount": "当前设备检测到 {count} 个 distro。",
-  "wsl.noDistros": "暂未检测到 WSL 发行版；如果本机已安装 WSL，仍可继续连接默认 distro。",
-  "docker.description": "通过 docker exec 和 docker cp 连接本机容器。",
-  "docker.container": "容器",
-  "docker.containerPlaceholder": "输入容器名或 ID，例如 my-container",
-  "docker.manualContainerHint": "如果运行中的容器列表不完整，可以手动输入容器名或 ID 连接。",
-  "docker.selectContainer": "选择正在运行的容器",
-  "docker.loading": "正在检测运行中的容器...",
-  "docker.unavailable": "未检测到运行中容器",
-  "docker.noContainers": "未检测到运行中容器",
-  "docker.validation.required": "容器名或 ID 不能为空",
-
-  // 语言切换
   "locale.switchLanguage": "切换语言",
 
   // 文件树
@@ -5228,7 +5196,7 @@ const zhCN: Record<string, string> = {
   // 卡上必须写明这件事，否则用户会以为自己在看历史版本。
   "chat.toolCall.workflow.run.artifacts.openInBrowserNote":
     "打开的是工作区里的那一份，不是这一版钉住的字节。",
-  // 远程工作区（SSH/WSL/Docker）拿不到本地文件路径，html 预览与「在工作区显示」都不可用。
+  // 远程工作区（SSH）拿不到本地文件路径，html 预览与「在工作区显示」都不可用。
   "chat.toolCall.workflow.run.artifacts.localOnly": "仅本地工作区可预览。",
   "chat.toolCall.workflow.run.artifacts.loading": "正在读取产物…",
   // 元数据读完了但这个 id 不在清单里（run 的记录已被清理 / chip 指向一个不存在的产物）。
@@ -5747,7 +5715,6 @@ const zhCN: Record<string, string> = {
   "feedback.module.modelCallError": "模型调用报错",
   "feedback.module.permissionConfigSave": "权限 / 配置保存",
   "feedback.module.sshConnectionFailed": "SSH连接失败",
-  "feedback.module.wslConnectionFailed": "WSL连接失败",
   "feedback.module.uiLayoutInteraction": "UI布局 / 交互",
   "feedback.module.modelSlowQuota": "模型响应慢 / 额度",
   "feedback.module.crashInternalError": "崩溃 / Internal Error",
@@ -6482,7 +6449,7 @@ const zhCN: Record<string, string> = {
   "settings.computerUse.pluginDisabledHint": "电脑控制插件未启用。前往插件开启后即可使用电脑控制。",
   "settings.computerUse.unsupported.title": "当前环境暂不支持电脑控制",
   "settings.computerUse.unsupported.remoteDescription":
-    "Computer Use 暂不支持 SSH、WSL、Docker 或其他远端环境。请切换到本机 macOS 或 Windows 工作区。",
+    "Computer Use 暂不支持 SSH 或其他远端环境。请切换到本机 macOS 或 Windows 工作区。",
   "settings.computerUse.unsupported.linuxDescription":
     "Computer Use 暂不支持 Linux 桌面环境。请切换到本机 macOS 或 Windows 工作区。",
   "settings.computerUse.unsupported.badge": "当前环境不可用",
@@ -6492,6 +6459,59 @@ const zhCN: Record<string, string> = {
   "scheduledPreview.toast.running": "正在运行“{title}”…",
   "scheduledPreview.toast.view": "查看",
   "scheduledPreview.addSchedule": "添加计划",
+
+  // Cloud（specs/cloud-agent/W8 §3、04 §3.1/§3.2）—— Cloud 运行时设置分组、草稿启动配置、侧栏项目/任务
+  "settings.cloudRuntime.group": "Cloud 运行时",
+  "settings.cloudRuntime.title": "Cloud 运行时",
+  "settings.cloudRuntime.description":
+    "云任务的仓库授权与沙箱运行环境。登录、套餐与模型目录仍在原有账号设置里，不在此分组。",
+  "settings.cloudRuntime.github.title": "GitHub",
+  "settings.cloudRuntime.github.description": "已授权仓库是云项目的唯一来源。",
+  "settings.cloudRuntime.github.empty": "还没有已授权的仓库。",
+  "settings.cloudRuntime.github.notConfigured": "部署尚未配置 GitHub App installation 投影。",
+  "settings.cloudRuntime.github.revoked": "GitHub App 授权已撤销或权限不足，请重新授权。",
+  "settings.cloudRuntime.github.installHint":
+    "需要先在 GitHub 上安装并授权 ZCode App，之后才能创建云项目。",
+  "settings.cloudRuntime.github.loadMore": "加载更多仓库",
+  "settings.cloudRuntime.github.taskCountHint": "列表按当前账号的授权过滤，权限由服务端核验。",
+  "settings.cloudRuntime.sandbox.title": "Sandbox",
+  "settings.cloudRuntime.sandbox.description": "控制面自述的沙箱 provider 能力（只读）。",
+  "settings.cloudRuntime.sandbox.none": "控制面尚未声明任何沙箱 provider。",
+  "settings.cloudRuntime.sandbox.capability.createOperationLookup": "创建结果查询",
+  "settings.cloudRuntime.sandbox.capability.inspect": "可查询实例",
+  "settings.cloudRuntime.sandbox.capability.extendDeadline": "可延长期限",
+  "settings.cloudRuntime.sandbox.capability.confirmTermination": "可确认终止",
+  "settings.cloudRuntime.sandbox.capability.outboundWss": "支持出站 WSS",
+  "settings.cloudRuntime.sandbox.capability.deadlineSource": "期限来源",
+  "settings.cloudRuntime.sandbox.capability.maxLifetime": "最长生命周期（秒）",
+  "settings.cloudRuntime.sandbox.secretNote": "密钥与凭据由部署侧保存，本页不读取也不展示。",
+  "settings.cloudRuntime.retry": "重试",
+  "settings.cloudRuntime.loading": "加载中…",
+  "settings.cloudRuntime.notCloudMode": "当前不是云模式，Cloud 运行时分组不可用。",
+  "cloud.draftStartConfig.baseBranch": "基础分支",
+  "cloud.draftStartConfig.baseBranch.empty": "没有可用的分支",
+  "cloud.draftStartConfig.provider": "运行 provider",
+  "cloud.draftStartConfig.provider.empty": "控制面未声明 provider",
+  "cloud.draftStartConfig.templateRef": "受控模板",
+  "cloud.projects.description": "按仓库组织；展开只查控制面任务，不连沙箱。",
+  "cloud.projects.remove": "移除项目",
+  "cloud.projects.pickerTitle": "选择仓库",
+  "cloud.projects.pickerEmpty": "没有可选的已授权仓库。",
+  "cloud.projects.pickerSearch": "搜索仓库",
+  "cloud.projects.cancel": "取消",
+  "cloud.tasks.new": "新建任务",
+  "cloud.tasks.empty": "该项目还没有任务。",
+  "cloud.tasks.draftBadge": "草稿",
+  "cloud.tasks.newTitleLabel": "任务标题",
+  "cloud.tasks.newSubmit": "创建草稿",
+  "cloud.tasks.createFailed": "创建任务失败：{reason}",
+  "cloud.tasks.openFailed": "打开云任务工作区失败",
+  "chat.attachments.cloud.uploadUnavailable":
+    "当前部署不支持云任务的草稿附件上传，首发前请先移除附件。",
+  "chat.attachments.cloud.attachmentUnavailable":
+    "与当前任务运行环境的连接已断开，附件会在重连后恢复，不会上传到其他环境。",
+  "chat.attachments.cloud.waitingEnvironment":
+    "运行环境尚未就绪，暂不能上传附件；准备好后会自动恢复。",
 };
 
 export default zhCN;

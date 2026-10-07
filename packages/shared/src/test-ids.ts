@@ -153,10 +153,6 @@ export const TID_SSH_CONNECT_TRIGGER = "ssh-connect-trigger";
 export const TID_SSH_DIALOG = "ssh-dialog";
 /** 远程连接方式切换到 SSH */
 export const TID_REMOTE_KIND_SSH = "remote-kind-ssh";
-/** 远程连接方式切换到 WSL */
-export const TID_REMOTE_KIND_WSL = "remote-kind-wsl";
-/** 远程连接方式切换到 Docker */
-export const TID_REMOTE_KIND_DOCKER = "remote-kind-docker";
 /** SSH 主机地址输入框 */
 export const TID_SSH_HOST_INPUT = "ssh-host-input";
 /** SSH 端口号输入框 */
@@ -173,14 +169,6 @@ export const TID_SSH_PRIVATE_KEY_INPUT = "ssh-private-key-input";
 export const TID_SSH_AUTH_PASSWORD = "ssh-auth-password";
 /** SSH 认证方式：私钥 */
 export const TID_SSH_AUTH_PRIVATE_KEY = "ssh-auth-private-key";
-/** WSL 发行版选择框 */
-export const TID_WSL_DISTRO_SELECT = "wsl-distro-select";
-/** WSL Linux 用户输入框 */
-export const TID_WSL_USER_INPUT = "wsl-user-input";
-/** Docker 容器选择框 */
-export const TID_DOCKER_CONTAINER_SELECT = "docker-container-select";
-/** Docker 容器名称/ID 输入框 */
-export const TID_DOCKER_CONTAINER_INPUT = "docker-container-input";
 /** SSH 连接确认按钮 */
 export const TID_SSH_CONNECT_BUTTON = "ssh-connect-button";
 /** SSH 弹窗取消按钮 */

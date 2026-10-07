@@ -45,6 +45,11 @@ export interface SSHBackendOptions {
   privateKeyPassphrase?: string;
   password?: string;
   agent?: string;
+  /**
+   * 主机密钥校验（可选；缺省保持既有行为）。云控制面 SSH attachment 注入
+   * known_hosts/TOFU 校验回调（07 §11），桌面既有 SSH 连接不传，语义不变。
+   */
+  hostVerifier?: ConnectConfig["hostVerifier"];
 }
 
 type SSHUploadFailureKind = "sftp-session" | "sftp-write" | "local-read" | "aborted";
@@ -136,6 +141,7 @@ export class SSHBackend implements IRemoteBackend {
       passphrase: options.privateKeyPassphrase,
       password: options.password,
       agent: options.agent,
+      ...(options.hostVerifier === undefined ? {} : { hostVerifier: options.hostVerifier }),
     });
     if (resolveZCodeRuntimeEnv(process.env) === "development") {
       this.config.debug = (message: string) => {

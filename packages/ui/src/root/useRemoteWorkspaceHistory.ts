@@ -7,6 +7,7 @@ import type {
   IPlatformService,
   RemoteSessionClosedEvent,
   RemoteWorkspaceSessionEntry,
+  RetiredRemoteWorkspaceEntry,
 } from "@zcode/shared";
 import { buildSshRemoteHostKey, createUuid, stripRemoteTargetSecrets } from "@zcode/shared";
 import type { IServiceAccessor } from "@zcode/services";
@@ -27,6 +28,7 @@ import {
   buildWorkspaceSessionKey,
   createRemoteTargetFromSnapshot,
   getRemoteWorkspaceSessionEntries,
+  readRetiredRemoteWorkspaceEntries,
   removeRemoteWorkspaceSessionEntries,
 } from "@/lib/remoteWorkspaceHistory.js";
 import { getErrorMessage } from "@/lib/errorMessage.js";
@@ -85,20 +87,6 @@ function resolveBotRemoteWorkspaceReconnectedIdentity(params: {
   return buildRemoteWorkspaceIdentity(params.resolvedWorkspacePath, params.target);
 }
 
-function shouldPersistRemoteWorkspaceFailure(params: {
-  pendingReconnectRequestIds: ReadonlyMap<string, string>;
-  sessionEntry: RemoteWorkspaceSessionEntry;
-  workspaceKey: string;
-}): boolean {
-  if (params.sessionEntry.target.kind !== "wsl") {
-    return true;
-  }
-
-  // WSL 偶发断连时，旧 session 的关闭事件可能会晚于手动重连流程。
-  // 只要当前 workspace 已经有 pending reconnect，就先别把 failed 写死到 setting，
-  // 让最终结果由这次重连成功/失败决定。
-  return !params.pendingReconnectRequestIds.has(params.workspaceKey);
-}
 interface RemoteWorkspaceTabStoreReader {
   getState(): {
     tabs: WindowTabState[];
@@ -180,9 +168,6 @@ function collectSshReconnectGroup(params: {
   sessions: RemoteWorkspaceSessionEntry[];
   tabs: WindowTabState[];
 }): RemoteWorkspaceSessionEntry[] {
-  if (params.selected.target.kind !== "ssh") {
-    return [params.selected];
-  }
   const remoteHostKey = buildSshRemoteHostKey(params.selected.target);
   const disconnectedWorkspaceKeys = new Set(
     params.tabs.flatMap((tab) => {
@@ -194,7 +179,6 @@ function collectSshReconnectGroup(params: {
   );
   const reconnectGroup = params.sessions.filter(
     (entry) =>
-      entry.target.kind === "ssh" &&
       buildSshRemoteHostKey(entry.target) === remoteHostKey &&
       disconnectedWorkspaceKeys.has(buildWorkspaceSessionKey(entry)),
   );
@@ -224,20 +208,6 @@ async function reconnectRemoteWorkspaceGroup(params: {
   const siblings = params.reconnectGroup.filter(
     (entry) => buildWorkspaceSessionKey(entry) !== selectedWorkspaceKey,
   );
-
-  if (params.selected.target.kind !== "ssh") {
-    try {
-      await params.reconnectEntry(params.selected, {
-        ...params.options,
-        throwOnFailure: true,
-      });
-    } catch (error) {
-      if (params.options?.throwOnFailure) {
-        throw error;
-      }
-    }
-    return;
-  }
 
   type InitiatorHostGate =
     | { status: "ready"; credentials: SshReconnectCredentials }
@@ -658,6 +628,11 @@ export function useRemoteWorkspaceHistory({
     RemoteWorkspaceSessionEntry[]
   >([]);
   const remoteWorkspaceSessionsRef = useRef<RemoteWorkspaceSessionEntry[]>([]);
+  // 退役远端目标的只读失效记录：不参与连接/恢复，只在写回时原样保留、在 UI 里只读展示。
+  const [retiredRemoteWorkspaceEntries, setRetiredRemoteWorkspaceEntries] = useState<
+    RetiredRemoteWorkspaceEntry[]
+  >([]);
+  const retiredRemoteWorkspaceEntriesRef = useRef<RetiredRemoteWorkspaceEntry[]>([]);
   const [reconnectingRemoteWorkspaceKeys, setReconnectingRemoteWorkspaceKeys] = useState<string[]>(
     [],
   );
@@ -696,7 +671,11 @@ export function useRemoteWorkspaceHistory({
       }
 
       await services.settingService.update(
-        buildRemoteWorkspacePersistPatch(tabStoreApi.getState(), nextRemoteSessions),
+        buildRemoteWorkspacePersistPatch(
+          tabStoreApi.getState(),
+          nextRemoteSessions,
+          retiredRemoteWorkspaceEntriesRef.current,
+        ),
       );
     },
     [services.settingService, supportsSettings, tabStoreApi],
@@ -799,7 +778,11 @@ export function useRemoteWorkspaceHistory({
 
   const buildPersistedTabPatch = useCallback(
     (state: TabStoreState) =>
-      buildRemoteWorkspacePersistPatch(state, remoteWorkspaceSessionsRef.current),
+      buildRemoteWorkspacePersistPatch(
+        state,
+        remoteWorkspaceSessionsRef.current,
+        retiredRemoteWorkspaceEntriesRef.current,
+      ),
     [],
   );
 
@@ -948,6 +931,10 @@ export function useRemoteWorkspaceHistory({
       const persistedRemoteSessions = getRemoteWorkspaceSessionEntries(settings);
       setRemoteWorkspaceSessions(persistedRemoteSessions);
       remoteWorkspaceSessionsRef.current = persistedRemoteSessions;
+      // 退役记录只在设置迁移时产生，读取后原样保留在设置里；这里仅取展示/写回所需的数据。
+      const persistedRetiredEntries = readRetiredRemoteWorkspaceEntries(settings);
+      setRetiredRemoteWorkspaceEntries(persistedRetiredEntries);
+      retiredRemoteWorkspaceEntriesRef.current = persistedRetiredEntries;
       let conversationWorkspacePath: string | undefined;
       if (ensureConversationWorkspaceOnRestore) {
         try {
@@ -959,7 +946,7 @@ export function useRemoteWorkspaceHistory({
         }
       }
       // 启动恢复远程 workspace 时只还原任务列表里的断开态 tab。
-      // 之前这里之后还有后台 effect 会自动发起 SSH/WSL/Docker 重连，用户只是打开应用查看任务列表也会触发远端连接和 runtime 上传。
+      // 之前这里之后还有后台 effect 会自动发起 SSH 重连，用户只是打开应用查看任务列表也会触发远端连接和 runtime 上传。
       // 现在把重连入口收口到用户点击“重连”或从远程历史主动打开，避免启动阶段产生隐藏副作用。
       // Web 普通模式还会把 allowRemoteWorkspaceRestore 置为 false：保留 setting 里的远程快照，但不恢复 tab/不展示入口。
       const workspaceRestore = restorePersistedRemoteWorkspaceSessions({
@@ -1174,24 +1161,6 @@ export function useRemoteWorkspaceHistory({
           continue;
         }
 
-        const pendingReconnectRequestId = pendingReconnectRequestIdsRef.current.get(workspaceKey);
-        if (
-          !shouldPersistRemoteWorkspaceFailure({
-            pendingReconnectRequestIds: pendingReconnectRequestIdsRef.current,
-            sessionEntry,
-            workspaceKey,
-          })
-        ) {
-          logger.info("[Root] WSL workspace session 关闭时跳过失败落盘，等待重连结果", {
-            pendingReconnectRequestId,
-            sessionId,
-            workspaceIdentity: sessionEntry.workspaceIdentity ?? null,
-            workspacePath: sessionEntry.workspacePath,
-            workspaceKey,
-          });
-          continue;
-        }
-
         await commitRemoteWorkspaceSessionMutation(
           buildRemoteWorkspaceSessionMutation({
             remoteSessions: remoteWorkspaceSessionsRef.current,
@@ -1374,6 +1343,7 @@ export function useRemoteWorkspaceHistory({
 
   return {
     remoteWorkspaceSessions,
+    retiredRemoteWorkspaceEntries,
     reconnectingRemoteWorkspaceKeys,
     remoteWorkspaceErrorByWorkspaceKey,
     reconnectingRemoteWorkspaceLogsByWorkspaceKey,
