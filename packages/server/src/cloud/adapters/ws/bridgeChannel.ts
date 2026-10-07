@@ -311,12 +311,22 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
           connectionEpoch: connection.connectionEpoch,
         });
         browserRpc.closeRun(runId, "bridge-socket-closed");
-        void context.services().runs.markDisconnected({
-          runId,
-          runGeneration: connection.runGeneration,
-          connectionEpoch: connection.connectionEpoch,
-          reason: "bridge-socket-closed",
-        });
+        // 悬浮 Promise 必须自兜（2026-10-07 实测崩溃：进程关闭期 storage worker 先关，
+        // 迟到的 socket close 事件走到这里抛 CloudStorageError，无人接的 rejection
+        // 直接把进程带崩 exit 1——关闭路径的失败只记日志，不再有可恢复动作）。
+        context.services().runs
+          .markDisconnected({
+            runId,
+            runGeneration: connection.runGeneration,
+            connectionEpoch: connection.connectionEpoch,
+            reason: "bridge-socket-closed",
+          })
+          .catch((error: unknown) => {
+            logger.warn(undefined, "bridge mark disconnected failed", {
+              runId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
       });
     },
 
