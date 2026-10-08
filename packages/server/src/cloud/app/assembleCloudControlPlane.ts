@@ -12,6 +12,7 @@
 import { resolveCloudCoreConfig, type CloudCoreConfig } from "./config.js";
 import type { CloudCoreDeps } from "./deps.js";
 import type { SandboxDriverCapabilities } from "./ports/sandboxDriverPort.js";
+import type { SandboxRuntimeSettingsPort } from "./ports/sandboxRuntimeSettingsPort.js";
 import { createAttachmentRegistry, type AttachmentRegistry } from "./attachments/registry.js";
 import { createCloudCommandRouter, type CloudCommandRouter } from "./attachments/router.js";
 import { createHeartbeatWatchdog, type HeartbeatWatchdog } from "./attachments/watchdog.js";
@@ -62,11 +63,17 @@ import { createTaskService, type TaskService } from "./taskService.js";
 /** `capabilitiesResponseSchema.providers` 的元素形状（shared 的 provider 能力声明）。 */
 export interface CloudProviderCapability extends SandboxDriverCapabilities {
   provider: string;
+  /** 生效 key 是否已配置（credential ?? env）；布尔投影，不含值与来源细节。 */
+  apiKeyConfigured: boolean;
 }
 
 export interface CloudControlPlane {
   config: CloudCoreConfig;
-  /** provider 能力清单（03 §6 capabilities 端点；只列已配置且实际解禁项）。 */
+  /**
+   * provider 能力清单（03 §6 capabilities 端点；只列已配置且实际解禁项）。
+   * 2026-10-08 修订：每条附 `apiKeyConfigured`（生效 key = credential ?? env 是否已
+   * 配置，布尔投影不含值）；`maxLifetimeSeconds` 维持 env 核实上限语义（硬上界）。
+   */
   providers(): Promise<CloudProviderCapability[]>;
   tasks: TaskService;
   taskDetail: TaskDetailService;
@@ -122,6 +129,9 @@ export function assembleCloudControlPlane(
     operations: input.operations,
     github: input.github,
     drivers: input.drivers,
+    ...(input.sandboxRuntimeSettings
+      ? { sandboxRuntimeSettings: input.sandboxRuntimeSettings }
+      : {}),
     attachments: input.attachments,
     runtimeCommands: input.runtimeCommands,
     clock: input.clock,
@@ -167,10 +177,26 @@ export function assembleCloudControlPlane(
   return {
     config: deps.config,
     providers: async () =>
-      (await deps.drivers.listProviders()).map((entry) => ({
-        provider: entry.provider,
-        ...entry.capabilities,
-      })),
+      Promise.all(
+        (await deps.drivers.listProviders()).map(async (entry) => {
+          if (!deps.sandboxRuntimeSettings) {
+            // 未接端口（测试/嵌入装配）：providers 只会来自通过启动期 env 秘密校验的
+            // 绑定，生效 key 视为已配置；不伪造端口读取。
+            return { provider: entry.provider, ...entry.capabilities, apiKeyConfigured: true };
+          }
+          const runtime = await deps.sandboxRuntimeSettings.readEffectiveSandboxConfig(
+            entry.provider,
+          );
+          return {
+            provider: entry.provider,
+            ...entry.capabilities,
+            ...(runtime.envMaxLifetimeSeconds === undefined
+              ? {}
+              : { maxLifetimeSeconds: runtime.envMaxLifetimeSeconds }),
+            apiKeyConfigured: runtime.apiKeyConfigured,
+          };
+        }),
+      ),
     tasks: taskService,
     taskDetail,
     gitGrants,

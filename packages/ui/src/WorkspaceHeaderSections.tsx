@@ -36,6 +36,11 @@ import { useFeedbackStore } from "@/feedback/feedbackStore.js";
 import { useModelTrajectoryStore } from "@/store/modelTrajectoryStore.js";
 import { buildTaskFeedbackDescription } from "@/lib/taskFeedbackDraft.js";
 import { resolveGitBranchTriggerLabel } from "@/git-branch-switcher/display.js";
+import { isCloudTaskArchiveActionAvailable } from "@/cloud/cloudTaskPanel.js";
+import { describeCloudTaskActionError } from "@/cloud/cloudTaskErrorText.js";
+import { resolveCloudTaskIdFromWorkspaceIdentity } from "@/cloud/cloudUiBootstrap.js";
+import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
+import { useCloudTask } from "@/hooks/cloud/useCloudTask.js";
 import type {
   WorkspaceHeaderState,
   WorkspaceHeaderTitleSectionProps,
@@ -154,6 +159,17 @@ export function WorkspaceHeaderTitleSection({
     activeTaskId && pinnedTasks.some((task) => task.taskId === activeTaskId),
   );
   const resolvedTaskActionTaskId = activeTaskMeta?.taskId ?? activeTaskId;
+  // 云任务工作区（specs/cloud-agent/04 §6、03 §6）：归档等生命周期动作是控制面独立
+  // 端点（POST /tasks/:id/archive），**不能**走本机 zcodeTaskService——那是本地 CLI
+  // 任务索引，对 cloud-task:<taskId> 既没有记录也没有路由，之前表现为「点了没反应」
+  // 且失败被 .then 链吞掉。这里改为分流到 useCloudTask 的云端口动作。
+  const cloudTaskId = resolveCloudTaskIdFromWorkspaceIdentity(workspaceIdentity);
+  const cloudContext = useCloudWorkspaceContext();
+  const cloudTask = useCloudTask({ taskId: cloudTaskId });
+  // 归档可用性只认服务端 actions 投影（04 §3.3：服务端未给出 = 无动作可用）。
+  // 详情未加载时同样视为不可用，避免「能点但必被拒」的入口。
+  const cloudArchiveUnavailable =
+    cloudTaskId !== null && !isCloudTaskArchiveActionAvailable(cloudTask.detail);
   // 新建任务在第一次写入数据库前没有稳定 taskId。
   // 之前 Header 更多菜单虽然点击后会被回调里的空 id guard 拦住，但 UI 仍显示为可点，
   // 用户会感知成“菜单无响应”；这里只禁用依赖已落库 task 的动作，保留 workspace 级入口。
@@ -350,6 +366,32 @@ export function WorkspaceHeaderTitleSection({
     }
 
     handleCancelRenameTask();
+
+    if (cloudTaskId !== null) {
+      // 云任务归档：走控制面独立端点（useCloudTask → port.archiveTask），成功后详情
+      // 由 store 合并回项目列表；失败把服务端错误信封经 i18n 归一成可读文案后用 toast
+      // 呈现，不再透出 validation_failed 之类的原始码，也不再吞掉。
+      try {
+        await cloudTask.archiveTask();
+      } catch (archiveError) {
+        toast(
+          intl.formatMessage(
+            { id: "cloud.tasks.archiveFailed" },
+            {
+              reason: describeCloudTaskActionError(archiveError, (id) =>
+                intl.formatMessage({ id }),
+              ),
+            },
+          ),
+        );
+        return;
+      }
+      if (cloudContext?.selection.taskId === cloudTaskId) {
+        void cloudContext.reloadTask();
+      }
+      return;
+    }
+
     void services.zcodeTaskService
       .archiveTask({
         taskId: resolvedTaskActionTaskId,
@@ -374,6 +416,10 @@ export function WorkspaceHeaderTitleSection({
           previousState: { pinned: isPinned, archived: false },
           nextState: { pinned: false, archived: true },
         });
+      })
+      .catch(() => {
+        // 本地归档失败同样不能静默：此前这条 .then 链没有 catch，用户只会看到「点了没反应」。
+        toast(intl.formatMessage({ id: "taskList.archiveFailed" }));
       });
   };
 
@@ -529,6 +575,12 @@ export function WorkspaceHeaderTitleSection({
                 disableTaskActions={Boolean(readOnlyReason)}
                 disabledReason={readOnlyReason}
                 disablePinTaskAction={taskMenuMembershipLoading}
+                disableArchiveTaskAction={cloudArchiveUnavailable}
+                archiveDisabledReason={
+                  cloudArchiveUnavailable
+                    ? intl.formatMessage({ id: "cloud.tasks.archiveUnavailable" })
+                    : undefined
+                }
                 hideMobileUnsupportedActions={simplifyForNarrowRemote}
                 Item={DropdownMenuItem}
                 Separator={DropdownMenuSeparator}

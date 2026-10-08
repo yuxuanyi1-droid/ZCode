@@ -619,6 +619,13 @@ test("bridge 通道日志：连接/握手/拒绝各留痕、心跳不刷 info、
   // ── 拒绝分支 ──
   const rejectCases: {
     reason: string;
+    /**
+     * 该分支的触发帧是否要求连接已通过 hello（02 §5.1 鉴权门控）。
+     * rpc.* 分支校验的是**已认证连接**上的方向/地址围栏，未认证 socket 只会先撞上
+     * 1008 unauthenticated，因此必须先完成一次合法 hello 再发触发帧
+     * （未认证门控本身的用例在 cloudCoreRelay.test.ts 回归测试里覆盖）。
+     */
+    requiresAuthenticatedConnection?: boolean;
     drive: (socket: ReturnType<typeof createFakeSocket>) => void;
   }[] = [
     {
@@ -692,6 +699,7 @@ test("bridge 通道日志：连接/握手/拒绝各留痕、心跳不刷 info、
     { reason: "invalid-frame", drive: (socket) => socket.push("{not json") },
     {
       reason: "unexpected-frame-direction",
+      requiresAuthenticatedConnection: true,
       drive: (socket) =>
         socket.push(
           JSON.stringify({
@@ -707,6 +715,7 @@ test("bridge 通道日志：连接/握手/拒绝各留痕、心跳不刷 info、
     },
     {
       reason: "rpc-address-mismatch",
+      requiresAuthenticatedConnection: true,
       drive: (socket) =>
         socket.push(
           JSON.stringify({
@@ -732,8 +741,20 @@ test("bridge 通道日志：连接/握手/拒绝各留痕、心跳不刷 info、
     });
     const socket = createFakeSocket();
     await bridge.acceptConnection({ runId, socket: socket.socket });
+    if (testCase.requiresAuthenticatedConnection) {
+      // 02 §5.1：hello 之前的 socket 不进入路由表，只允许 `bridge.hello`。先跑完一次合法
+      // 握手，让后续触发帧落在已认证连接上（否则会被门控提前 1008 unauthenticated 拦下）。
+      socket.push(helloFrame());
+      await waitFor(
+        () =>
+          socket.sent.some(
+            (item) => (JSON.parse(item) as { type?: string }).type === "bridge.welcome",
+          ),
+        `welcome for ${testCase.reason}`,
+      );
+    }
     const before = capture.entries.length;
-    // 每个分支把触发帧作为该 socket 的首帧（hello 类分支要求凭据在轮换前仍是初始值）。
+    // 每个分支把触发帧作为该 socket 的首个**业务**帧（hello 类分支要求凭据在轮换前仍是初始值）。
     testCase.drive(socket);
     await waitFor(
       () => capture.entries.slice(before).some((entry) => entry.fields.reason === testCase.reason),

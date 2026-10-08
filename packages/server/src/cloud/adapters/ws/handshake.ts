@@ -19,10 +19,18 @@ export interface HandshakeOutcome {
   handled: boolean;
 }
 
+/**
+ * hello 认证成功后由通道层回调：把连接放进路由表（替换旧连接并关闭其 socket）。
+ * 必须在 `bootstrap.config` 下发之前完成——下发经连接表寻址（02 §5.1：socket 绑定
+ * 与 epoch 递增属于 hello 事务，不得提前到 TCP accept）。
+ */
+export type BindAuthenticatedConnection = (connection: LiveConnection) => void;
+
 export async function handleBridgeHandshake(
   context: CloudBridgeContext,
   connection: LiveConnection,
   frame: CloudBridgeControlFrame,
+  onAuthenticated?: BindAuthenticatedConnection,
 ): Promise<HandshakeOutcome> {
   if (frame.type !== "bridge.hello") return { handled: false };
   const { storage, registry, clock, hash } = context;
@@ -124,6 +132,10 @@ export async function handleBridgeHandshake(
     })) ?? connection.connectionEpoch;
   connection.connectionEpoch = epoch;
   connection.runtimeIncarnation = frame.runtimeIncarnation;
+  // hello 凭据校验通过：连接取得路由资格并绑定连接表，此后才能收发非 hello 帧、
+  // 才在关闭时触发 registry/run 状态副作用（02 §5.1；修复未鉴权 socket 占位缺陷）。
+  connection.authenticated = true;
+  onAuthenticated?.(connection);
   registry.register({
     taskId: run.taskId,
     runId: run.runId,

@@ -8,7 +8,9 @@
  *
  * 边界：
  * - 秘密**值**只在本模块与调用方内存中出现；`describe()` 只回引用与结构化事实。
- * - 缺 auth token 一律启动失败：cloud 模式没有匿名入口（03 §3）。
+ * - token 模式（默认）缺 auth token 一律启动失败：cloud 模式没有匿名入口（03 §3）。
+ *   `anonymous`（03 §3 修订 2026-10-07）是本地调试逃生门：authToken 引用允许缺失，
+ *   principalId 仍必填；token 模式行为完全不变。
  * - 账号/模型凭据归 host 本体 `ICredentialService`（12 §1.1），本文件只处理部署级秘密。
  */
 import { createServiceLogger } from "@zcode/services/node";
@@ -17,7 +19,11 @@ import {
   DeploySecretError,
   type DeploySecretsFs,
 } from "./secret/deploySecrets.js";
-import { CloudEntryStartupError, type CloudSecretRefs } from "./entry-cloud-config.js";
+import {
+  CloudEntryStartupError,
+  type CloudAuthMode,
+  type CloudSecretRefs,
+} from "./entry-cloud-config.js";
 import type { CloudAdapterLogger } from "./sandbox/adapterError.js";
 
 export interface CloudGitHubAppSecret {
@@ -29,7 +35,11 @@ export interface CloudGitHubAppSecret {
 }
 
 export interface CloudDeploymentSecrets {
-  readonly authToken: string;
+  /**
+   * lite-token 正文；仅 token 模式必填。anonymous 模式未提供 token 文件时缺省
+   * （此时入口不再挂 lite-token 校验，只有 `?token=` 命中时的 cookie 下发被跳过）。
+   */
+  readonly authToken?: string;
   /** host 凭据存储的加密密钥（12 §4：部署注入），属 host 账号域，不是 GitHub 秘密。 */
   readonly credentialSecret?: string;
   readonly gitHubApp?: CloudGitHubAppSecret;
@@ -40,7 +50,10 @@ export interface CloudDeploymentSecrets {
 
 export interface CloudDeploymentSecretsDescription {
   readonly principalId: string;
-  readonly authToken: "configured";
+  /** 部署声明的鉴权模式（03 §3 修订 2026-10-07）；token = 既有 fail-closed 语义。 */
+  readonly authMode: CloudAuthMode;
+  /** configured = token 文件已加载（token 模式恒为 configured）；absent = anonymous 且未提供。 */
+  readonly authToken: "configured" | "absent";
   readonly credentialSecret: "configured" | "absent";
   readonly gitHubApp: "configured" | "absent";
 }
@@ -48,6 +61,11 @@ export interface CloudDeploymentSecretsDescription {
 export interface LoadCloudEntrySecretsOptions {
   readonly refs: CloudSecretRefs;
   readonly env: Record<string, string | undefined>;
+  /**
+   * 鉴权模式（03 §3 修订 2026-10-07）：`anonymous` 下 authToken 引用允许缺失；
+   * 缺省 `token` 保持既有 fail-closed 行为，未传的既有调用方行为不变。
+   */
+  readonly authMode?: CloudAuthMode;
   /** 注入点沿用 W4 的实现（测试可不落盘）。 */
   readonly fs?: DeploySecretsFs;
   readonly uid?: number;
@@ -77,13 +95,14 @@ export async function loadCloudEntrySecrets(
   options: LoadCloudEntrySecretsOptions,
 ): Promise<CloudDeploymentSecrets> {
   const { refs, env } = options;
+  const authMode = options.authMode ?? "token";
   if (!refs.principalId?.trim()) {
     throw new CloudEntryStartupError(
       "not_configured",
       "cloud 模式必须配置稳定的 deploymentPrincipalId（03 §3）",
     );
   }
-  if (!refs.authTokenFile) {
+  if (!refs.authTokenFile && authMode === "token") {
     throw new CloudEntryStartupError(
       "not_configured",
       "cloud 模式缺少认证凭据：必须以 0600 文件提供 auth token，才允许监听入口",
@@ -107,7 +126,8 @@ export async function loadCloudEntrySecrets(
     loaded = await loadDeploySecrets(
       {
         principalId: refs.principalId.trim(),
-        authTokenFile: refs.authTokenFile,
+        // anonymous 模式仍提供 token 文件时照常加载（`?token=` 命中种 cookie 的既有握手不破坏）。
+        ...(refs.authTokenFile ? { authTokenFile: refs.authTokenFile } : {}),
         ...(github ? { github } : {}),
       },
       {
@@ -126,13 +146,14 @@ export async function loadCloudEntrySecrets(
 
   const describe = (): CloudDeploymentSecretsDescription => ({
     principalId: loaded.principalId,
-    authToken: "configured",
+    authMode,
+    authToken: loaded.authToken !== undefined ? "configured" : "absent",
     credentialSecret: credentialSecret ? "configured" : "absent",
     gitHubApp: loaded.github ? "configured" : "absent",
   });
 
   return {
-    authToken: loaded.authToken,
+    ...(loaded.authToken !== undefined ? { authToken: loaded.authToken } : {}),
     principalId: loaded.principalId,
     ...(credentialSecret ? { credentialSecret } : {}),
     ...(loaded.github

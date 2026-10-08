@@ -535,13 +535,15 @@ test("reactivate 需要 PR 状态投影：有 prRef 时明确 not_implemented（
     taskId: task.taskId,
     from: ["draft"],
     to: "completed",
-    revision: task.revision,
+    // `revision` 是新的 revision（必须严格大于当前值），不是 CAS 期望值（ports/taskPort.ts:41-46）。
+    revision: task.revision + 1,
     completeRequested: true,
     now: context.clock.now(),
   });
   // PR 状态来自 artifact 投影（读取端口未冻结，见报告 CR-4）：有 prRef 时必须明确拒绝。
   const completed = await context.storage.tasks.get(task.taskId);
   assert.ok(completed);
+  assert.equal(completed.status, "completed", "前置：CAS 已把 draft 迁移到 completed（08 §3.1）");
   context.storage.tasksById.set(completed.taskId, { ...completed, prRef: "42" });
   const withPr = await context.plane.commands.taskLifecycle.reactivateTask({
     principalId: PRINCIPAL,

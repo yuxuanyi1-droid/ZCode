@@ -2,6 +2,7 @@ import {
   cloneElement,
   isValidElement,
   useCallback,
+  useState,
   type ComponentProps,
   type ReactNode,
   type Ref,
@@ -100,10 +101,28 @@ export function ControlHintTooltip({
     </span>
   );
 
+  // Radix Tooltip 的 open 在 controlled / uncontrolled 之间切换会触发 React
+  // 「Tooltip is changing from controlled to uncontrolled」告警（2026-10-08 巡检 P3：
+  // composer 的停止/发送按钮在同一树位置切换，stop 变体不传 open、send 变体传 boolean，
+  // 复用同一组件实例时 open 在 boolean ↔ undefined 间跳变）。未受控用法用本地状态
+  // 补齐，保证传给 Radix 的 open 永远是 boolean——受控/非受控语义本身不变。
+  const [internalOpen, setInternalOpen] = useState(false);
+  const isControlled = open !== undefined;
+  const resolvedOpen = isControlled ? open : internalOpen;
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      if (!isControlled) {
+        setInternalOpen(next);
+      }
+      onOpenChange?.(next);
+    },
+    [isControlled, onOpenChange],
+  );
+
   // 大会话会为每条消息动作渲染大量 ControlHintTooltip，逐个创建 Provider
   // 会把 Radix 上下文树放大到消息数量级；共享 Provider 统一放在 Root。
   const tooltip = (
-    <Tooltip open={open} onOpenChange={onOpenChange}>
+    <Tooltip open={resolvedOpen} onOpenChange={handleOpenChange}>
       <TooltipTrigger asChild>{trigger}</TooltipTrigger>
       <TooltipContent
         align={align}

@@ -64,6 +64,19 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
     streamId: ids.newId(),
   });
 
+  /**
+   * hello 认证成功后的绑定（02 §5.1）：连接此刻才进入路由表；若存在旧连接则显式关闭
+   * （旧 socket 的关闭副作用会被 registry.detach 的 epoch 校验拦下，不会误伤新 session）。
+   * 修复依据（2026-10-07 review P0）：绑定提前到 TCP accept 使未鉴权方可占据路由槽。
+   */
+  function bindAuthenticatedConnection(connection: LiveConnection): void {
+    const previous = connections.get(connection.runId);
+    connections.set(connection.runId, connection);
+    if (previous && previous !== connection) {
+      previous.socket.close(1008, "superseded");
+    }
+  }
+
   async function handleInbound(connection: LiveConnection, data: string): Promise<void> {
     let value: unknown;
     try {
@@ -77,9 +90,26 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
       connection.socket.close(1008, "invalid-frame");
       return;
     }
+    // 鉴权门控（02 §5.1）：hello 之前只接受 `bridge.hello`；其余任何帧（含 rpc.*、
+    // projection.*、checkpoint.*）一律关闭。修复依据（2026-10-07 review P0）：未鉴权
+    // socket 曾可注入伪造投影/checkpoint 结果并截获 rpc 帧——鉴权状态必须绑定连接对象。
+    if (!connection.authenticated && (value as { type?: string })?.type !== "bridge.hello") {
+      logger.warn(undefined, "bridge frame rejected", {
+        runId: connection.runId,
+        reason: "unauthenticated",
+        frameType: String((value as { type?: string })?.type ?? "unknown"),
+      });
+      connection.socket.close(1008, "unauthenticated");
+      return;
+    }
     const control = parseBridgeFrame(value);
     if (control) {
-      const handshake = await handleBridgeHandshake(context, connection, control);
+      const handshake = await handleBridgeHandshake(
+        context,
+        connection,
+        control,
+        bindAuthenticatedConnection,
+      );
       if (handshake.handled) return;
       await routeInboundFrame(context, connection, control);
       return;
@@ -265,8 +295,9 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
         runGeneration: run.runGeneration,
         connectionEpoch: run.connectionEpoch,
         runtimeIncarnation: "unknown",
+        // 绑定与副作用都发生在 hello 认证之后（02 §5.1）；accept 只记连接事实。
+        authenticated: false,
       };
-      connections.set(runId, connection);
       // 连接建立：只记路由/代际事实与 provider 标识，不记凭据/帧正文（02 §9）。
       logger.info(undefined, "bridge attachment opened", {
         taskId: run.taskId,
@@ -290,7 +321,6 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
         })();
       });
       socket.onClose((closeInfo) => {
-        if (connections.get(runId) === connection) connections.delete(runId);
         // 关闭原因区分：正常断开 / 1008 具体 reason / socket error（不记帧正文）。
         logger.info(undefined, "bridge attachment closed", {
           taskId: connection.taskId,
@@ -301,7 +331,18 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
           code: closeInfo?.code ?? 0,
           ...(closeInfo?.error ? { error: closeInfo.error } : {}),
         });
-        registry.detach({ runId, at: clock.now(), reason: "socket-closed" });
+        // 只有已认证连接的关闭才产生状态副作用：未认证 socket 的关闭不得触发
+        // registry 摘除 / run 置 disconnected（否则未鉴权方关连接即可把真实桥打断）。
+        if (!connection.authenticated) return;
+        if (connections.get(runId) === connection) connections.delete(runId);
+        registry.detach({
+          runId,
+          at: clock.now(),
+          reason: "socket-closed",
+          // 期望代际逐项校验：被新 epoch 接管替换的旧连接关闭时，不摘除新 session。
+          expectedRunGeneration: connection.runGeneration,
+          expectedConnectionEpoch: connection.connectionEpoch,
+        });
         // 连接释放：丢弃在途 RPC 与浏览器流（不重放；命令事实留待对账，02 §6.3）。
         // 释放按「关闭的这条连接」记账：单例命令传输不能被任意一条连接的关闭永久毒化
         // （2026-10-07 真实链路：首条连接关闭后所有 run 的输入投递全部 closed）。
@@ -314,8 +355,9 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
         // 悬浮 Promise 必须自兜（2026-10-07 实测崩溃：进程关闭期 storage worker 先关，
         // 迟到的 socket close 事件走到这里抛 CloudStorageError，无人接的 rejection
         // 直接把进程带崩 exit 1——关闭路径的失败只记日志，不再有可恢复动作）。
-        context.services().runs
-          .markDisconnected({
+        context
+          .services()
+          .runs.markDisconnected({
             runId,
             runGeneration: connection.runGeneration,
             connectionEpoch: connection.connectionEpoch,

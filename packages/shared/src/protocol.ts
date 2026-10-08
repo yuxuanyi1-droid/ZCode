@@ -362,4 +362,12 @@ export interface AppSettings {
   settingsSyncFirstRunPromptHandled?: boolean;
   /** 设置页里的临时 endpoint override；正式/测试默认 base url 由 ZCODE_BASE_URL env 管理。 */
   zcodeEndpointOrigin?: string;
+  /**
+   * Cloud 运行时账号设置（specs/cloud-agent/12 §2 修订 2026-10-08）：非秘密部分；
+   * provider key 走 credentialService（`cloud-sandbox/<provider>`），不进 setting。
+   * 生效超时 = min(设置值, env 核实上限)，覆盖只影响新 create（01 §4.3 修订）。
+   */
+  cloudRuntime?: {
+    sandboxTimeoutSeconds?: Record<string, number>;
+  };
 }

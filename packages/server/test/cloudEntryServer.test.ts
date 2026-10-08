@@ -6,7 +6,7 @@
  * 后台循环、关闭顺序为 delivery → lifecycle → server → cloud → host 本体 dispose。
  */
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -14,6 +14,7 @@ import { ISettingService, ServiceCollection } from "@zcode/services";
 import { createServiceLogger } from "@zcode/services/node";
 import {
   CloudEntryStartupError,
+  ZCODE_CLOUD_AUTH_MODE_ENV,
   type CloudEntryConfig,
 } from "../src/cloud/adapters/entry-cloud-config.js";
 import {
@@ -41,7 +42,22 @@ function testSecrets(): CloudDeploymentSecrets {
     principalId: "deployment-principal",
     describe: () => ({
       principalId: "deployment-principal",
+      authMode: "token",
       authToken: "configured",
+      credentialSecret: "absent",
+      gitHubApp: "absent",
+    }),
+  };
+}
+
+/** anonymous 模式注入用秘密：无 token 文件（refs 为空）时入口也不再要求 authToken。 */
+function anonymousSecrets(principalId: string): CloudDeploymentSecrets {
+  return {
+    principalId,
+    describe: () => ({
+      principalId,
+      authMode: "anonymous",
+      authToken: "absent",
       credentialSecret: "absent",
       gitHubApp: "absent",
     }),
@@ -61,6 +77,7 @@ const fakeDrivers: SandboxDriverRegistryPort = {
 function baseConfig(dataDir: string): CloudEntryConfig {
   return {
     mode: "cloud",
+    authMode: "token",
     publicOrigin: "http://127.0.0.1:1",
     listenPort: 0,
     dataDir,
@@ -490,6 +507,164 @@ test("默认控制面工厂：入口直接接到 contract.ts 的 assembleCloudCo
   assert.equal(resolveDefaultCloudControlPlaneFactory(), contract.assembleCloudControlPlane);
 });
 
+test("anonymous 模式：lite-token 门槛全放行、静态首页可达、启动日志打印 authMode（03 §3 修订）", async () => {
+  await withTempDir("cloud-entry-server-", async (dataDir) => {
+    // 静态首页产物（anonymous 下同样无凭据可达；token 模式下静态层本就不在保护名单）。
+    const webDir = path.join(dataDir, "web");
+    await mkdir(webDir, { recursive: true });
+    await writeFile(path.join(webDir, "index.html"), "<html>cloud</html>");
+
+    // 捕获启动日志里的 authMode（listen 事件在后台循环之前，断言的是同一事实）。
+    let loggedAuthMode: string | undefined;
+    const authModeLogger: CloudEntryLogger = createServiceLogger("cloud-entry-test", {
+      sink: {
+        log: (...args: unknown[]) => {
+          for (const arg of args) {
+            const candidate = arg as { authMode?: unknown } | undefined;
+            if (candidate && typeof candidate.authMode === "string") {
+              loggedAuthMode = candidate.authMode;
+            }
+          }
+        },
+        warn: () => undefined,
+        error: () => undefined,
+      },
+      isDebugEnabled: false,
+    });
+
+    const controlPlane: CloudControlPlane = {
+      principalId: "deployment-principal",
+      registerRoutes: (app) => {
+        // principalId 由中间件放行后从部署秘密（principalId 从中间件所在装配链路）取得。
+        app.get("/api/cloud/capabilities", (c) =>
+          c.json({ mode: "cloud", principalId: "deployment-principal" }),
+        );
+      },
+      loops: { delivery: loop("delivery", []), lifecycle: loop("lifecycle", []) },
+      close: async () => {},
+    };
+
+    const handle = await startCloudServer({
+      config: { ...baseConfig(dataDir), authMode: "anonymous", webDir },
+      // anonymous 且未提供 token 文件：refs 为空也能过秘密层（principalId 仍必填）。
+      secrets: anonymousSecrets("deployment-principal"),
+      drivers: fakeDrivers,
+      hostServices: hostServices(),
+      controlPlane,
+      listenPort: 0,
+      listenHost: "127.0.0.1",
+      logger: authModeLogger,
+    });
+    try {
+      // 无凭据 API：200（探测即 200 → web 客户端直接进云壳，不出现凭据门）。
+      const anonymous = await fetch(`http://127.0.0.1:${handle.port}/api/cloud/capabilities`);
+      assert.equal(anonymous.status, 200);
+      assert.deepEqual(await anonymous.json(), {
+        mode: "cloud",
+        principalId: "deployment-principal",
+      });
+
+      // 错误 token 也放行：门槛关闭，不做凭据判定（principalId 仍来自部署声明）。
+      const wrongToken = await fetch(
+        `http://127.0.0.1:${handle.port}/api/cloud/capabilities?token=wrong-value`,
+      );
+      assert.equal(wrongToken.status, 200);
+      assert.equal(wrongToken.headers.get("set-cookie"), null, "无 token 配置时不种 cookie");
+
+      // 静态首页无凭据可达（SPA 壳即匿名调试入口）。
+      const home = await fetch(`http://127.0.0.1:${handle.port}/`);
+      assert.equal(home.status, 200);
+      assert.match(home.headers.get("content-type") ?? "", /text\/html/);
+
+      // 启动日志必须暴露 authMode（anonymous 部署可被运维一眼识别）。
+      assert.equal(loggedAuthMode, "anonymous");
+    } finally {
+      await handle.close();
+    }
+  });
+});
+
+test("anonymous 模式且仍提供 token 文件：?token= 命中照旧种 cookie（既有握手不破坏）", async () => {
+  await withTempDir("cloud-entry-server-", async (dataDir) => {
+    const handle = await startCloudServer({
+      config: { ...baseConfig(dataDir), authMode: "anonymous" },
+      // anonymous + token 文件：token 照常加载，仅校验门槛关闭。
+      secrets: {
+        authToken: AUTH_TOKEN,
+        principalId: "deployment-principal",
+        describe: () => ({
+          principalId: "deployment-principal",
+          authMode: "anonymous",
+          authToken: "configured",
+          credentialSecret: "absent",
+          gitHubApp: "absent",
+        }),
+      },
+      drivers: fakeDrivers,
+      hostServices: hostServices(),
+      controlPlane: {
+        principalId: "deployment-principal",
+        registerRoutes: (app) => {
+          app.get("/api/cloud/capabilities", (c) => c.json({ mode: "cloud" }));
+        },
+        loops: { delivery: loop("delivery", []), lifecycle: loop("lifecycle", []) },
+        close: async () => {},
+      },
+      listenPort: 0,
+      listenHost: "127.0.0.1",
+    });
+    try {
+      const viaToken = await fetch(
+        `http://127.0.0.1:${handle.port}/api/cloud/capabilities?token=${AUTH_TOKEN}`,
+      );
+      assert.equal(viaToken.status, 200);
+      assert.match(viaToken.headers.get("set-cookie") ?? "", /zcode_lite_token=/);
+
+      // 无 token 同样放行：种 cookie 是握手兼容行为，不是新的门槛。
+      const noToken = await fetch(`http://127.0.0.1:${handle.port}/api/cloud/capabilities`);
+      assert.equal(noToken.status, 200);
+    } finally {
+      await handle.close();
+    }
+  });
+});
+
+test("token 模式（默认）回归：无凭据仍 401，cookie/?token= 放行语义与现状一致", async () => {
+  await withTempDir("cloud-entry-server-", async (dataDir) => {
+    const handle = await startCloudServer({
+      config: baseConfig(dataDir),
+      secrets: testSecrets(),
+      drivers: fakeDrivers,
+      hostServices: hostServices(),
+      controlPlane: {
+        principalId: "deployment-principal",
+        registerRoutes: (app) => {
+          app.get("/api/cloud/capabilities", (c) => c.json({ mode: "cloud" }));
+        },
+        loops: { delivery: loop("delivery", []), lifecycle: loop("lifecycle", []) },
+        close: async () => {},
+      },
+      listenPort: 0,
+      listenHost: "127.0.0.1",
+    });
+    try {
+      const unauthorized = await fetch(`http://127.0.0.1:${handle.port}/api/cloud/capabilities`);
+      assert.equal(unauthorized.status, 401);
+      const wrongToken = await fetch(
+        `http://127.0.0.1:${handle.port}/api/cloud/capabilities?token=not-the-token`,
+      );
+      assert.equal(wrongToken.status, 401);
+      const authorized = await fetch(
+        `http://127.0.0.1:${handle.port}/api/cloud/capabilities?token=${AUTH_TOKEN}`,
+      );
+      assert.equal(authorized.status, 200);
+      assert.match(authorized.headers.get("set-cookie") ?? "", /zcode_lite_token=/);
+    } finally {
+      await handle.close();
+    }
+  });
+});
+
 test("启动矩阵：部署秘密缺失时明确失败并回收 host 本体", async () => {
   await withTempDir("cloud-entry-server-", async (dataDir) => {
     const events: string[] = [];
@@ -509,5 +684,61 @@ test("启动矩阵：部署秘密缺失时明确失败并回收 host 本体", as
         error instanceof CloudEntryStartupError && error.code === "not_configured",
     );
     assert.equal(hostBody.disposed, true);
+  });
+});
+
+test("生产 env 路径：anonymous 不提供 token 文件也能越过部署秘密阶段（token 模式在此 fail-closed）", async () => {
+  await withTempDir("cloud-entry-server-", async (dataDir) => {
+    const notReady: StorageReadiness = {
+      lastAppliedMigrationId: null,
+      schemaVersion: 0,
+      writable: true,
+      attachmentsWritable: true,
+    };
+    // anonymous + 无 ZCODE_SERVER_AUTH_TOKEN_FILE：配置与秘密阶段都放行，
+    // 失败点后移到存储就绪门——证明 authMode 真的穿过了生产 env → 配置 → 秘密链路。
+    await assert.rejects(
+      () =>
+        startCloudServer({
+          env: {
+            ZCODE_SERVER_MODE: "cloud",
+            [ZCODE_CLOUD_AUTH_MODE_ENV]: "anonymous",
+            ZCODE_CLOUD_PRINCIPAL_ID: "00000000-0000-4000-8000-000000000000",
+            ZCODE_CLOUD_PUBLIC_ORIGIN: "http://127.0.0.1:1",
+            ZCODE_CLOUD_DATA_DIR: dataDir,
+            ZCODE_CLOUD_PROVIDERS: "e2b",
+          },
+          drivers: fakeDrivers,
+          hostServices: hostServices(),
+          storage: { readiness: async () => notReady },
+          listenPort: 0,
+          listenHost: "127.0.0.1",
+          loopScheduler: manualScheduler(),
+        }),
+      (error: unknown) =>
+        error instanceof CloudEntryStartupError && error.message.includes("存储未就绪"),
+    );
+
+    // 同一 env 但 authMode 缺省（token）：秘密阶段即失败（auth token 缺失），不进存储。
+    await assert.rejects(
+      () =>
+        startCloudServer({
+          env: {
+            ZCODE_SERVER_MODE: "cloud",
+            ZCODE_CLOUD_PRINCIPAL_ID: "00000000-0000-4000-8000-000000000000",
+            ZCODE_CLOUD_PUBLIC_ORIGIN: "http://127.0.0.1:1",
+            ZCODE_CLOUD_DATA_DIR: dataDir,
+            ZCODE_CLOUD_PROVIDERS: "e2b",
+          },
+          drivers: fakeDrivers,
+          hostServices: hostServices(),
+          storage: { readiness: async () => notReady },
+          listenPort: 0,
+          listenHost: "127.0.0.1",
+          loopScheduler: manualScheduler(),
+        }),
+      (error: unknown) =>
+        error instanceof CloudEntryStartupError && error.code === "not_configured",
+    );
   });
 });

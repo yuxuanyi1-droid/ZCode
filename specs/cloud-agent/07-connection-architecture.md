@@ -246,6 +246,13 @@ Docker/WSL 的移除按 06 执行并清理引用，与本决议无关。
 
 已有命令仍是`pnpm dev:web`、`pnpm dev:desktop`、`pnpm typecheck`、`pnpm lint`、`pnpm architecture:check --changed`和按module-id的`pnpm architecture:context`。云entry/bridge/provider测试命令要在实现时新增package scripts，本文不虚构现成命令。
 
+**修订记录（2026-10-07）：模式判定改为服务端驱动。** 原设计把 cloud/local 当作客户端/构建期开关（`?mode=`、`VITE_ZCODE_CLOUD_MODE`/`VITE_ZCODE_SERVER_MODE`、`VITE_ZCODE_CLOUD_ORIGIN` 加 origin 一致性校验），用户侧结论是「直接复用原本 zcode 的 web 模式，编译、启动、使用都不该先判断是不是 cloud」。
+
+- 理由：①模式本来就是**部署事实**，客户端自报会与真实部署不一致（预览/换域名/同一产物多部署），且这个不一致只在运行时暴露；②两套模式判定意味着两套启动路径与两套失败面，回归面翻倍；③服务端在同一路径上回答模式后，编译产物与启动命令可以完全复用。
+- 新契约（[04 §2.1](./04-web-client.md)、[W5 §3.1](./modules/W5-cloud-entry.md)、[W9 §4](./modules/W9-web-entry.md)）：单一入口 `packages/server/src/entry-http.ts` 读 `ZCODE_SERVER_MODE` 分派（`=cloud` 复用云启动事务，HOME 隔离先于服务图 import）；Web 客户端启动时同源探测 `GET /api/cloud/capabilities`——`200 mode=cloud`→云壳、`401/403`→云壳+凭据门、`200 mode=local`→本地路径（`?remote=` 不变）、其余→错误屏。本地分支也因此必须无鉴权回答该端点。
+- **fail-closed 保留并加强**：探测不确定（404/5xx/网络失败/非法响应体/协议不兼容）一律停在错误屏，绝不回落 local；反 fallback 不再依赖客户端自律，而是「服务端不回答就无法进入任何模式」。云模式该端点仍需 lite-token（401 即客户端的「需要凭据」信号）。
+- 影响面：`packages/server/src/entry-http.ts`、`packages/server/src/http.ts`（本地探测端点）、`packages/web/src/{main.tsx,cloud/cloudBoot.ts,cloud/cloudApp.tsx}`、`packages/shared/src/cloud/responses.ts`（capabilities 改为按 `mode` 的判别联合）与对应测试。`/ws` 通道分面、attachment 路由与 owner/lease 语义不变。
+
 ## 13. 验收与证据
 
 | ID   | 场景                                       | 断言/必需证据                                                |

@@ -90,6 +90,7 @@ import { ChatPromptEditor } from "@/prompt-editor/ChatPromptEditor.js";
 import { usePromptEditorDragState } from "@/prompt-editor/usePromptEditorDragState.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { advanceComposerDraftRevision } from "@/v4/composer/composerDraftRevision.js";
+import { resolveComposerSubmitControls } from "@/v4/composer/composerSubmitControls.js";
 import type { AppSlashCommand } from "@/slashCommandHelpers.js";
 import { useOptionalServices } from "@/hooks/useServices.js";
 import { logger } from "@/logger.js";
@@ -1133,7 +1134,10 @@ function ConversationComposerImpl({
     attachmentsReady &&
     submissionReady;
   // 旧 UI 状态机：streaming + 空草稿 → Stop；有草稿 → 发送键（入队）。
-  const showStopControl = canStop && !hasDraftToSubmit;
+  // 2026-10-08 复检修订（P3）：有草稿时 Stop 不再完全退场——运行中在发送旁并置 Stop，
+  // 云 Web 手机端没有 Esc 键，此前写下草稿后没有任何停止入口（规则见 composerSubmitControls.ts）。
+  const { showsStopAlongsideSend, showsStopControl: showStopControl } =
+    resolveComposerSubmitControls({ canStop, hasDraftToSubmit });
 
   useEffect(() => {
     if (!canSend) setSendTooltipOpen(false);
@@ -2076,25 +2080,44 @@ function ConversationComposerImpl({
             </Button>
           </ControlHintTooltip>
         ) : (
-          <ControlHintTooltip
-            title={resolvedSendTooltipTitle}
-            shortcut={resolvedSendTooltipShortcut}
-            open={Boolean(modifierTooltip) || sendTooltipOpen}
-            onOpenChange={setSendTooltipOpen}
-          >
-            <Button
-              type="submit"
-              size="icon-md"
-              disabled={!canSend}
-              onClick={handleSendButtonClick}
-              data-testid={TID_V4_COMPOSER_SEND}
-              aria-label={resolvedSendTooltipTitle}
-              className="cursor-pointer gap-1 rounded-lg bg-brand text-ui-base text-foreground-inverse hover:bg-brand/80"
+          <>
+            {/* 运行中 + 有草稿：发送位变成「Queue message」，但停止不能因此失去入口
+                （云 Web 手机端无 Esc）；与独占 Stop 同一按钮形状，仅并置于发送左侧。 */}
+            {showsStopAlongsideSend ? (
+              <ControlHintTooltip title={stopTooltipTitle} shortcut="Esc">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="icon-md"
+                  onClick={handleStopClick}
+                  data-testid={TID_V4_STOP}
+                  aria-label={stopTooltipTitle}
+                >
+                  <SquareIcon className="size-4 fill-current" />
+                  <span className="sr-only">{stopTooltipTitle}</span>
+                </Button>
+              </ControlHintTooltip>
+            ) : null}
+            <ControlHintTooltip
+              title={resolvedSendTooltipTitle}
+              shortcut={resolvedSendTooltipShortcut}
+              open={Boolean(modifierTooltip) || sendTooltipOpen}
+              onOpenChange={setSendTooltipOpen}
             >
-              {pending ? <Spinner className="size-4" /> : <ArrowUpIcon className="size-4" />}
-              <span className="sr-only">{resolvedSendTooltipTitle}</span>
-            </Button>
-          </ControlHintTooltip>
+              <Button
+                type="submit"
+                size="icon-md"
+                disabled={!canSend}
+                onClick={handleSendButtonClick}
+                data-testid={TID_V4_COMPOSER_SEND}
+                aria-label={resolvedSendTooltipTitle}
+                className="cursor-pointer gap-1 rounded-lg bg-brand text-ui-base text-foreground-inverse hover:bg-brand/80"
+              >
+                {pending ? <Spinner className="size-4" /> : <ArrowUpIcon className="size-4" />}
+                <span className="sr-only">{resolvedSendTooltipTitle}</span>
+              </Button>
+            </ControlHintTooltip>
+          </>
         )}
       </div>
     ),
@@ -2128,6 +2151,7 @@ function ConversationComposerImpl({
       sendTooltipTitle,
       sessionId,
       showStopControl,
+      showsStopAlongsideSend,
       stopTooltipTitle,
       workspaceIdentity,
       workspacePath,

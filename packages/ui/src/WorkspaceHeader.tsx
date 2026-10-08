@@ -154,7 +154,10 @@ export function WorkspaceHeader({
         className={cn(
           // 大会话 resize trace 显示 titlebar padding 动画层会触发 scrollbar-color 非合成动画；
           // 明确限定 transition-property 为 padding，避免 duration-300 退回默认 all。
-          "flex h-12 flex-1 min-w-0 items-center justify-between gap-2 overflow-hidden p-2 [app-region:drag] transition-[padding] duration-300",
+          // drag region 只在桌面端渲染（2026-10-08 巡检修订）：云 Web 没有可拖动的原生
+          // 窗口，drag 层只会吞掉顶栏交互区的命中，不带来任何收益。
+          "flex h-12 flex-1 min-w-0 items-center justify-between gap-2 overflow-hidden p-2 transition-[padding] duration-300",
+          isDesktop && "[app-region:drag]",
           // 旧 caption 菜单移除后不能继续清零右边距，否则终端按钮会贴住面板边框。
           headerWindowControlsPaddingClass,
         )}

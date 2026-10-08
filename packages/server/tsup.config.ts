@@ -53,8 +53,12 @@ export default defineConfig({
     await stageThirdPartyNotices(resolve(import.meta.dirname, "dist"));
   },
   // 三个独立产物：
-  // - entry-http：既有本地/standalone web 入口；
-  // - entry-cloud：云入口（host 本体 + cloud 叠加，specs/cloud-agent W5）；
+  // - entry-http：本地/standalone web 唯一入口，也是模式分派点（2026-10-07，04 §2.1/W5 §3.1）：
+  //   `ZCODE_SERVER_MODE=cloud` 时它动态 import entry-cloud 产物，因此 dev 脚本的
+  //   `--onSuccess 'node dist/entry-http.js'` 带 cloud env 也能起云入口；
+  // - entry-cloud：云入口（host 本体 + cloud 叠加，specs/cloud-agent W5）。**产物名不要改**：
+  //   entry-http 的动态 import 会被 esbuild 重写成这个产物名（实测 `await import("./entry-cloud.js")`），
+  //   改名等于切断单一入口的云分派；
   // - storageWorkerMain：云控制面的 storage 子进程入口，必须独立成文件——W2 的
   //   `storageTransport` 默认按「与自身同目录、同扩展名的 storageWorkerMain」解析，
   //   入口名保持一致才能让打包产物开箱可用（否则需 workerEntryPath 覆盖）。

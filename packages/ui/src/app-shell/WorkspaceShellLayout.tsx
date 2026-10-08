@@ -38,9 +38,16 @@ import { useIsOfficeMode } from "@/hooks/useInterfaceMode.js";
 import { GitBranchSwitcher } from "@/GitBranchSwitcher.js";
 import { ScopedErrorBoundary } from "@/ErrorBoundary.js";
 import { CloudDraftStartConfigControl } from "@/cloud/CloudDraftStartConfigControl.js";
+import { CloudTaskArchivedBanner } from "@/cloud/CloudTaskArchivedBanner.js";
+import { CloudTaskRunStatusBanner } from "@/cloud/CloudTaskRunStatusBanner.js";
 import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
+import {
+  resolveCloudMobileSidebarDockedRestorePlan,
+  resolveCloudMobileSidebarDrawerPlan,
+} from "@/cloud/cloudMobileDrawer.js";
 import { resolveCloudTaskIdFromWorkspaceIdentity } from "@/cloud/cloudUiBootstrap.js";
 import { useCloudTaskRuntimeSession } from "@/hooks/cloud/useCloudTaskRuntimeSession.js";
+import { useCloudTaskWorkspaceStatus } from "@/hooks/cloud/useCloudTaskWorkspaceStatus.js";
 
 import { AUTOMATIONS_TOAST_ANCHOR_ID, AutomationsSection } from "@/settings/AutomationsSection.js";
 import type {
@@ -68,6 +75,8 @@ import {
   resolveWorkspaceShellResizeHandleInsetPx,
   resolveWorkspaceShellWindowChromeClass,
 } from "@/app-shell/workspaceShellWindowChrome.js";
+import { resolveTopOverlayNewTaskVisibility } from "@/app-shell/workspaceDragRegions.js";
+import { Menu } from "lucide-react";
 import { cn } from "@/components/lib/utils.js";
 import { Button } from "@/components/ui/button.js";
 import { ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable.js";
@@ -431,9 +440,20 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
   });
   const workspaceSessionActionDisabled =
     Boolean(workspaceReadOnlyReason) || reloadSessionDisabled || reloadSessionPending;
+  // 云入口判定（CloudWorkspaceProvider 是否挂载）：判据是「是否云入口」而不是路径
+  // （04 §3.0.1），供顶栏 New task 可见性 / 移动端抽屉 / 云壳层增强使用。
+  const cloudWorkspaceContext = useCloudWorkspaceContext();
+  const isCloudEntry = cloudWorkspaceContext !== null;
   // 文件树打开时任务列表整屏滑出，侧栏里的 New Task 入口也随之不可见。
   // 顶部浮层需要临时露出 New Task，关闭文件树后继续沿用侧栏收起态规则。
-  const showTopOverlayNewTaskButton = !isSidebarVisible || isSidebarFileTreeOpen;
+  // 云入口例外（2026-10-08 巡检修订）：顶栏 New task 始终露出——窄视口侧栏会被
+  // 自动收起，顶栏按钮不能沿用「侧栏可见即隐藏」的桌面规则（规则本体见
+  // workspaceDragRegions.ts，可用例覆盖）。
+  const showTopOverlayNewTaskButton = resolveTopOverlayNewTaskVisibility({
+    isCloudEntry,
+    isSidebarVisible,
+    isSidebarFileTreeOpen,
+  });
   const workspaceSidebarResizeLabel = intl.formatMessage({
     id: "workspaceSidebar.resizeSidebar",
   });
@@ -1131,7 +1151,80 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
   // 启动配置控件；本机 / SSH / 已配对远控的 contextHeader 完全不变。projectId 优先取
   // 控制面选择，避免把 taskId 当路径去挂载本地组件。
   const cloudTaskId = resolveCloudTaskIdFromWorkspaceIdentity(workspaceIdentity);
-  const cloudProjectId = useCloudWorkspaceContext()?.selection.projectId ?? null;
+  const cloudProjectId = cloudWorkspaceContext?.selection.projectId ?? null;
+  // 云任务工作区的控制面状态（04 §3 2026-10-08 巡检修订）：archived 任务详情呈现
+  // 只读横幅，并把 composer 置为只读——不再让「假可写」的输入框吞掉用户输入。
+  const cloudWorkspaceTaskStatus = useCloudTaskWorkspaceStatus(workspaceIdentity);
+  const isCloudArchivedWorkspace = cloudWorkspaceTaskStatus === "archived";
+  // 云入口移动端抽屉（04 §7 巡检修订）：窄视口侧栏被自动收起后唯一的再打开入口。
+  const [isCloudMobileSidebarOpen, setIsCloudMobileSidebarOpen] = useState(false);
+  const cloudMobileSidebarDrawerPlan = resolveCloudMobileSidebarDrawerPlan({
+    isCloudEntry,
+    isSidebarVisible,
+    open: isCloudMobileSidebarOpen,
+  });
+  useEffect(() => {
+    if (!isCloudMobileSidebarOpen) {
+      return;
+    }
+    // 抽屉打开期间支持 Esc 关闭：遮罩点击之外的第二条退出路径（键盘可达性）。
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsCloudMobileSidebarOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isCloudMobileSidebarOpen]);
+  useEffect(() => {
+    // 视口跨回宽屏（≥md）时抽屉形态会被 md:hidden 整体隐藏，此时若保持 open 状态，
+    // 侧栏将既不停靠也不可再打开；跨断点时自动收起抽屉，恢复停靠/收起的常规语义。
+    if (!isCloudEntry || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const media = window.matchMedia("(min-width: 768px)");
+    const handleCrossToWideViewport = () => {
+      setIsCloudMobileSidebarOpen(false);
+      // 跨回宽屏恢复停靠侧栏（2026-10-08 复检修订 P2）：云 Web 宽视口没有任何再展开
+      // 侧栏的入口（桌面靠标题栏按钮，云 Web 抽屉触发器 md:hidden），窄视口被
+      // conversation 自动收起后跨回宽屏若保持收起，--workspace-sidebar-panel-width
+      // 恒为 0px，只能刷新解锁。恢复宽度取收起记忆值，无效时回退默认宽（plan 保证非 0）。
+      const { handleToggleSidebar: toggleSidebar, isSidebarVisible: latestIsSidebarVisible } =
+        conversationAutoCollapseStateRef.current;
+      const restorePlan = resolveCloudMobileSidebarDockedRestorePlan({
+        isCloudEntry: true,
+        isSidebarVisible: latestIsSidebarVisible,
+        isWideViewport: true,
+        rememberedSidebarWidthPx: workspaceSidebarPanelWidthPxRef.current,
+        fallbackSidebarWidthPx: WORKSPACE_SIDEBAR_DEFAULT_WIDTH_PX,
+      });
+      if (!restorePlan.restoresDockedSidebar) {
+        return;
+      }
+      logger.info("[WorkspaceShellLayout] 云入口跨回宽屏，恢复停靠侧栏", {
+        dockedSidebarWidthPx: restorePlan.dockedSidebarWidthPx,
+      });
+      // 收起态下的 toggle 即展开；宽度重落一次以兑现 plan 的非 0 承诺并持久化。
+      toggleSidebar();
+      applyWorkspaceSidebarWidth(restorePlan.dockedSidebarWidthPx, { persist: true });
+    };
+    const handleCloseOnWideViewport = (event: MediaQueryListEvent) => {
+      if (event.matches) {
+        handleCrossToWideViewport();
+      }
+    };
+    if (media.matches) {
+      // 挂载即宽屏：抽屉初始必为关闭，不触发恢复（保留用户在静态宽屏下的收起选择）。
+      setIsCloudMobileSidebarOpen(false);
+      return;
+    }
+    media.addEventListener("change", handleCloseOnWideViewport);
+    return () => {
+      media.removeEventListener("change", handleCloseOnWideViewport);
+    };
+  }, [applyWorkspaceSidebarWidth, isCloudEntry]);
   const handleSelectConversationWorkspace = useCallback(async () => {
     if (!onResolveConversationWorkspace) {
       return;
@@ -1566,17 +1659,36 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
           data-panel=""
           data-workspace-sidebar-panel="true"
           id="sidebar"
+          // 云入口抽屉形态（04 §7 巡检修订）：抽屉打开时面板宽度不再跟随停靠宽度变量，
+          // 直接在面板元素上覆盖 CSS 变量（对自身与后代生效），避免与 shell 级变量竞争。
+          style={
+            cloudMobileSidebarDrawerPlan.sidebarPanelWidth === null
+              ? undefined
+              : ({
+                  "--workspace-sidebar-panel-width": cloudMobileSidebarDrawerPlan.sidebarPanelWidth,
+                } as CSSProperties)
+          }
+          role={cloudMobileSidebarDrawerPlan.sidebarPanelOverlay ? "dialog" : undefined}
+          aria-modal={cloudMobileSidebarDrawerPlan.sidebarPanelOverlay ? true : undefined}
           className={cn(
             "w-[var(--workspace-sidebar-panel-width)] max-w-[50%] flex-none overflow-hidden duration-200 ease-out transition-[width,opacity] data-[workspace-sidebar-resizing=true]:transition-opacity",
             // 拖动侧栏宽度时如果继续过渡 width，会让指针移动和实际宽度之间产生滞后。
             // 拖拽 active 通过 DOM 标记切 transition，避免 pointerdown/up 为了切 class 重渲染整棵 workspace。
-            isSidebarPanelVisible ? "opacity-100" : "pointer-events-none opacity-0",
+            cloudMobileSidebarDrawerPlan.sidebarPanelOverlay
+              ? // 云入口移动端抽屉：复用同一份侧栏 DOM（不复制第二份组件与订阅），
+                // 以浮层形态覆盖单列布局；md:hidden 保证宽视口永不进入该形态。
+                "pointer-events-auto opacity-100 fixed inset-y-0 left-0 z-50 max-w-none border-r border-border bg-background shadow-lg md:hidden"
+              : isSidebarPanelVisible
+                ? "opacity-100"
+                : "pointer-events-none opacity-0",
           )}
         >
           <aside
             ref={sidebarContainerRef}
             className="h-full overflow-hidden select-none"
-            aria-hidden={!isSidebarPanelVisible}
+            aria-hidden={
+              !isSidebarPanelVisible && !cloudMobileSidebarDrawerPlan.sidebarPanelOverlay
+            }
           >
             <ScopedErrorBoundary
               scope="workspace-sidebar"
@@ -1858,6 +1970,13 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
                       ) : (
                         <main className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden">
                           {renderChatFindDialog()}
+                          {/* 云任务运行状态（specs/cloud-agent/04 §3.3、08 §9）：run provisioning/
+                              failed 等状态的可见呈现。非云工作区（identity 不是 cloud-task:…）
+                              返回 null，本地模式零渲染。 */}
+                          <CloudTaskRunStatusBanner workspaceIdentity={workspaceIdentity} />
+                          {/* 已归档只读横幅（04 §3.3 archived 行、2026-10-08 巡检修订）：
+                              说明只读 + 恢复入口；非 archived 返回 null。 */}
+                          <CloudTaskArchivedBanner workspaceIdentity={workspaceIdentity} />
                           <ScopedErrorBoundary
                             scope="workspace-chat"
                             resetKeys={workspaceDraftResetKeys}
@@ -1875,7 +1994,9 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
                                   桌面主区升级为分屏宿主（Layout/Focus 两层）；primary pane
                                   绑定语义与 testid 契约（paneId=workspace-main）不变。 */}
                             <V4WorkspaceChatArea
-                              readOnly={Boolean(workspaceReadOnlyReason)}
+                              readOnly={
+                                Boolean(workspaceReadOnlyReason) || isCloudArchivedWorkspace
+                              }
                               foregroundEnabled={isWorkspaceVisible}
                               workspacePath={workspaceAbsPath}
                               workspaceIdentity={workspaceIdentity}
@@ -2006,6 +2127,32 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
             onGoForward={handleTaskNavForward}
           />
         </ScopedErrorBoundary>
+        {/* 云入口移动端抽屉（04 §7 巡检修订）：侧栏被窄视口自动收起后的再打开入口。
+            触发器紧邻顶栏返回/前进按钮（left-16），md:hidden 保证宽视口零影响；
+            只作用于云工作区路径，桌面端布局语义不变。 */}
+        {cloudMobileSidebarDrawerPlan.showsTrigger ? (
+          <button
+            type="button"
+            data-testid="cloud-mobile-sidebar-trigger"
+            aria-label={intl.formatMessage({ id: "cloud.mobile.sidebarToggle" })}
+            className="absolute left-16 top-2 z-30 flex size-8 items-center justify-center rounded-md text-foreground-subtle outline-none hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/30 [app-region:no-drag] md:hidden"
+            onClick={() => {
+              setIsCloudMobileSidebarOpen(true);
+            }}
+          >
+            <Menu aria-hidden="true" className="size-4" />
+          </button>
+        ) : null}
+        {cloudMobileSidebarDrawerPlan.showsBackdrop ? (
+          <div
+            data-testid="cloud-mobile-sidebar-backdrop"
+            aria-hidden="true"
+            className="fixed inset-0 z-40 bg-foreground/25 md:hidden"
+            onClick={() => {
+              setIsCloudMobileSidebarOpen(false);
+            }}
+          />
+        ) : null}
       </div>
     </DesktopWindowFrame>
   );

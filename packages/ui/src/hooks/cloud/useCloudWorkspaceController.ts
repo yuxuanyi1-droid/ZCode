@@ -11,7 +11,10 @@
  * 只把它投影到 context 上。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CapabilitiesResponse, TaskDetailResponse } from "@zcode/shared";
+// 控制器只接受**云分支**能力（`CloudCapabilitiesResponse`）：shared 的 capabilities 是按 mode
+// 的判别联合（04 §2.1），本地分支按契约不含 `principalId`，而本控制器的草稿 scope 必须要有
+// 主体。模式不符在下面的 fail-closed 分支里被拒绝，不会把本地能力当云能力继续用。
+import type { CloudCapabilitiesResponse, CloudErrorCode, TaskDetailResponse } from "@zcode/shared";
 import type { IServiceAccessor } from "@zcode/services";
 import { readCloudErrorCode } from "@/cloud/cloudApiErrorLike.js";
 import type { CloudAttachmentAccessor } from "@/cloud/cloudBrowserServices.js";
@@ -19,6 +22,7 @@ import type { CloudAttachmentProvider } from "@/cloud/cloudAttachmentProvider.js
 import { buildCloudDraftScope } from "@/cloud/cloudDraftScope.js";
 import type { CloudControlPlanePort } from "@/cloud/cloudPorts.js";
 import { describeCloudSubmissionError } from "@/cloud/cloudTaskSubmission.js";
+import { startCloudTaskRunWatch, type CloudTaskRunWatchHandle } from "@/cloud/cloudTaskRunWatch.js";
 import { openCloudTaskRoute, readCloudTaskIdFromSearch } from "@/cloud/cloudUiBootstrap.js";
 import type { CloudUiBootstrap } from "@/cloud/cloudUiBootstrap.js";
 import type {
@@ -74,12 +78,15 @@ export function useCloudWorkspaceController(
 
   const [projectId, setProjectId] = useState<string | null>(options.initialProjectId ?? null);
   const [taskId, setTaskId] = useState<string | null>(bootstrap.taskId ?? null);
-  const [capabilities, setCapabilities] = useState<CapabilitiesResponse | null>(null);
+  const [capabilities, setCapabilities] = useState<CloudCapabilitiesResponse | null>(null);
   const [capabilitiesStatus, setCapabilitiesStatus] = useState<CloudCapabilitiesStatus>("idle");
   const [capabilitiesError, setCapabilitiesError] = useState<string | null>(null);
   const [taskDetail, setTaskDetail] = useState<TaskDetailResponse | null>(null);
   const [taskDetailStatus, setTaskDetailStatus] = useState<CloudCapabilitiesStatus>("idle");
   const [taskDetailError, setTaskDetailError] = useState<string | null>(null);
+  // 结构化错误码（04 §5 2026-10-08 巡检修订）：文案投影（taskDetailError）会丢掉
+  // code，而「任务不存在 → 整页错误屏」的判定必须按 code（not_found）分支，不解析文案。
+  const [taskDetailErrorCode, setTaskDetailErrorCode] = useState<CloudErrorCode | null>(null);
   const [attachment, setAttachment] = useState<CloudAttachmentAccessor | null>(null);
   const [attachmentStatus, setAttachmentStatus] = useState<CloudAttachmentStatus>("idle");
 
@@ -182,6 +189,7 @@ export function useCloudWorkspaceController(
       detailRequestRef.current = requestId;
       setTaskDetailStatus("loading");
       setTaskDetailError(null);
+      setTaskDetailErrorCode(null);
       try {
         const next = await controlPlane.getTask(targetTaskId);
         if (detailRequestRef.current !== requestId) {
@@ -199,6 +207,7 @@ export function useCloudWorkspaceController(
         setTaskDetail(null);
         setTaskDetailStatus("error");
         setTaskDetailError(describeCloudSubmissionError(error));
+        setTaskDetailErrorCode(readCloudErrorCode(error));
       }
     },
     [controlPlane, principalId, taskId],
@@ -207,6 +216,52 @@ export function useCloudWorkspaceController(
   useEffect(() => {
     void loadTask();
   }, [loadTask]);
+
+  // ── 首发/重开后的有界 run 观察（04 §3.2.4、03 §6.2）──
+  //
+  // 背景（2026-10-08 实测）：202 accepted 只代表控制面已持久接收，run 在服务端异步
+  // provisioning → ready；此前没有任何通道会在此时刷新详情（`reloadTask` 零消费方），
+  // 用户必须手动刷新才能看到任务已启动。观察请求由提交/重开路径经
+  // `beginTaskRunWatch()` 发起；控制器是详情投影的唯一 owner，轮询只做静默刷新：
+  // - 不翻 `taskDetailStatus`（loading 会把整页打回骨架态）；
+  // - 与显式 `loadTask` 共用 `detailRequestRef` 做最新者胜，轮询响应不会覆盖更新的加载；
+  // - 切换任务（taskId 变化）/provider 卸载时由 effect cleanup 取消；
+  // - 终态/ready 或 60s 上限自动停止（规则见 `cloudTaskRunWatch.ts`）。
+  const [runWatchEpoch, setRunWatchEpoch] = useState(0);
+  const beginTaskRunWatch = useCallback(() => {
+    setRunWatchEpoch((epoch) => epoch + 1);
+  }, []);
+
+  useEffect(() => {
+    if (runWatchEpoch === 0 || !controlPlane || !taskId) {
+      return;
+    }
+    const refreshQuietly = async (): Promise<TaskDetailResponse | null> => {
+      const requestId = detailRequestRef.current + 1;
+      detailRequestRef.current = requestId;
+      try {
+        const next = await controlPlane.getTask(taskId);
+        if (detailRequestRef.current !== requestId) {
+          // 已被更新的显式加载/轮询取代：丢弃这轮响应。
+          return null;
+        }
+        setTaskDetail(next);
+        setTaskDetailStatus("ready");
+        setTaskDetailError(null);
+        if (principalId !== null) {
+          useCloudTasksStore.getState().applyTaskDetail(principalId, next, Date.now());
+        }
+        return next;
+      } catch {
+        // 单轮失败按「继续等」处理；上限兜底，不把轮询失败升级成页面错误态。
+        return null;
+      }
+    };
+    const watch: CloudTaskRunWatchHandle = startCloudTaskRunWatch({ refresh: refreshQuietly });
+    return () => {
+      watch.cancel();
+    };
+  }, [controlPlane, principalId, runWatchEpoch, taskId]);
 
   // 恢复路径（04 §3.2.5）：选中任务后先 hydrate 本地草稿/attempt，再把未决 attempt
   // 按**原 commandId** 查询对账；查询失败保持 unknown，绝不重新组装 payload。
@@ -345,15 +400,18 @@ export function useCloudWorkspaceController(
       taskDetail,
       taskDetailStatus,
       taskDetailError,
+      taskDetailErrorCode,
       selectProject,
       selectTask,
       reloadCapabilities: loadCapabilities,
       reloadTask: loadTask,
+      beginTaskRunWatch,
       attachmentStatus,
     }),
     [
       attachment,
       attachmentStatus,
+      beginTaskRunWatch,
       capabilities,
       capabilitiesError,
       capabilitiesStatus,
@@ -366,6 +424,7 @@ export function useCloudWorkspaceController(
       selection,
       taskDetail,
       taskDetailError,
+      taskDetailErrorCode,
       taskDetailStatus,
     ],
   );

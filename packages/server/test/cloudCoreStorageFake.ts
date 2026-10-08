@@ -173,11 +173,16 @@ export function createFakeStorage(
       const current = tasksById.get(request.taskId);
       if (!current) return null;
       if (!request.from.includes(current.status)) return null;
-      if (request.revision !== undefined && request.revision !== current.revision) return null;
+      // 与真实 repo 同一语义（repositories/taskRepo.ts `tasks.transitionStatus` 的
+      // `WHERE ... AND revision < ?`，见 ports/taskPort.ts 的端口契约）：`request.revision`
+      // 是**新的 revision**，必须严格大于当前值；相等/回退一律 stale 返回 null，成功时
+      // revision 直接取 `request.revision`（允许跳号）。fake 旧语义（相等即成功且自动 +1）
+      // 与真实 SQLite 相反，曾让 P0 恒 stale 的缺陷在全绿下漏网（2026-10-07 review）。
+      if (request.revision <= current.revision) return null;
       const updated: CloudTaskRecord = {
         ...current,
         status: request.to,
-        revision: current.revision + 1,
+        revision: request.revision,
         updatedAt: request.now,
       };
       if (request.activeRunId !== undefined && request.activeRunId !== null) {

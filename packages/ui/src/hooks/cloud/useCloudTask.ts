@@ -13,6 +13,10 @@ import {
   readCloudTaskActions,
   type CloudTaskActionSet,
 } from "@/cloud/cloudTaskActionsProjection.js";
+import {
+  runCloudTaskLifecycleAction,
+  type CloudTaskLifecycleAction,
+} from "@/cloud/cloudTaskLifecycle.js";
 import { describeCloudSubmissionError } from "@/cloud/cloudTaskSubmission.js";
 import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
 import type { CloudCapabilitiesStatus } from "@/cloud/cloudWorkspaceContext.js";
@@ -45,6 +49,12 @@ export interface UseCloudTaskOptions {
   readonly controlPlane?: CloudControlPlanePort | null;
   readonly principalId?: string | null;
   readonly taskId?: string | null;
+  /**
+   * 挂载时是否自动加载详情（默认 true）。侧栏任务行等**只要生命周期动作**、
+   * 不展示详情的调用方传 false：避免整列行各自触发 `GET /tasks/:id`。
+   * 动作本身不受影响——生命周期端点不依赖本地投影。
+   */
+  readonly autoLoad?: boolean;
 }
 
 export function useCloudTask(options?: UseCloudTaskOptions): UseCloudTaskResult {
@@ -52,6 +62,7 @@ export function useCloudTask(options?: UseCloudTaskOptions): UseCloudTaskResult 
   const controlPlane = options?.controlPlane ?? context?.controlPlane ?? null;
   const principalId = options?.principalId ?? context?.selection.principalId ?? null;
   const taskId = options?.taskId ?? context?.selection.taskId ?? null;
+  const autoLoad = options?.autoLoad !== false;
 
   const [status, setStatus] = useState<CloudCapabilitiesStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -98,8 +109,10 @@ export function useCloudTask(options?: UseCloudTaskOptions): UseCloudTaskResult 
   }, [applyDetail, controlPlane, principalId, taskId]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (autoLoad) {
+      void load();
+    }
+  }, [autoLoad, load]);
 
   const runLifecycle = useCallback(
     async (action: (port: CloudControlPlanePort, id: string) => Promise<TaskDetailResponse>) => {
@@ -110,6 +123,12 @@ export function useCloudTask(options?: UseCloudTaskOptions): UseCloudTaskResult 
       applyDetail(next);
     },
     [applyDetail, controlPlane, taskId],
+  );
+
+  const runAction = useCallback(
+    (action: CloudTaskLifecycleAction) =>
+      runLifecycle((port, id) => runCloudTaskLifecycleAction(port, id, action)),
+    [runLifecycle],
   );
 
   const saveDraftStartConfig = useCallback(
@@ -140,19 +159,10 @@ export function useCloudTask(options?: UseCloudTaskOptions): UseCloudTaskResult 
   const task = detail?.task ?? null;
   const actions = useMemo(() => readCloudTaskActions(detail), [detail]);
 
-  const stopTask = useCallback(() => runLifecycle((port, id) => port.stopTask(id)), [runLifecycle]);
-  const completeTask = useCallback(
-    () => runLifecycle((port, id) => port.completeTask(id)),
-    [runLifecycle],
-  );
-  const archiveTask = useCallback(
-    () => runLifecycle((port, id) => port.archiveTask(id)),
-    [runLifecycle],
-  );
-  const restoreTask = useCallback(
-    () => runLifecycle((port, id) => port.restoreTask(id)),
-    [runLifecycle],
-  );
+  const stopTask = useCallback(() => runAction("stop"), [runAction]);
+  const completeTask = useCallback(() => runAction("complete"), [runAction]);
+  const archiveTask = useCallback(() => runAction("archive"), [runAction]);
+  const restoreTask = useCallback(() => runAction("restore"), [runAction]);
 
   return useMemo(
     () => ({

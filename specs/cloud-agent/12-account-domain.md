@@ -33,14 +33,18 @@
 
 ## 2. 唯一所有者
 
-| 事实                                        | 唯一所有者                                                                                                                           | 其他组件职责                                              |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| OAuth 会话（state/flow/pending 轮询）       | 云服务端 host 的 `oauthService`（既有实现）                                                                                          | 浏览器只发起与查询状态，不接触 token 正文                 |
-| OAuth 凭据（access/refresh/user_info）      | host 凭据存储（既有加密实现）                                                                                                        | run envelope 只读快照；浏览器永不持有                     |
-| 账号设置（providerFamilyDomain/selections） | host `settingService`（既有实现）                                                                                                    | 设置页经 WS RPC 读写；沙箱只接收投影                      |
-| 套餐权益快照                                | host `usageStatsService`（既有实现）                                                                                                 | UI 经服务读取；不落沙箱                                   |
-| 模型目录（模型设置页 providers/models）     | host provider registry（既有，唯一的目录所有者）；Task ready 后执行侧目录由沙箱 attachment 提供（同 SSH 模式的"目录属目标环境"语义） | 浏览器经 host `/ws` 读；`ui-bootstrap` 静态投影不再被消费 |
-| 沙箱内 provider 配置与凭据副本              | 沙箱 runtime（安装时点）                                                                                                             | 仅创建期下发；不入库、不进日志、轮换即重装                |
+| 事实                                            | 唯一所有者                                                                                                                           | 其他组件职责                                               |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| OAuth 会话（state/flow/pending 轮询）           | 云服务端 host 的 `oauthService`（既有实现）                                                                                          | 浏览器只发起与查询状态，不接触 token 正文                  |
+| OAuth 凭据（access/refresh/user_info）          | host 凭据存储（既有加密实现）                                                                                                        | run envelope 只读快照；浏览器永不持有                      |
+| 账号设置（providerFamilyDomain/selections）     | host `settingService`（既有实现）                                                                                                    | 设置页经 WS RPC 读写；沙箱只接收投影                       |
+| 套餐权益快照                                    | host `usageStatsService`（既有实现）                                                                                                 | UI 经服务读取；不落沙箱                                    |
+| 模型目录（模型设置页 providers/models）         | host provider registry（既有，唯一的目录所有者）；Task ready 后执行侧目录由沙箱 attachment 提供（同 SSH 模式的"目录属目标环境"语义） | 浏览器经 host `/ws` 读；`ui-bootstrap` 静态投影不再被消费  |
+| 沙箱内 provider 配置与凭据副本                  | 沙箱 runtime（安装时点）                                                                                                             | 仅创建期下发；不入库、不进日志、轮换即重装                 |
+| Cloud 运行时设置（`cloudRuntime`）              | host `settingService`（既有实现，`AppSettings.cloudRuntime` section）                                                                | 设置页经 WS RPC 读写；控制面 create 时读取（01 §4.3 修订） |
+| 沙箱 provider key（`cloud-sandbox/<provider>`） | host 凭据存储（既有加密实现）                                                                                                        | 设置页只写不回显；driver create 时读取（01 §5.1 决议）     |
+
+**修订（2026-10-08，Cloud 运行时设置归属账号域）**：设置页「Cloud 运行时」分组的沙箱配置（provider key、沙箱超时秒数）归属**账号域**，随 host 本体的既有存储落云持久卷：非秘密（按 provider 的超时秒数）走 `settingService` 的 `cloudRuntime.sandboxTimeoutSeconds` section；秘密（E2B 等 provider key）走 `credentialService`，凭据标识固定为 `cloud-sandbox/<provider>`（落盘已加密，UI 只写不回显）。生效规则与解析时点见 [01 §4.3/§5.1 修订](./01-provisioning.md)：部署 env 是基线与硬上界，账号设置只做覆盖，覆盖影响新 create。capabilities 的 provider 条目因此新增 `apiKeyConfigured` 布尔（生效 key 是否已配置，不暴露值与来源细节）；`maxLifetimeSeconds` 维持 env 核实上限语义，作为设置页超时输入的硬上界。
 
 ## 3. 时序
 
@@ -74,6 +78,8 @@ sequenceDiagram
 - 云入口调用 `createLocalServices()` 得到 host 服务图，复用 `http.ts` 的 `/ws` 暴露逻辑（把 `setupChannelServer` 等抽出为可复用导出）；
 - cloud 路由继续用现有注册函数挂在同一 Hono app 上；鉴权按 03 既有条款。
 
+**修订（2026-10-07）**：部署键 `ZCODE_CLOUD_AUTH_MODE=token|anonymous`（默认 `token`，03 §3 同款条款）作用于本节的 `/ws` 暴露与 cloud 路由装配：`anonymous` 是本地调试逃生门，lite-token 校验全放行、principalId 仍取部署声明的 `ZCODE_CLOUD_PRINCIPAL_ID`、启动不再要求 `ZCODE_SERVER_AUTH_TOKEN_FILE`；`token` 模式行为不变。后续方向是 GitHub 账号登录替代 lite-token（本节 OAuth 语义不受影响）。
+
 硬边界：
 
 - **云任务的执行目标只路由到沙箱 attachment**（owner/run/generation 校验，既有实现）；host 自带执行域不构成云任务的隐式 fallback。
@@ -83,6 +89,8 @@ sequenceDiagram
 ## 5. 客户端（Web/UI）
 
 - **base accessor = host 的 `/ws` accessor**（与 web 模式同款连接，`?token=` 放行同既有 lite token 机制）；`createCloudBrowserServices` 不再提供账号域的 static/unavailable 覆盖——账号域（oauth/credential/usage/setting）与模型目录直接来自 host accessor；客户端 scope 键（`principalId`）改由 `GET /api/cloud/capabilities` 返回（已认证，非秘密），不再需要 `ui-bootstrap` 端点（可删）。
+- **修订（2026-10-08）**：部署键 `ZCODE_CLOUD_PRINCIPAL_ID` 的形状必须是 UUID（与 capabilities 契约一致，`capabilitiesResponseSchema.principalId` 即 `cloudUuidSchema`），云入口在**启动期校验** fail-closed（非法值报 `principal_id_invalid`，归一 `validation_failed`），不得让非法值透传进 capabilities 响应后被客户端 safeParse 拒绝、误读为版本不兼容（2026-10-08 真实事故：`local-debug` 非 UUID 导致 boot 归类 incompatible-bundle）。
+- **修订（2026-10-07）**：客户端零改动地兼容 `ZCODE_CLOUD_AUTH_MODE=anonymous`（03 §3）——启动探测（04 §2.1）是服务端驱动的：`GET /api/cloud/capabilities` 返回 200 → 直接进云壳；凭据门只在 401/403 时出现。`anonymous` 部署下探测即 200，客户端不出现 token 门；公网隧道下等于把整套 host 服务面（含账号域凭据操作）无凭据暴露，仅限本机调试使用。
 - **执行域按当前 Task 由 attachment 覆盖**：选择 Task 进入工作区时，`file/git/terminal/agent/session` 等来自 `/ws/cloud/tasks/:taskId` 的沙箱 attachment（与桌面 renderer 的 `buildRemoteWorkspaceSessionServices` 合并模式同款）；无 Task/断连时这些服务回落 unavailable。
 - 模型设置页、WelcomeScreen 等原组件**零改动**：登录/套餐/目录都走 host 服务，路径与原 web 模式完全一致。
 - 凭据相关 UI 文案不得回显 token；日志脱敏（AGENTS 日志规范）。

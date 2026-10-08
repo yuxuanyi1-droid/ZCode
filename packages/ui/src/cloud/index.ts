@@ -89,6 +89,35 @@ export {
   type CloudDraftScopeInput,
 } from "./cloudDraftScope.js";
 export { readCloudTaskActions, type CloudTaskActionSet } from "./cloudTaskActionsProjection.js";
+export {
+  CLOUD_TASK_RUN_WATCH_INTERVAL_MS,
+  CLOUD_TASK_RUN_WATCH_TIMEOUT_MS,
+  shouldContinueCloudTaskRunWatch,
+  startCloudTaskRunWatch,
+  type CloudTaskRunWatchDeps,
+  type CloudTaskRunWatchDetail,
+  type CloudTaskRunWatchHandle,
+} from "./cloudTaskRunWatch.js";
+export {
+  isCloudTaskArchiveActionAvailable,
+  projectCloudTaskRunPanel,
+  resolveCloudReopenPlan,
+  type CloudReopenPlan,
+  type CloudTaskPanelDetail,
+  type CloudTaskRunPanelView,
+} from "./cloudTaskPanel.js";
+export {
+  runCloudTaskLifecycleAction,
+  type CloudTaskLifecycleAction,
+  type CloudTaskLifecyclePort,
+} from "./cloudTaskLifecycle.js";
+export { projectCloudTasksForSidebar, sortCloudTasksForSidebar } from "./cloudSidebarTaskList.js";
+export {
+  resolveCloudTaskRouteFailure,
+  type CloudTaskRouteFailure,
+  type CloudTaskRouteFailureInput,
+  type CloudTaskRouteFailureReason,
+} from "./cloudTaskRoute.js";
 export type {
   CloudControlPlaneInputSubmission,
   CloudControlPlanePort,

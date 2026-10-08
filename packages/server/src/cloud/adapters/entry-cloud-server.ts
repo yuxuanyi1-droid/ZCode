@@ -40,7 +40,8 @@ import {
   resolveDriverDeploymentConfigs,
   resolveProductionDriverBindings,
 } from "./entry-cloud-drivers.js";
-import type { SandboxDriverBinding } from "./sandbox/providers.js";
+import { SANDBOX_DRIVER_SECRET_NAMES, type SandboxDriverBinding } from "./sandbox/providers.js";
+import { createHostSandboxRuntimeSettings } from "./sandbox/sandboxRuntimeSettings.js";
 import { startCloudHostBody, type CloudHostBody } from "./entry-cloud-host-body.js";
 import {
   createCloudHostChannelServices,
@@ -162,6 +163,21 @@ export async function startCloudServer(
   const templates =
     options.templates ??
     createConfiguredSandboxTemplateResolver(config.sandboxTemplateRefs, logger);
+  // 账号设置覆盖端口（01 §4.3/§5.1 修订 2026-10-08）：host 服务图按 create 时点惰性取用
+  // ——本步骤先于 host 本体启动（03 §8 顺序），端口在 hostBody 就绪后才接上服务图；
+  // 装配校验（env 秘密齐备）仍在此处以 env 完成，账号设置不解除 fail-closed 装配语义。
+  const hostServicesRef: { current: ServiceCollection | undefined } = { current: undefined };
+  const sandboxRuntimeSettings = createHostSandboxRuntimeSettings({
+    getServices: () => hostServicesRef.current,
+    ...(config.sandboxMaxLifetimeSeconds
+      ? { envMaxLifetimeSeconds: config.sandboxMaxLifetimeSeconds }
+      : {}),
+    envApiKeys: {
+      e2b: readDriverSecret(SANDBOX_DRIVER_SECRET_NAMES.e2b[0]),
+      daytona: readDriverSecret(SANDBOX_DRIVER_SECRET_NAMES.daytona[0]),
+    },
+    logger,
+  });
   const drivers =
     options.drivers ??
     (await createCloudDriverRegistry({
@@ -174,6 +190,7 @@ export async function startCloudServer(
         ),
       readSecret: readDriverSecret,
       allowUnverified: config.allowUnverifiedProviders,
+      runtimeSettings: sandboxRuntimeSettings,
       logger,
     }));
 
@@ -186,6 +203,8 @@ export async function startCloudServer(
       onProvisioningSourceChanged: (trigger) => observer.notify(trigger),
       ...(options.hostServices ? { hostServices: options.hostServices } : {}),
     }));
+  // host 服务图就绪后接上账号设置端口（设置页与控制面从此读同一个 host 存储实例）。
+  hostServicesRef.current = hostBody.services;
 
   let controlPlane: CloudControlPlane | undefined;
   let server: ServerType | undefined;
@@ -195,7 +214,10 @@ export async function startCloudServer(
 
   try {
     // 3) 部署秘密（03 §8：host 本体启动之后加载，失败回落 dispose）。
-    const secrets = options.secrets ?? (await loadCloudEntrySecrets({ refs: config.secrets, env }));
+    //    anonymous 模式（03 §3 修订）authToken 引用允许缺失；principalId 仍必填。
+    const secrets =
+      options.secrets ??
+      (await loadCloudEntrySecrets({ refs: config.secrets, env, authMode: config.authMode }));
 
     // 4) 存储：注入优先，否则由入口打开（入口自持 → 入口负责关闭）。
     //    入口打开的理由：`storageWorkerEntryPath` 由入口按构建形态解析，且执行节点的
@@ -211,8 +233,12 @@ export async function startCloudServer(
     app.use(
       "*",
       // 401 = `CLOUD_ERROR_HTTP_STATUS.unauthenticated`（shared 冻结的状态映射）。
-      createLiteTokenGuard(secrets.authToken, (c) =>
-        c.json(errorEnvelope("unauthenticated", "Unauthorized"), 401),
+      // authMode=anonymous（03 §3 修订 2026-10-07，本地调试逃生门）时 lite-token 门槛
+      // 全放行；principalId 仍取部署秘密声明的 ZCODE_CLOUD_PRINCIPAL_ID。
+      createLiteTokenGuard(
+        secrets.authToken,
+        (c) => c.json(errorEnvelope("unauthenticated", "Unauthorized"), 401),
+        { authMode: config.authMode },
       ),
     );
     const { upgradeWebSocket, injectWebSocket } = createNodeWebSocket({ app });
@@ -232,6 +258,7 @@ export async function startCloudServer(
           host: hostBody,
           hostChannelServices,
           drivers,
+          sandboxRuntimeSettings,
           ...(hostProvisioningSource ? { hostProvisioningSource } : {}),
           storage: storageSource,
           loopScheduler,
@@ -281,6 +308,8 @@ export async function startCloudServer(
     logger.info(undefined, "[cloud-entry] listening", {
       origin: config.publicOrigin,
       port: listening.port,
+      // 部署声明的鉴权模式（03 §3 修订）：anonymous = lite-token 门槛已关闭，仅限本地调试。
+      authMode: config.authMode,
     });
 
     // 8) 后台循环：先生命周期（保活/对账事实刷新），再投递出站。

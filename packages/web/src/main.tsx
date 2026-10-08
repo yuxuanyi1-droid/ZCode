@@ -29,7 +29,7 @@ import {
 import type { ServerRemoteInfo } from "@zcode/shared";
 import { WEB_DEFAULT_THEME, resolveWebInitialTheme } from "./webThemeSeed.js";
 import { createWebPlatform } from "./webPlatform.js";
-import { resolveWebEntryBoot } from "./cloud/cloudBoot.js";
+import { bootWebEntry } from "./cloud/cloudBoot.js";
 import { renderCloudApp, renderCloudEntryFailure } from "./cloud/cloudApp.js";
 
 function resolveWebThemePreference(defaultTheme: Theme = WEB_DEFAULT_THEME): Theme {
@@ -266,14 +266,13 @@ async function bootstrapWebApp() {
     return;
   }
 
-  // 模式分派（specs/cloud-agent/modules/W9 §3；04 §2）：cloud 走 cloudApp，local / ?remote=
-  // 保持原路径。mode 只由 URL 或构建期 env 显式决定；解析失败一律停在失败面，不会因此
-  // 回落到本机 workspace（04 §2「缺 remote、网络失败、identity 解析失败不得自动切回本机」）。
-  const boot = resolveWebEntryBoot({
+  // 模式分派（specs/cloud-agent/04 §2.1；W9 §3/§4）：模式是**服务端事实**——启动时同源探测
+  // `/api/cloud/capabilities`，`mode=cloud` 走 cloudApp，`mode=local` 走原有本地路径
+  // （`?remote=` 语义不变），401/403 进云壳的凭据门。探测不确定（404/不可达/非法响应体）
+  // 一律停在错误屏，**不会**回落到本机 workspace。客户端不再有 `?mode=`/构建期 `VITE_*`。
+  const boot = await bootWebEntry({
     search: window.location.search,
     runtimeOrigin: window.location.origin,
-    buildMode: import.meta.env.VITE_ZCODE_SERVER_MODE,
-    buildCloudOrigin: import.meta.env.VITE_ZCODE_CLOUD_ORIGIN,
   });
   if (!boot.ok) {
     renderCloudEntryFailure(root, boot.failure);

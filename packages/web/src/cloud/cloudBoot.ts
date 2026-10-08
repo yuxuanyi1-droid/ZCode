@@ -1,13 +1,14 @@
 /**
- * Web 入口启动解析与错误分类（specs/cloud-agent/modules/W9 §3/§4；04 §2/§4/§6/§8；03 §7.1）。
+ * Web 入口启动探测与错误分类（specs/cloud-agent/04 §2.1、modules/W9 §3/§4；03 §7.1）。
  *
- * 只做三件事，且都是纯函数（不触 DOM、不 import UI，可直接在 node 下测试）：
- * 1) mode / origin / token / task 路由解析：由 URL 与构建期 env 显式决定（04 §2「模式由
- *    部署/客户端显式配置」）；缺 remote、网络失败、identity 解析失败都不回落本机；
- * 2) 同源通道地址：云模式的 host `/ws` 与 `/api/cloud/capabilities` 一律按同源拼装，
- *    不存在「开发机 / 本机 workspace bootstrap」这条路径（04 §6 落点表、03 §7.1）；
- * 3) 启动错误分类：未配置 / 认证失效 / origin 不符 / bundle 不兼容 / 后端不可达各自
- *    可操作（W9 §5「不用白屏或通用报错」），且分类结果一律是失败，不会变成 local 计划。
+ * 原则（2026-10-07 修订）：**模式是服务端事实**，客户端不再有 `?mode=` / 构建期
+ * `VITE_*` / origin 一致性校验。启动时向同源 `GET /api/cloud/capabilities` 探测一次，
+ * 结果只有四种：`200 mode=cloud` → 云壳；`401/403` → 云壳 + 凭据门；`200 mode=local`
+ * → 原本地 Web 路径；其余一切（404/5xx/网络失败/非契约响应体/协议不兼容）→ 错误屏。
+ *
+ * 反 fallback 要求保留且更强：**没有一种不确定会变成 local 计划**——服务端不回答就
+ * 进不了任何模式（04 §2.1）。本文件因此只做「探测 + 计划 + 失败分类」，不触 DOM、
+ * 不 import UI，可直接在 node 下测试。
  */
 import {
   CLOUD_WIRE_PROTOCOL_SUPPORTED_VERSIONS,
@@ -17,20 +18,14 @@ import {
   type CapabilitiesResponse,
   type CloudErrorEnvelope,
 } from "@zcode/shared";
-import { isCloudApiError, normalizeCloudOrigin, readCloudErrorEnvelope } from "@zcode/client";
+import { isCloudApiError, readCloudErrorEnvelope } from "@zcode/client";
 
-/** 构建期注入的 mode 来源（部署契约，见 W9 报告：`VITE_*` 只决定 bundle 身份与期望 origin）。 */
-export const CLOUD_WEB_MODE_ENV = "VITE_ZCODE_SERVER_MODE";
-/** 构建期声明「本 bundle 为哪个 origin 构建」；与运行时 origin 不一致即 fail-closed。 */
-export const CLOUD_WEB_ORIGIN_ENV = "VITE_ZCODE_CLOUD_ORIGIN";
-
-/** 云模式能力/模式端点（03 §6 端点表 capabilities 行；不用 /api/server-info）。 */
+/** 模式探测端点：模式判定的**唯一**来源（03 §6 端点表 capabilities 行；不用 /api/server-info）。 */
 export const CLOUD_CAPABILITIES_PATH = "/api/cloud/capabilities";
 /** host 本体服务通道（03 §7.1 host 分面；同源、lite-token）。 */
 export const CLOUD_HOST_CHANNEL_PATH = "/ws";
 
-/** `?mode=` 运行时覆盖；`?task=` 云任务主路由；`?remote=` 保持原本机 Web 语义（04 §5）。 */
-export const WEB_ENTRY_MODE_PARAM = "mode";
+/** `?task=` 云任务主路由；`?remote=` 保持原本机 Web 语义（04 §5）；`?token=` 凭据通道。 */
 export const WEB_ENTRY_TASK_PARAM = "task";
 export const WEB_ENTRY_REMOTE_PARAM = "remote";
 /** lite-token 既有约定：`?token=` 命中即下发 HttpOnly cookie（03 §7.1、12 §5）。 */
@@ -38,28 +33,18 @@ export const WEB_ENTRY_TOKEN_PARAM = "token";
 
 export type WebEntryMode = "local" | "cloud";
 
-/**
- * 构建期 env 声明。`env.d.ts` 不在 W9 的可写 roots，因此把云入口需要的两个键在这里
- * 合并进全局 `ImportMetaEnv`（保持 `import.meta.env.VITE_*` 的静态读取形态，Vite 才能在
- * 构建期替换）。部署契约见 W9 报告：`VITE_ZCODE_SERVER_MODE` 决定 bundle 模式，
- * `VITE_ZCODE_CLOUD_ORIGIN`（可选）声明构建期 origin，运行时 origin 必须与它一致。
- */
-declare global {
-  interface ImportMetaEnv {
-    readonly VITE_ZCODE_SERVER_MODE?: string;
-    readonly VITE_ZCODE_CLOUD_ORIGIN?: string;
-  }
-}
-
 export interface WebEntryBootInput {
   /** `window.location.search`。 */
   readonly search: string;
-  /** `window.location.origin`（云模式必须与它同源，03 §7.1）。 */
+  /** `window.location.origin`（同源地址一律由它拼装，不再是构建期契约）。 */
   readonly runtimeOrigin: string;
-  /** `import.meta.env.VITE_ZCODE_SERVER_MODE`（构建期）。 */
-  readonly buildMode?: string | undefined;
-  /** `import.meta.env.VITE_ZCODE_CLOUD_ORIGIN`（构建期，可选）。 */
-  readonly buildCloudOrigin?: string | undefined;
+  /** 探测得出的服务端模式（04 §2.1）。 */
+  readonly serverMode: WebEntryMode;
+  /**
+   * 探测是否被凭据拒绝（401/403）：此时服务端已明确是云入口，只是要求凭据，
+   * 入口直接进凭据门，不重跑一次必然失败的启动流程。
+   */
+  readonly credentialRequired?: boolean;
 }
 
 export interface LocalEntryPlan {
@@ -71,8 +56,10 @@ export interface LocalEntryPlan {
 export interface CloudEntryPlan {
   readonly mode: "cloud";
   readonly origin: string;
+  /** 探测被 401/403 拒绝：先过凭据门（`CloudTokenGate`）再启动（04 §2.1）。 */
+  readonly credentialRequired: boolean;
   /**
-   * 部署链接 `?token=` 携带的 lite-token：只用于一次握手（HTML 请求或 CloudTokenGate），
+   * 部署链接 `?token=` 携带的 lite-token：只用于一次握手（凭据门或服务端 cookie 下发），
    * 不由客户端保存，也不写 storage（03 §3、12 §5）。
    */
   readonly token?: string;
@@ -85,27 +72,31 @@ export type WebEntryPlan = LocalEntryPlan | CloudEntryPlan;
 /**
  * 启动失败原因全集（W9 §5：启动错误必须可操作、各自区分）。数组即唯一来源：
  * 类型由它推导，恢复动作表对它做穷尽检查。
+ *
+ * 已作废（2026-10-07 §2.1）：`mode-invalid`（不再有客户端模式声明）与
+ * `origin-mismatch`（不再有构建期 origin 声明）。
  */
 export const CLOUD_BOOT_FAILURE_REASONS = [
-  /** `?mode=` 取值非法：显式配置错误，不静默当 local。 */
-  "mode-invalid",
-  /** 构建期 origin ≠ 运行时 origin（W9 §8 的预览环境问题）。 */
-  "origin-mismatch",
   /** 云入口没有桌面 attachment：`?remote=` 不被云入口服务，也不回落本机（04 §5）。 */
   "remote-unsupported",
   /** `?task=` 不是合法 cloud taskId（04 §5 主路由）。 */
   "invalid-task-id",
+  /**
+   * `?task=` 是合法 taskId 但控制面返回 not_found（2026-10-08 巡检修订）：任务不存在
+   * 或已被删除。与 `invalid-task-id` 同样呈现错误屏，不静默回落欢迎页。
+   */
+  "task-not-found",
   /** 客户端没有任何凭据：给出 CloudTokenGate（03 §3）。 */
   "missing-token",
   /** 凭据存在但被拒绝：认证失效，需重新取访问链接。 */
   "invalid-token",
   /** 凭据有效但无权访问该部署（撤权/主体不匹配）。 */
   "not-authorized",
-  /** 服务端/部署未配置 cloud（含 origin 不是云入口、能力端点未就绪）。 */
+  /** 探测端点未按契约回答（404/503 等）：这个地址不是可用的入口。 */
   "not-configured",
   /** bundle 与 wire 协议版本不兼容（00 §8、capabilities.protocolVersion）。 */
   "incompatible-bundle",
-  /** 后端不可达/结果未知：保留失败面，不回落本机（04 §2）。 */
+  /** 后端不可达/结果未知：保留失败面，不回落本机（04 §2.1）。 */
   "backend-unreachable",
   /** host `/ws` 通道建立失败（账号域不可用）。 */
   "host-channel-unavailable",
@@ -134,10 +125,9 @@ export type WebEntryBootResult =
 
 /** 每个失败原因都必须给出可操作动作（W9 §5「不用白屏或通用报错」）。 */
 const FAILURE_RECOVERIES: Readonly<Record<CloudBootFailureReason, readonly CloudBootRecovery[]>> = {
-  "mode-invalid": ["open-home", "retry"],
-  "origin-mismatch": ["retry"],
   "remote-unsupported": ["open-home"],
   "invalid-task-id": ["open-home"],
+  "task-not-found": ["open-home", "reload"],
   "missing-token": ["provide-token", "retry"],
   "invalid-token": ["provide-token", "retry"],
   "not-authorized": ["provide-token", "retry"],
@@ -165,103 +155,46 @@ export function createCloudBootFailure(
   };
 }
 
-/** 空串按「未提供」处理：`?mode=` / `?token=` 这类空值不构成配置。 */
+/** 空串按「未提供」处理：`?task=` / `?token=` 这类空值不构成配置。 */
 function readParam(params: URLSearchParams, name: string): string | undefined {
   const value = params.get(name)?.trim();
   return value ? value : undefined;
 }
 
-function readDeclaredValue(value: string | undefined): string | undefined {
-  const trimmed = value?.trim().toLowerCase();
-  return trimmed ? trimmed : undefined;
-}
-
 /**
- * 解析入口计划。mode 只来自显式来源（`?mode=` 优先于构建期 env，缺省 local）；
- * 其它一切不确定都变成失败面，绝不返回 local 计划（04 §2）。
+ * 用探测结果解析入口计划（纯函数，04 §2.1）。
+ *
+ * 模式来自服务端，URL 只能决定路由细节：cloud 下 `?remote=` 明确失败（不静默忽略，
+ * 也不回落本机），`?task=` 必须合法；local 下 `?remote=` 原语义不变。
  */
 export function resolveWebEntryBoot(input: WebEntryBootInput): WebEntryBootResult {
   const params = new URLSearchParams(input.search);
-  const urlMode = params.get(WEB_ENTRY_MODE_PARAM);
-  const buildMode = input.buildMode === undefined ? undefined : input.buildMode;
-
-  // `?mode=` 出现但取值非法/为空时直接失败：拼错的模式不能静默降级成本机入口。
-  if (urlMode !== null) {
-    const declared = readDeclaredValue(urlMode);
-    if (declared !== "local" && declared !== "cloud") {
-      return {
-        ok: false,
-        failure: createCloudBootFailure("mode-invalid", {
-          detail: {
-            param: WEB_ENTRY_MODE_PARAM,
-            value: readDeclaredValue(urlMode)?.slice(0, 16) ?? "",
-          },
-        }),
-      };
-    }
-  }
-
-  const declaredMode = readDeclaredValue(urlMode ?? buildMode);
-  if (declaredMode !== undefined && declaredMode !== "local" && declaredMode !== "cloud") {
-    return {
-      ok: false,
-      failure: createCloudBootFailure("mode-invalid", {
-        detail: { source: CLOUD_WEB_MODE_ENV, value: declaredMode.slice(0, 16) },
-      }),
-    };
-  }
-
   const remoteId = readParam(params, WEB_ENTRY_REMOTE_PARAM);
-  if (declaredMode !== "cloud") {
+  const taskIdParam = readParam(params, WEB_ENTRY_TASK_PARAM);
+  const token = readParam(params, WEB_ENTRY_TOKEN_PARAM);
+
+  if (input.serverMode === "local") {
+    // 本地路径不认 `?task=`/`?token=`（云主路由与云凭据），也不做任何本机回落判断。
     return { ok: true, plan: { mode: "local", ...(remoteId ? { remoteId } : {}) } };
   }
 
-  // ── cloud ──
   if (remoteId) {
     // 云入口只挂 host `/ws` 与 `/ws/cloud/*`，没有 `/ws/remote/:id`；静默忽略等于让用户
     // 以为自己在远控桌面，因此显式失败（04 §5、W9 §6 模式隔离）。
     return { ok: false, failure: createCloudBootFailure("remote-unsupported") };
   }
 
-  const declaredOrigin = readDeclaredValue(input.buildCloudOrigin);
-  if (declaredOrigin !== undefined) {
-    let normalized: string;
-    try {
-      normalized = normalizeCloudOrigin(declaredOrigin);
-    } catch {
-      return {
-        ok: false,
-        failure: createCloudBootFailure("not-configured", {
-          detail: { env: CLOUD_WEB_ORIGIN_ENV },
-        }),
-      };
-    }
-    if (normalized !== input.runtimeOrigin) {
-      // 只能在预览/换域名部署里暴露：构建期 origin 与运行时 origin 不一致时，cookie 与
-      // WS 都到不了真正的服务端，必须显式报错而不是发跨域请求（03 §7.1 同源、W9 §8）。
-      return {
-        ok: false,
-        failure: createCloudBootFailure("origin-mismatch", {
-          detail: { buildOrigin: normalized, runtimeOrigin: input.runtimeOrigin },
-        }),
-      };
-    }
+  if (taskIdParam !== undefined && !cloudTaskIdSchema.safeParse(taskIdParam).success) {
+    // identity 解析失败必须拒绝，不能当作「没有 task」继续（00 §5、04 §5）。
+    return { ok: false, failure: createCloudBootFailure("invalid-task-id") };
   }
 
-  const taskIdParam = readParam(params, WEB_ENTRY_TASK_PARAM);
-  if (taskIdParam !== undefined) {
-    if (!cloudTaskIdSchema.safeParse(taskIdParam).success) {
-      // identity 解析失败必须拒绝，不能当作「没有 task」继续（00 §5、04 §5）。
-      return { ok: false, failure: createCloudBootFailure("invalid-task-id") };
-    }
-  }
-
-  const token = readParam(params, WEB_ENTRY_TOKEN_PARAM);
   return {
     ok: true,
     plan: {
       mode: "cloud",
       origin: input.runtimeOrigin,
+      credentialRequired: input.credentialRequired === true,
       ...(token ? { token } : {}),
       ...(taskIdParam ? { taskId: taskIdParam } : {}),
     },
@@ -322,7 +255,7 @@ export interface CloudBootFailureContext {
 
 /**
  * 把启动期异常归一成失败面。默认分支是「后端不可达」而不是回退本机：
- * 网络失败、未知错误都必须停在失败面（04 §2）。
+ * 网络失败、未知错误都必须停在失败面（04 §2.1）。
  */
 export function classifyCloudBootError(
   error: unknown,
@@ -364,23 +297,134 @@ export function classifyCloudBootHttpStatus(
   });
 }
 
-/** `capabilities.mode` 不是 cloud：该 origin 不是云入口，既不是认证问题也不是网络问题。 */
+/**
+ * 探测/启动拿到的能力响应是否可用（04 §2.1）。
+ *
+ * - 两个模式都是合法答案：模式判定服务端驱动，`local` 是服务端事实，不是「没配置云」；
+ * - 传 `expectedMode` 时（云启动流程、TokenGate）要求模式相符，否则 `not-configured`；
+ * - 协议版本不在支持集 → `incompatible-bundle`（00 §8 fail-closed，不按旧字段猜测解析）。
+ */
 export function classifyCapabilitiesMismatch(
   capabilities: CapabilitiesResponse,
+  options?: { readonly expectedMode?: WebEntryMode },
 ): CloudBootFailure | undefined {
-  if (capabilities.mode === "cloud") {
-    if (
-      !(CLOUD_WIRE_PROTOCOL_SUPPORTED_VERSIONS as readonly number[]).includes(
-        capabilities.protocolVersion,
-      )
-    ) {
-      return createCloudBootFailure("incompatible-bundle", {
-        detail: { protocolVersion: capabilities.protocolVersion },
-      });
-    }
-    return undefined;
+  const expected = options?.expectedMode;
+  if (expected !== undefined && capabilities.mode !== expected) {
+    return createCloudBootFailure("not-configured", {
+      detail: { mode: capabilities.mode, expectedMode: expected },
+    });
   }
-  return createCloudBootFailure("not-configured", { detail: { mode: capabilities.mode } });
+  if (
+    !(CLOUD_WIRE_PROTOCOL_SUPPORTED_VERSIONS as readonly number[]).includes(
+      capabilities.protocolVersion,
+    )
+  ) {
+    return createCloudBootFailure("incompatible-bundle", {
+      detail: { protocolVersion: capabilities.protocolVersion },
+    });
+  }
+  return undefined;
+}
+
+export interface WebEntryProbeInput {
+  /** 探测 origin：永远是页面同源地址（`window.location.origin`）。 */
+  readonly origin: string;
+  readonly fetchImpl?: typeof fetch | undefined;
+}
+
+/** 探测结果：两个模式、需要凭据、或明确的失败面（没有第五种，也没有 local 回落）。 */
+export type WebEntryProbeResult =
+  | {
+      readonly kind: "mode";
+      readonly mode: WebEntryMode;
+      readonly capabilities: CapabilitiesResponse;
+    }
+  | { readonly kind: "credential-required" }
+  | { readonly kind: "failure"; readonly failure: CloudBootFailure };
+
+/**
+ * 启动模式探测：同源、**不带凭据**（04 §2.1——带 token 探测会让「需要凭据」这类部署
+ * 直接变成 200，客户端就再也分不出「云入口要 token」与「本地部署」）。
+ *
+ * `401/403` 是**明确回答**而非错误：服务端在，且要求凭据 → 云壳 + 凭据门。
+ */
+export async function probeWebEntryMode(input: WebEntryProbeInput): Promise<WebEntryProbeResult> {
+  const fetchImpl = input.fetchImpl ?? globalThis.fetch;
+  let response: Response;
+  try {
+    response = await fetchImpl(new URL(CLOUD_CAPABILITIES_PATH, input.origin), {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { accept: "application/json" },
+    });
+  } catch {
+    // 不把异常文案带出来：连接类失败只报「不可达」，也不回落本机。
+    return { kind: "failure", failure: createCloudBootFailure("backend-unreachable") };
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    return { kind: "credential-required" };
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = undefined;
+  }
+
+  if (!response.ok) {
+    return {
+      kind: "failure",
+      failure: classifyCloudBootHttpStatus(response.status, readCloudErrorEnvelope(payload), {
+        tokenProvided: false,
+      }),
+    };
+  }
+
+  const parsed = capabilitiesResponseSchema.safeParse(payload);
+  if (!parsed.success) {
+    // 200 但不是契约响应体（HTML、别的服务、旧版本）：这个地址不是可用入口，
+    // 不猜也不回落本机（04 §2.1）。
+    return { kind: "failure", failure: createCloudBootFailure("incompatible-bundle") };
+  }
+  const mismatch = classifyCapabilitiesMismatch(parsed.data);
+  if (mismatch) {
+    return { kind: "failure", failure: mismatch };
+  }
+  return { kind: "mode", mode: parsed.data.mode, capabilities: parsed.data };
+}
+
+/**
+ * 入口启动：探测一次 → 解析计划（04 §2.1）。
+ *
+ * `main.tsx` 只调用这一个入口函数；失败面（含 404/不可达/非法响应体）由调用方渲染错误屏。
+ */
+export async function bootWebEntry(input: {
+  readonly search: string;
+  readonly runtimeOrigin: string;
+  readonly fetchImpl?: typeof fetch | undefined;
+}): Promise<WebEntryBootResult> {
+  const probe = await probeWebEntryMode({
+    origin: input.runtimeOrigin,
+    ...(input.fetchImpl === undefined ? {} : { fetchImpl: input.fetchImpl }),
+  });
+  if (probe.kind === "failure") {
+    return { ok: false, failure: probe.failure };
+  }
+  if (probe.kind === "credential-required") {
+    return resolveWebEntryBoot({
+      search: input.search,
+      runtimeOrigin: input.runtimeOrigin,
+      serverMode: "cloud",
+      credentialRequired: true,
+    });
+  }
+  return resolveWebEntryBoot({
+    search: input.search,
+    runtimeOrigin: input.runtimeOrigin,
+    serverMode: probe.mode,
+  });
 }
 
 export type CloudTokenHandshakeResult =
@@ -433,6 +477,7 @@ export async function completeCloudTokenHandshake(input: {
   if (!parsed.success) {
     return { ok: false, failure: createCloudBootFailure("incompatible-bundle") };
   }
-  const mismatch = classifyCapabilitiesMismatch(parsed.data);
+  // 凭据门的对象只能是云入口：本地模式不该走到这里（探测早已把它分流到本地路径）。
+  const mismatch = classifyCapabilitiesMismatch(parsed.data, { expectedMode: "cloud" });
   return mismatch ? { ok: false, failure: mismatch } : { ok: true, capabilities: parsed.data };
 }

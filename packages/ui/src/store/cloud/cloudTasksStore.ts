@@ -164,3 +164,26 @@ export function selectCloudTasksForProject(
 ): readonly CloudTaskRecord[] {
   return state.itemsByProject[projectId] ?? [];
 }
+
+/**
+ * 按 taskId 读取任务状态（04 §3 2026-10-08 巡检修订）。
+ *
+ * 详情投影优先（选中/打开过的任务必然有），否则扫项目列表兜底（侧栏展开过的项目）。
+ * 两处都没有时返回 null——调用方按「状态未知」处理，不猜。
+ */
+export function selectCloudTaskStatusById(
+  state: Pick<CloudTasksState, "detailByTask" | "itemsByProject">,
+  taskId: string,
+): CloudTaskRecord["status"] | null {
+  const detailEntry = state.detailByTask[taskId];
+  if (detailEntry) {
+    return detailEntry.detail.task.status;
+  }
+  for (const items of Object.values(state.itemsByProject)) {
+    const found = items.find((task) => task.taskId === taskId);
+    if (found) {
+      return found.status;
+    }
+  }
+  return null;
+}

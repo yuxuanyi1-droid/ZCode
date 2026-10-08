@@ -47,6 +47,11 @@ export type CloudSubmissionOutcome =
       /** HTTP 事实：202 = 控制面已持久接收；**不是** runtime ACK（03 §6.2）。 */
       readonly httpStatus: number;
       readonly receipt: InputReceipt;
+      /**
+       * 本次提交的幂等键（2026-10-08 巡检修订 P2）：客户端 optimistic overlay 用它
+       * 关联权威投影（queue/userInput 的 `sourceCommandId`），不造第二份事实。
+       */
+      readonly commandId: string;
     }
   /** 本地冻结失败：本轮不得发出 HTTP（04 §3.4.1）。 */
   | { readonly kind: "not-frozen"; readonly message: string }
@@ -109,7 +114,12 @@ export async function submitCloudTaskInput(
       httpStatus: result.httpStatus,
       receipt: result.receipt,
     });
-    return { kind: "persisted", httpStatus: result.httpStatus, receipt: result.receipt };
+    return {
+      kind: "persisted",
+      httpStatus: result.httpStatus,
+      receipt: result.receipt,
+      commandId,
+    };
   } catch (error) {
     const message = describeCloudSubmissionError(error);
     if (isDefinitiveCloudFailure(error)) {

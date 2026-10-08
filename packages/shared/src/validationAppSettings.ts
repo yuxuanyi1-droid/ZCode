@@ -15,6 +15,7 @@ import {
   embeddedBrowserViewportPreferenceSchema,
 } from "./browser-use/command-metadata.js";
 import { providerFamilyConnectionSelectionSettingsSchema } from "./provider-family-connection-selection.js";
+import { cloudRuntimeSettingsSchema } from "./cloud/sandboxRuntimeSettings.js";
 
 /** 引导职业枚举；单独导出供 onboarding 记录回填 settings 时做窄化校验。 */
 const appSettingsOccupationSchema = z.enum([
@@ -182,6 +183,24 @@ function sanitizeEmbeddedBrowserViewportPreference(value: unknown): unknown {
   const { embeddedBrowserViewportPreference: _embeddedBrowserViewportPreference, ...next } = raw;
   // 显示偏好不是关键启动状态，单字段损坏不应让整份 setting.json 被隔离。
   // 读取时只丢弃坏偏好并回到默认值；patch 写入仍严格拒绝非法尺寸与缩放。
+  return next;
+}
+
+function sanitizeCloudRuntimeSettings(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  const raw = value as Record<string, unknown>;
+  if (!("cloudRuntime" in raw)) {
+    return value;
+  }
+  const parsed = cloudRuntimeSettingsSchema.safeParse(raw.cloudRuntime);
+  if (parsed.success) {
+    return value;
+  }
+  const { cloudRuntime: _cloudRuntime, ...next } = raw;
+  // Cloud 运行时设置是账号域覆盖项（specs/cloud-agent/12 §2 修订）：坏值只回落部署 env
+  // 基线，不能拖垮整份 setting.json 的其它设置；patch 写入仍保持严格校验。
   return next;
 }
 
@@ -546,16 +565,19 @@ const appSettingsObjectSchema = z.object({
   skippedElectronUpdateVersions: skippedElectronUpdateVersionsSchema,
   settingsSyncFirstRunPromptHandled: z.boolean().optional(),
   zcodeEndpointOrigin: zcodeEndpointOriginSchema.optional(),
+  cloudRuntime: cloudRuntimeSettingsSchema.optional(),
 });
 
 export const appSettingsSchema = z.preprocess(
   (value) =>
-    sanitizeEmbeddedBrowserViewportPreference(
-      sanitizeDesktopWindowSize(
-        migrateMessageStreamShowReasoningDefault(
-          migrateCloseToTrayOnWindowsDefault(
-            migrateLegacyLocalePreference(
-              sanitizeZCodeEndpointOrigin(migrateLegacyWorkspaceSession(value)),
+    sanitizeCloudRuntimeSettings(
+      sanitizeEmbeddedBrowserViewportPreference(
+        sanitizeDesktopWindowSize(
+          migrateMessageStreamShowReasoningDefault(
+            migrateCloseToTrayOnWindowsDefault(
+              migrateLegacyLocalePreference(
+                sanitizeZCodeEndpointOrigin(migrateLegacyWorkspaceSession(value)),
+              ),
             ),
           ),
         ),
@@ -633,4 +655,5 @@ export const appSettingsPatchSchema = z.object({
     .optional(),
   settingsSyncFirstRunPromptHandled: z.boolean().optional(),
   zcodeEndpointOrigin: zcodeEndpointOriginSchema.optional(),
+  cloudRuntime: cloudRuntimeSettingsSchema.optional(),
 });

@@ -149,6 +149,20 @@ export interface TabStoreState {
    * 非云 tab 从不带 `cloudTaskId`，因此这条路径不会被它们命中。
    */
   openCloudTaskTab: (params: CloudTaskTabParams) => TabId;
+  /**
+   * 云任务 tab 的 checkout 路径同步（2026-10-08 巡检修订，specs/cloud-agent 04 §5）。
+   *
+   * `openCloudTaskTab` 只在用户导航时调用；run 的 `workspacePath` 在首发/重开后由
+   * 控制面异步落定，此前 tab 一直持有空串路径——pane scope 用它发起 v4 订阅会被
+   * runtime 以 `workspace.workspacePath` too_small 拒绝（spec 02 §2 禁止空串路径）。
+   * 控制器在详情投影刷新时调用本 action：按 `cloudTaskId` 找到既有 tab，只同步真实
+   * 路径（必要时含标签），**不改变激活态**——用户切到别的 tab 时不被拉回。
+   */
+  syncCloudTaskTabWorkspacePath: (params: {
+    cloudTaskId: string;
+    workspacePath: string;
+    label?: string;
+  }) => void;
   /** 关闭标签页 */
   closeTab: (tabId: TabId) => void;
   /** 激活指定标签页 */
@@ -428,6 +442,33 @@ export function createTabStore(storage: StorageLike | null | undefined = undefin
         ),
       }));
       return tab.id;
+    },
+
+    syncCloudTaskTabWorkspacePath: ({ cloudTaskId, workspacePath, label }) => {
+      const nextPath = workspacePath.trim();
+      // 只接受非空路径：这里不存在「回到空串」的合法场景（run 落定的路径不会撤销）。
+      if (nextPath.length === 0) {
+        return;
+      }
+      const existingIndex = findCloudTaskTabIndex(get().tabs.filter(isWorkspaceTab), cloudTaskId);
+      if (existingIndex === -1) {
+        // tab 尚未建立（用户还没打开过该任务的工作区）：留给 openCloudTaskTab。
+        return;
+      }
+      const target = get().tabs[existingIndex];
+      if (!target) {
+        return;
+      }
+      set((state) => ({
+        tabs: state.tabs.map((tab) =>
+          tab.id === target.id && isWorkspaceTab(tab)
+            ? { ...tab, workspacePath: nextPath, ...(label ? { label } : {}) }
+            : tab,
+        ),
+        // 同步的是当前激活 tab 时，activeWorkspacePath 也跟着走（Root 据此下发
+        // pane scope）；非激活 tab 不抢焦点（激活语义留给 openCloudTaskTab 的导航路径）。
+        activeWorkspacePath: state.activeTabId === target.id ? nextPath : state.activeWorkspacePath,
+      }));
     },
 
     closeTab: (tabId: TabId) => {

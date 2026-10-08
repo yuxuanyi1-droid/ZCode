@@ -48,6 +48,13 @@ packages/server/src/cloud/
 
 现有 `zcode_lite_token` 可作为受保护单用户启动设施的参考，不是多租户账号模型。浏览器 OAuth 登录成功也不自动证明其属于某个 GitHub installation；登录身份、GitHub 授权和模型账号分别核验。
 
+**修订（2026-10-07）：匿名调试模式 `ZCODE_CLOUD_AUTH_MODE=token|anonymous`，默认 `token`。**
+
+- `token`（默认）：行为完全不变——fail-closed，缺 `ZCODE_SERVER_AUTH_TOKEN_FILE` 一律启动失败；`/api/cloud/*`、`/ws`、`/ws/cloud/tasks/*` 的 lite-token 校验照旧。
+- `anonymous`：**本地调试逃生门**，不是匿名产品入口。所有走 lite-token 的路径（`/api/cloud/*`、`/ws`、`/ws/cloud/tasks/*`、静态资源）无凭据直接放行；principalId 仍取部署声明的 `ZCODE_CLOUD_PRINCIPAL_ID`（必填不变）；启动不再要求 `ZCODE_SERVER_AUTH_TOKEN_FILE`（仍提供时 `?token=` 命中照旧下发 cookie，不破坏既有握手）。
+- 边界不变：`/ws/cloud/bridge/*` 与 git-grant 端点的 **run-scoped ticket 鉴权不受该开关影响**；跨主体资源仍 404；云任务执行目标仍只路由沙箱。
+- 理由：用户决议（2026-10-07）暂不做登录限制，便于云入口本地联调；后续方向是 GitHub 账号登录替代 lite-token。公网/隧道暴露的部署禁止使用 `anonymous`（见 12 §5 风险备注）。
+
 每次 HTTP/WS、历史分页、附件、Git 凭据、provider 操作均检查：
 
 1. principal 是否有效；

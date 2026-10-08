@@ -8,7 +8,7 @@
 import type { CloudTaskInputRecord } from "@zcode/shared";
 import { inputDeliveryStatusSchema } from "@zcode/shared";
 import type { InputDeliveryStatus } from "@zcode/shared";
-import { DELIVERY_TRANSITIONS } from "../deliveryStatusMachine.js";
+import { INPUT_DELIVERY_TRANSITIONS } from "../../../domain/deliveryStatus.js";
 import { withWriteTransaction } from "../sqlite/database.js";
 import type { StorageContext } from "../sqlite/database.js";
 import { decodeCursor, encodeCursor, normalizeLimit } from "../sqlite/cursor.js";
@@ -55,7 +55,10 @@ export const inputRepoHandlers = {
       const current = selectInput(context, params.taskId, params.commandId);
       if (!current) return null;
       const from = String(current["delivery_status"]) as InputDeliveryStatus;
-      if (!DELIVERY_TRANSITIONS[from].includes(to)) return null;
+      // 统一使用 domain 唯一边表（修复 2026-10-07 P1：storage 侧曾有第二份边表，
+      // accepted→admitted/uncertain、uncertain→accepted/cancelled 在真实存储上被拒，
+      // 导致 ACK 静默丢弃与 CP-14 决定取消路径失败）；02 §6.3 为准。
+      if (!INPUT_DELIVERY_TRANSITIONS[from].includes(to)) return null;
       const changes = context.db
         .prepare(
           `UPDATE task_inputs SET

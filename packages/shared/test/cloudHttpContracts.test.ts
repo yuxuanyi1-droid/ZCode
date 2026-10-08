@@ -15,13 +15,16 @@ import {
   CLOUD_WIRE_PROTOCOL_SUPPORTED_VERSIONS,
   CLOUD_WIRE_PROTOCOL_VERSION,
   capabilitiesResponseSchema,
+  cloudCapabilitiesResponseSchema,
   cloudListQuerySchema,
   cloudRepositoriesQuerySchema,
   createCloudProjectRequestSchema,
+  createLocalCapabilitiesResponse,
   findCloudHttpEndpoint,
   forceStopCloudTaskRequestSchema,
   isCloudAttachmentServiceAllowed,
   isSupportedCloudWireProtocolVersion,
+  localCapabilitiesResponseSchema,
   patchCloudTaskRequestSchema,
   reopenCloudTaskRequestSchema,
   submitTaskInputSchema,
@@ -219,6 +222,59 @@ test("wire protocol version is single-sourced and fails closed on unknown versio
   assert.equal(capabilitiesResponseSchema.safeParse(capabilities).success, true);
   assert.equal(
     capabilitiesResponseSchema.safeParse({ ...capabilities, protocolVersion: 99 }).success,
+    false,
+  );
+});
+
+test("capabilities is a mode-discriminated union: local answers the probe without a principal", () => {
+  // 04 §2.1（2026-10-07 修订）：模式判定服务端驱动——本地入口也必须回答同一个端点，
+  // 否则客户端分不清「本地部署」与「不可达」。本地分支没有主体与能力，但保留云分支
+  // 出现的所有非主体键（providers/features/protocolVersion/taskOwnedAttachments）。
+  const local = createLocalCapabilitiesResponse();
+  assert.deepEqual(local, {
+    mode: "local",
+    providers: [],
+    features: [],
+    protocolVersion: CLOUD_WIRE_PROTOCOL_VERSION,
+    taskOwnedAttachments: false,
+  });
+  assert.equal(capabilitiesResponseSchema.safeParse(local).success, true);
+  // 云分支仍要求主体：本地响应不能冒充云入口，云响应也不能漏发主体。
+  assert.equal(cloudCapabilitiesResponseSchema.safeParse(local).success, false);
+  assert.equal(
+    cloudCapabilitiesResponseSchema.safeParse({
+      ...local,
+      mode: "cloud",
+      principalId: PRINCIPAL_ID,
+    }).success,
+    true,
+  );
+  // 本地分支是空集语义与 strict 语义：塞主体/能力/未知字段一律拒绝，不靠忽略字段通过。
+  assert.equal(
+    localCapabilitiesResponseSchema.safeParse({ ...local, principalId: PRINCIPAL_ID }).success,
+    false,
+  );
+  assert.equal(
+    localCapabilitiesResponseSchema.safeParse({
+      ...local,
+      providers: [
+        {
+          provider: "e2b",
+          createOperationLookup: "native-key",
+          canInspect: true,
+          canExtendDeadline: true,
+          canConfirmTermination: true,
+          deadlineSource: "provider",
+          supportsOutboundWss: true,
+        },
+      ],
+    }).success,
+    false,
+  );
+  assert.equal(capabilitiesResponseSchema.safeParse({ ...local, mode: "bogus" }).success, false);
+  // 协议版本只有一个来源：本地分支同样按支持集 fail-closed。
+  assert.equal(
+    capabilitiesResponseSchema.safeParse({ ...local, protocolVersion: 99 }).success,
     false,
   );
 });

@@ -6800,7 +6800,7 @@ const enUS: Record<string, string> = {
     "Repositories are filtered by this account's authorization; permissions are verified server-side.",
   "settings.cloudRuntime.sandbox.title": "Sandbox",
   "settings.cloudRuntime.sandbox.description":
-    "Sandbox provider capabilities as reported by the control plane (read-only).",
+    "Sandbox provider capabilities (as reported by the control plane) plus account overrides: the API key and timeout budget only affect newly created sandboxes; running tasks are unaffected.",
   "settings.cloudRuntime.sandbox.none": "The control plane reports no sandbox provider yet.",
   "settings.cloudRuntime.sandbox.capability.createOperationLookup": "Create-result lookup",
   "settings.cloudRuntime.sandbox.capability.inspect": "Can inspect instances",
@@ -6810,7 +6810,25 @@ const enUS: Record<string, string> = {
   "settings.cloudRuntime.sandbox.capability.deadlineSource": "Deadline source",
   "settings.cloudRuntime.sandbox.capability.maxLifetime": "Max lifetime (s)",
   "settings.cloudRuntime.sandbox.secretNote":
-    "Secrets and credentials are held by the deployment; this page neither reads nor displays them.",
+    "The API key is stored encrypted (write-only, never echoed back). The effective timeout is the smaller of your setting and the deployment-verified cap; leaving checkpoint headroom avoids provider rejections at create time.",
+  "settings.cloudRuntime.sandbox.apiKey.label": "API key",
+  "settings.cloudRuntime.sandbox.apiKey.description":
+    "Overrides the deployment key; takes effect for newly created sandboxes.",
+  "settings.cloudRuntime.sandbox.apiKey.configured": "Configured",
+  "settings.cloudRuntime.sandbox.apiKey.notConfigured": "Not configured",
+  "settings.cloudRuntime.sandbox.apiKey.placeholder": "Enter a new API key (not echoed back)",
+  "settings.cloudRuntime.sandbox.apiKey.saved": "Saved; applies to the next sandbox create.",
+  "settings.cloudRuntime.sandbox.timeout.label": "Sandbox timeout (s)",
+  "settings.cloudRuntime.sandbox.timeout.hint":
+    "Cap {max}s (deployment-verified). Hobby plans cap at 3600s; 3300s leaves checkpoint headroom. Clear and save to restore the deployment baseline.",
+  "settings.cloudRuntime.sandbox.timeout.invalid": "Enter a valid number of seconds.",
+  "settings.cloudRuntime.sandbox.timeout.cleared": "Restored the deployment baseline.",
+  "settings.cloudRuntime.sandbox.timeout.effective.accountSetting":
+    "Effective {seconds}s (account override)",
+  "settings.cloudRuntime.sandbox.timeout.effective.deploymentEnv":
+    "Effective {seconds}s (deployment baseline)",
+  "settings.cloudRuntime.sandbox.timeout.effective.none":
+    "No timeout budget set (deployment has no verified cap)",
   "settings.cloudRuntime.retry": "Retry",
   "settings.cloudRuntime.loading": "Loading…",
   "settings.cloudRuntime.notCloudMode":
@@ -6834,6 +6852,67 @@ const enUS: Record<string, string> = {
   "cloud.tasks.newSubmit": "Create draft",
   "cloud.tasks.createFailed": "Could not create the task: {reason}",
   "cloud.tasks.openFailed": "Could not open the cloud task workspace",
+  "cloud.tasks.archive": "Archive task",
+  "cloud.tasks.archiveConfirmTitle": "Archive this task?",
+  "cloud.tasks.archiveConfirmDescription":
+    '"{taskTitle}" will be archived. History stays readable, but the task no longer accepts commands until it is restored.',
+  "cloud.tasks.archiveFailed": "Could not archive the task: {reason}",
+  "cloud.tasks.archiveUnavailable":
+    "The control plane does not allow archiving this task right now",
+  "cloud.tasks.archivedSection": "Archived ({count})",
+  "cloud.tasks.restore": "Restore task",
+  "cloud.tasks.restoreFailed": "Could not restore the task: {reason}",
+  "cloud.tasks.archivedReadOnlyTitle": "Task archived · read-only",
+  "cloud.tasks.archivedReadOnlyDescription":
+    "History stays viewable; restore the task to continue the conversation.",
+  "cloud.mobile.sidebarToggle": "Open task list",
+  "cloud.errors.not_found": "The task does not exist or has been deleted",
+  "cloud.errors.validation_failed":
+    "The server rejected the request (validation failed); refresh the task state and retry",
+  "cloud.errors.stale": "The task state has changed; refresh and retry",
+  "cloud.errors.unauthenticated": "Your session has expired; sign in again",
+  "cloud.errors.unauthorized": "The current credential cannot perform this action",
+  "cloud.errors.permission_revoked": "The related permission has been revoked",
+  "cloud.errors.installation_revoked": "The GitHub App installation has been revoked",
+  "cloud.errors.quota_exceeded": "The quota is exhausted; the action cannot run",
+  "cloud.errors.budget_exceeded": "The budget is exhausted; the action cannot run",
+  "cloud.errors.not_ready": "The runtime is not ready yet; try again shortly",
+  "cloud.errors.idempotency_conflict":
+    "A conflicting duplicate request exists; refresh the task state",
+  "cloud.errors.rate_limited": "Too many requests; retry later",
+  "cloud.errors.network_unknown": "The network result is unknown; retry later",
+  "cloud.errors.provider_unreachable": "The cloud provider is temporarily unreachable",
+  "cloud.errors.bridge_disconnected": "The connection to the runtime is down",
+  "cloud.errors.recovery_required": "This task needs a recovery step first",
+  "cloud.run.statusWaitingForRun": "Input accepted. Waiting for the cloud environment…",
+  "cloud.run.statusProvisioning": "Preparing the cloud environment (sandbox, clone, warm-up)…",
+  "cloud.run.statusFailedTitle": "Task run failed",
+  "cloud.run.statusStoppedTitle": "Task run stopped",
+  "cloud.run.statusExpiredTitle": "Task run expired",
+  "cloud.run.reopen": "Reopen task",
+  "cloud.run.reopenPromptLabel": "Prompt for the new run",
+  "cloud.run.reopenPromptPlaceholder": "What should the new run do?",
+  "cloud.run.reopenResumeCheckpoint": "The new run resumes from the latest saved checkpoint.",
+  "cloud.run.reopenResumeBase": "No saved checkpoint: the new run restarts from the base branch.",
+  "cloud.run.reopenProviderMissing":
+    "Run provider is unknown, so this task cannot be reopened from here.",
+  "cloud.run.reopenSubmit": "Reopen",
+  "cloud.run.statusDraining": "Stopping the task: saving the workspace, then terminating the run…",
+  "cloud.run.stopFailed": "Failed to stop the task: {reason}",
+  "cloud.run.forceStop": "Force stop",
+  "cloud.run.forceStopTitle": "Force stop this task?",
+  "cloud.run.forceStopDescription":
+    "A normal stop saves the workspace before terminating the run. A force stop terminates immediately; unsaved changes may be lost.",
+  "cloud.run.forceStopConfirm": "I understand unsaved changes may be lost",
+  "cloud.run.forceStopSubmit": "Force stop",
+  "cloud.run.pendingInputHint": "Submitted, waiting for the run environment…",
+  "cloud.run.liveReconnecting": "Reconnecting the session…",
+  "cloud.run.liveReconnectFailed":
+    "The live connection is down; history is still visible. Reconnect to resume updates.",
+  "cloud.run.error.validationRejected":
+    "Could not establish the session: the server rejected the request parameters. Retry or report the problem.",
+  "cloud.run.error.technicalDetail": "View technical details",
+  "cloud.run.settings.timeoutClamped": "Converged to the deployment limit of {seconds} seconds.",
   "chat.attachments.cloud.uploadUnavailable":
     "This deployment does not support draft attachment uploads for cloud tasks. Remove attachments before the first send.",
   "chat.attachments.cloud.attachmentUnavailable":

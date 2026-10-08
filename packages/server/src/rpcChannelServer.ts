@@ -252,19 +252,44 @@ export function isTokenProtectedPath(pathname: string): boolean {
 export type LiteTokenRejection = (c: Context) => Response | Promise<Response>;
 
 /**
+ * lite-token 鉴权模式（specs/cloud-agent/03 §3 修订 2026-10-07）：
+ * - `token`（默认）：fail-closed，无有效凭据一律 401（既有行为）；
+ * - `anonymous`：**本地调试逃生门**——lite-token 门槛全放行（principalId 仍由部署声明，
+ *   见云入口装配）。`?token=` 命中时仍照旧种 cookie，不破坏既有握手；bridge 路径的
+ *   run-scoped ticket 鉴权与本开关无关（02 §4/§5.1，豁免谓词不变）。
+ */
+export type LiteTokenAuthMode = "token" | "anonymous";
+
+export interface LiteTokenGuardOptions {
+  readonly authMode?: LiteTokenAuthMode;
+}
+
+/**
  * lite-token 保护中间件。本地入口与云入口共用同一判定：`/ws`、`/ws/*`、`/api/*` 需要
  * token（执行节点面 see `isRunScopedBridgePath`/`isExecutionNodeHttpPath` 两处豁免）；
  * `?token=` 命中即下发 cookie 并放行（浏览器首次带 token 访问 SPA 时就能把 cookie
  * 落下来，后续 `/api`、`/ws` 靠 cookie 通过）。
+ *
+ * `anonymous` 模式（03 §3 修订）下所有受保护路径无凭据直接放行；`token` 缺省/为空且
+ * 非 anonymous 时对受保护路径一律拒绝——入口装配保证只有 anonymous 部署会出现无 token。
  */
 export function createLiteTokenGuard(
-  token: string,
+  token: string | undefined,
   onReject: LiteTokenRejection = (c) => c.json({ error: "Unauthorized" }, 401),
+  options: LiteTokenGuardOptions = {},
 ): MiddlewareHandler {
   return async (c, next) => {
     const pathname = new URL(c.req.url).pathname;
-    const validToken = hasValidLiteToken(c, token);
-    if (!isTokenProtectedPath(pathname) || validToken) {
+    if (token) {
+      // `?token=` 命中即种 cookie 的既有副作用保持：anonymous 部署提供 token 文件时
+      // 浏览器仍可完成同款握手（cookie 对后续 /api、/ws 一致生效）。
+      const validToken = hasValidLiteToken(c, token);
+      if (validToken || !isTokenProtectedPath(pathname)) {
+        await next();
+        return;
+      }
+    }
+    if (options.authMode === "anonymous") {
       await next();
       return;
     }

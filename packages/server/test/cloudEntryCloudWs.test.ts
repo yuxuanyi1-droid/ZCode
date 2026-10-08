@@ -22,7 +22,7 @@ import {
   type StartCloudServerOptions,
 } from "../src/cloud/adapters/entry-cloud-server.js";
 import { buildCloudTaskWorkspacePath } from "../src/cloud/domain/workspacePath.js";
-import type { CloudEntryConfig } from "../src/cloud/adapters/entry-cloud-config.js";
+import type { CloudAuthMode, CloudEntryConfig } from "../src/cloud/adapters/entry-cloud-config.js";
 import type { CloudDeploymentSecrets } from "../src/cloud/adapters/entry-cloud-secrets.js";
 import type { LoopSchedulerPort } from "../src/cloud/app/ports/loopSchedulerPort.js";
 import type { SandboxDriverRegistryPort } from "../src/cloud/app/ports/sandboxDriverRegistryPort.js";
@@ -70,7 +70,22 @@ function testSecrets(): CloudDeploymentSecrets {
     principalId: PRINCIPAL,
     describe: () => ({
       principalId: PRINCIPAL,
+      authMode: "token",
       authToken: "configured",
+      credentialSecret: "absent",
+      gitHubApp: "absent",
+    }),
+  };
+}
+
+/** anonymous 部署注入用：无 authToken（本地调试逃生门，03 §3 修订 2026-10-07）。 */
+function anonymousSecrets(): CloudDeploymentSecrets {
+  return {
+    principalId: PRINCIPAL,
+    describe: () => ({
+      principalId: PRINCIPAL,
+      authMode: "anonymous",
+      authToken: "absent",
       credentialSecret: "absent",
       gitHubApp: "absent",
     }),
@@ -86,6 +101,7 @@ function hostServices(): ServiceCollection {
 function baseConfig(dataDir: string): CloudEntryConfig {
   return {
     mode: "cloud",
+    authMode: "token",
     publicOrigin: "http://127.0.0.1:1",
     listenPort: 0,
     dataDir,
@@ -212,7 +228,9 @@ async function withAssembledServer<T>(
       runId?: string;
     }) => Promise<string>;
   }) => Promise<T>,
+  options: { readonly authMode?: CloudAuthMode } = {},
 ): Promise<T> {
+  const authMode = options.authMode ?? "token";
   const dataDir = await mkdtemp(path.join(tmpdir(), "cloud-ws-e2e-"));
   const clock = new FakeClock();
   const outbox = createFakeOutbox();
@@ -220,8 +238,9 @@ async function withAssembledServer<T>(
   let handle: CloudServerHandle | undefined;
   try {
     handle = await startCloudServer({
-      config: baseConfig(dataDir),
-      secrets: testSecrets(),
+      config: { ...baseConfig(dataDir), authMode },
+      // anonymous 模式无 token 文件也可启动（authToken 引用允许缺失，principalId 仍必填）。
+      secrets: authMode === "anonymous" ? anonymousSecrets() : testSecrets(),
       drivers: fakeDrivers,
       hostServices: hostServices(),
       storage: { storage, operations: outbox, readiness: async () => ready },
@@ -479,4 +498,75 @@ test("豁免不代表放宽鉴权：错误/缺失 ticket 的 bridge 连接仍被
     assert.equal(wrongClose.code, 1008);
     assert.match(wrongClose.reason, /credential-rejected/);
   });
+});
+
+test("anonymous 模式（03 §3 修订）：无凭据升级 host /ws、任务通道越过 lite-token 进控制面判定，principalId 仍为部署声明", async () => {
+  await withAssembledServer(
+    async ({ baseUrl, wsUrl, seedTask }) => {
+      await seedTask({ taskId: TASK_ID, ownerPrincipalId: PRINCIPAL });
+
+      // 探测端点无凭据 200：web 客户端（04 §2.1）直接进云壳，不出现凭据门；
+      // principalId 是部署声明（ZCODE_CLOUD_PRINCIPAL_ID），不因放行而漂移。
+      const probe = await fetch(`${baseUrl}/api/cloud/capabilities`);
+      assert.equal(probe.status, 200);
+      const capabilities = (await probe.json()) as { mode?: string; principalId?: string };
+      assert.equal(capabilities.mode, "cloud");
+      assert.equal(capabilities.principalId, PRINCIPAL);
+
+      // host 账号域通道（03 §7.1 host 分面）无凭据升级成功：token 模式下这里是 401。
+      const hostChannel = await connectCloudWs(`${wsUrl}/ws`);
+      hostChannel.socket.close();
+
+      // 浏览器任务通道无凭据不再 401：升级放行后进入控制面判定（draft 无 run → 4404
+      // no-active-run，CP-11），证明放行不等于绕过任务级检查。
+      const taskChannel = await connectCloudWs(`${wsUrl}/ws/cloud/tasks/${TASK_ID}`);
+      const taskClose = await taskChannel.waitForClose();
+      assert.equal(taskClose.code, 4404);
+      assert.match(taskClose.reason, /no-active-run/);
+    },
+    { authMode: "anonymous" },
+  );
+});
+
+test("anonymous 不波及 bridge：无票/错票 hello 仍被 run-scoped 鉴权拒绝", async () => {
+  await withAssembledServer(
+    async ({ wsUrl, seedTask }) => {
+      await seedTask({ taskId: TASK_ID, ownerPrincipalId: PRINCIPAL, runId: RUN_ID });
+
+      const hello = (credentialToken: string): string =>
+        JSON.stringify({
+          protocolVersion: 1,
+          type: "bridge.hello",
+          address: {
+            taskId: TASK_ID,
+            runId: RUN_ID,
+            runGeneration: 1,
+            workspaceIdentity: `cloud-task:${TASK_ID}`,
+            workspacePath: WORKSPACE_PATH,
+            remoteSessionId: `remote-${RUN_ID}`,
+          },
+          helloAttemptId: HELLO_ATTEMPT_ID,
+          credentialToken,
+          candidateNextResumeToken: "candidate-1",
+          runtimeIncarnation: "incarnation-1",
+        });
+
+      // 空票：帧不合契约，在帧边界被拒（02 §5.1）。
+      const noTicket = await connectCloudWs(`${wsUrl}/ws/cloud/bridge/${RUN_ID}`);
+      noTicket.socket.send(hello(""));
+      const noTicketClose = await noTicket.waitForClose();
+      assert.equal(noTicketClose.code, 1008);
+      assert.match(noTicketClose.reason, /invalid-frame/);
+
+      // 错票：hash 不匹配 → fault + 关闭；anonymous 只关 lite-token，不动 ticket 校验。
+      const wrongTicket = await connectCloudWs(`${wsUrl}/ws/cloud/bridge/${RUN_ID}`);
+      wrongTicket.socket.send(hello("not-the-ticket"));
+      const wrongFault = await wrongTicket.waitForFrame("bridge.fault");
+      assert.equal(wrongFault["faultCode"], "unauthenticated");
+      const wrongClose = await wrongTicket.waitForClose();
+      assert.equal(wrongClose.code, 1008);
+      assert.match(wrongClose.reason, /credential-rejected/);
+    },
+    { authMode: "anonymous" },
+  );
 });

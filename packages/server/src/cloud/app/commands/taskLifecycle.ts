@@ -10,6 +10,10 @@
  * - reactivate：completed 且 PR 未 merged 时显式转 active，不自动建 run；merged 时新建
  *   follow-up Task（08 §3.1）。
  * - restore：从 archived 恢复 archivedFromStatus；仍需显式 reopen 才有新 run（03 §6）。
+ *
+ * revision 约定（P0 修复，2026-10-07 review）：本文件调 `storage.tasks.transitionStatus` 时传的是
+ * **新的 revision（当前值 + 1）**，不是 CAS 期望值——端口契约见 app/ports/taskPort.ts:41-46，
+ * 真实 repo 落库为 `WHERE ... AND revision < ?`（repositories/taskRepo.ts:195）。
  */
 import type { TaskDetailResponse } from "@zcode/shared";
 import { canReactivateTask, restoreTargetStatus } from "../../domain/taskRunState.js";
@@ -91,7 +95,13 @@ export function createTaskLifecycleCommands(
         taskId: task.taskId,
         from: ["active"],
         to: "completed",
-        revision: latest?.revision ?? task.revision,
+        // 修复依据（2026-10-07 review，P0）：端口 `transitionStatus.revision` 是**新的 revision**
+        // 而非 CAS 期望值（app/ports/taskPort.ts:41-46），真实 repo 落库为
+        // `UPDATE ... SET revision = ? WHERE ... AND revision < ?`（repositories/taskRepo.ts:195）。
+        // 旧代码传 latest.revision（当前值），`revision < ?` 恒不成立 → changes:0 恒 stale，
+        // 且此处 complete_requested 已置位，无法再用原 revision 收口（08 §9 死锁）。
+        // 传 latest + 1：revision 单调允许跳号；并发安全由 `revision < ?` 的 CAS 自己保证。
+        revision: (latest?.revision ?? task.revision) + 1,
         completeRequested: true,
         now: clock.now(),
       });
@@ -113,7 +123,9 @@ export function createTaskLifecycleCommands(
         taskId: task.taskId,
         from: ["draft", "active", "completed", "failed"],
         to: "archived",
-        revision: task.revision,
+        // 同 complete：`revision` 必须传新值（当前 + 1），传当前值会被 `revision < ?` 判为 stale
+        // （app/ports/taskPort.ts:41-46、repositories/taskRepo.ts:195；03 §6 archive 行）。
+        revision: task.revision + 1,
         archivedFromStatus: task.status,
         now: clock.now(),
       });
@@ -151,7 +163,9 @@ export function createTaskLifecycleCommands(
         taskId: task.taskId,
         from: ["completed"],
         to: "active",
-        revision: task.revision,
+        // 同 archive：`revision` 是新的 revision（当前 + 1），不是 CAS 期望值
+        // （app/ports/taskPort.ts:41-46；08 §3.1 completed → active）。
+        revision: task.revision + 1,
         now: clock.now(),
       });
       if (!updated) return fail("stale", "task-revision-mismatch");
@@ -168,7 +182,9 @@ export function createTaskLifecycleCommands(
         taskId: task.taskId,
         from: ["archived"],
         to: target,
-        revision: task.revision,
+        // 同 archive：`revision` 是新的 revision（当前 + 1），不是 CAS 期望值
+        // （app/ports/taskPort.ts:41-46；03 §6 restore 行）。
+        revision: task.revision + 1,
         now: clock.now(),
       });
       if (!updated) return fail("stale", "task-revision-mismatch");

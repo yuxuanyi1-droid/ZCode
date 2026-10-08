@@ -172,10 +172,19 @@ export function createCloudCommandTransport(
   }
 
   function withTimeout<T>(promise: Promise<T>): Promise<T | "timeout"> {
-    return Promise.race([
-      promise,
-      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), timeoutMs)),
-    ]);
+    // 02 §6.3：超时只裁决「放弃等待、置不确定」，不改变其余语义；race 落定后必须清理
+    // 定时器。修复依据（2026-10-07 relay 测试族 flake 排查）：原实现每次调用都遗留一个
+    // 30s 真实 setTimeout 且不清除——生产侧控制面高频发令时定时器按调用量累积、拖住事件
+    // 循环生命周期；测试侧每个走命令通道的进程要等最后一个 timer 到期才能退出（实测
+    // 50ms 的用例集拖到 ~31.5s），多套件并行验证时成倍放大并发进程重叠，正是压垮其它
+    // 实时时敏断言的高负载工况。清理 timer 不影响超时语义（输掉的一方本来就不生效）。
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    }) as Promise<T | "timeout">;
   }
 
   return {

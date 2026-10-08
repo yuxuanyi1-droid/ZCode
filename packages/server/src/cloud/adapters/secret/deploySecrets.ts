@@ -46,8 +46,11 @@ export class DeploySecretError extends Error {
 export interface DeploySecretsConfig {
   /** 可信单用户部署的唯一主体（09 §2.1）。 */
   principalId: string;
-  /** 云 API bearer token 文件；HTTP/WS 入口鉴权必需（03 §3）。 */
-  authTokenFile: string;
+  /**
+   * 云 API bearer token 文件；HTTP/WS 入口鉴权必需（03 §3）。仅在 anonymous 调试模式
+   * （03 §3 修订 2026-10-07）下允许缺省——入口层保证 token 模式必填，本层不复制该判定。
+   */
+  authTokenFile?: string;
   github?: {
     appId: number;
     privateKeyFile: string;
@@ -62,7 +65,8 @@ export interface DeploySecretsConfig {
 
 export interface DeploySecretsDescription {
   principalId: string;
-  authTokenRef: string;
+  /** anonymous 模式未提供引用时缺省（authToken 未加载）。 */
+  authTokenRef?: string;
   github?: {
     appId: number;
     privateKeyRef: string;
@@ -84,7 +88,8 @@ export interface LoadedGitHubAppSecrets {
 
 export interface LoadedDeploySecrets {
   readonly principalId: string;
-  readonly authToken: string;
+  /** anonymous 调试模式未提供 authTokenFile 时缺省（token 模式恒有值）。 */
+  readonly authToken?: string;
   readonly github?: LoadedGitHubAppSecrets;
   /** 只含文件引用与校验事实：可安全写日志/诊断（不含秘密材料）。 */
   describe(): DeploySecretsDescription;
@@ -198,14 +203,17 @@ export async function loadDeploySecrets(
   if (config.principalId.trim().length === 0) {
     throw new DeploySecretError("invalid-config", "principalId", "principalId must be set");
   }
-  const authToken = await readSecretFile(fs, config.authTokenFile, uid);
-  if (/\s/.test(authToken)) {
-    // 换行/空白通常意味着读到了错误的文件；不做自动修复，避免把拼接内容当 token。
-    throw new DeploySecretError(
-      "malformed",
-      config.authTokenFile,
-      "auth token must be a single token",
-    );
+  // anonymous 调试模式（03 §3 修订）不要求 auth token 文件：未提供引用时跳过读取，
+  // 其余部署秘密（GitHub 等）照常加载；token 模式的必填判定在入口层 fail-closed。
+  let authToken: string | undefined;
+  if (config.authTokenFile) {
+    const authTokenRef = config.authTokenFile;
+    const value = await readSecretFile(fs, authTokenRef, uid);
+    if (/\s/.test(value)) {
+      // 换行/空白通常意味着读到了错误的文件；不做自动修复，避免把拼接内容当 token。
+      throw new DeploySecretError("malformed", authTokenRef, "auth token must be a single token");
+    }
+    authToken = value;
   }
 
   let github: LoadedGitHubAppSecrets | undefined;
@@ -251,11 +259,11 @@ export async function loadDeploySecrets(
 
   return {
     principalId: config.principalId,
-    authToken,
+    ...(authToken !== undefined ? { authToken } : {}),
     github,
     describe: () => ({
       principalId: config.principalId,
-      authTokenRef: config.authTokenFile,
+      ...(config.authTokenFile ? { authTokenRef: config.authTokenFile } : {}),
       github: github
         ? {
             appId: github.appId,

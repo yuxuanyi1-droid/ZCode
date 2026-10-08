@@ -72,7 +72,21 @@ export interface AttachmentRegistry {
     at: number;
     activitySummary?: string;
   }): boolean;
-  detach(input: { runId: string; at: number; reason: string }): AttachmentSession | null;
+  /**
+   * 摘除当前 session。可选携带期望的 generation/epoch：不匹配则**不摘除**并返回 null。
+   *
+   * 修复依据（2026-10-07 review P2/P0）：旧 socket 关闭（或被新 epoch 接管替换）时，
+   * 无条件按 runId 摘除会把**新 epoch** 的 session 一并删掉，导致接管窗口内命令投递
+   * 整体 no-attachment 直到下一次 hello。与 markReady/heartbeat 的逐项 epoch 比对保持
+   * 同一纪律（02 §2 不变量 3）。
+   */
+  detach(input: {
+    runId: string;
+    at: number;
+    reason: string;
+    expectedRunGeneration?: number;
+    expectedConnectionEpoch?: number;
+  }): AttachmentSession | null;
   /** 投递前解析：generation 精确匹配、epoch 不落后、ready 为真。 */
   resolve(input: {
     runId: string;
@@ -141,6 +155,19 @@ export function createAttachmentRegistry(): AttachmentRegistry {
     detach(input) {
       const session = sessions.get(input.runId);
       if (!session) return null;
+      // 携带期望代际时必须逐项匹配：旧连接的关闭/超时不得摘除新 epoch 的 session。
+      if (
+        input.expectedRunGeneration !== undefined &&
+        session.runGeneration !== input.expectedRunGeneration
+      ) {
+        return null;
+      }
+      if (
+        input.expectedConnectionEpoch !== undefined &&
+        session.connectionEpoch !== input.expectedConnectionEpoch
+      ) {
+        return null;
+      }
       sessions.delete(input.runId);
       return session;
     },

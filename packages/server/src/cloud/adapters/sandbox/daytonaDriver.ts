@@ -22,7 +22,12 @@ import type {
   TerminationObservation,
 } from "../../app/ports/sandboxDriverPort.js";
 import { CloudAdapterError, type CloudAdapterLogger } from "./adapterError.js";
-import { DAYTONA_SANDBOX_CAPABILITIES, describeCapabilities } from "./capabilities.js";
+import {
+  DAYTONA_SANDBOX_CAPABILITIES,
+  describeCapabilities,
+  resolveEffectiveMaxLifetimeSeconds,
+  type SandboxLifetimeOptions,
+} from "./capabilities.js";
 import { launchDaytonaSupervisor } from "./daytonaBootstrap.js";
 import {
   buildDaytonaHandle,
@@ -62,15 +67,13 @@ export const DAYTONA_PROVIDER = "daytona";
 /** create 结果对账窗口：窗口内「清单查不到」不足以判定未创建（01 §4.1）。 */
 export const DAYTONA_DEFAULT_RECONCILIATION_WINDOW_MS = 300_000;
 
-export interface DaytonaDriverOptions {
+export interface DaytonaDriverOptions extends SandboxLifetimeOptions {
   /** provider API key（dtn_ 前缀）经注入读取；绝不进 URL、日志或 labels。 */
   apiKey: () => string | Promise<string>;
   baseUrl?: string;
   fetch?: SandboxFetch;
   now?: () => number;
   requestTimeoutMs?: number;
-  /** 账号核实的墙钟 TTL 上限（秒）；未核实保持 undefined（不虚构上限）。 */
-  maxLifetimeSeconds?: number;
   createReconciliationWindowMs?: number;
   /** 测试注入的 supervisor 启动器（缺省 toolbox 会话通道）。 */
   startSupervisor?: SupervisorStarter;
@@ -100,11 +103,11 @@ export function createDaytonaSandboxDriver(options: DaytonaDriverOptions): Sandb
     logger,
   };
 
-  function clampTtlMinutes(requestedDeadlineMs: number): number {
+  async function clampTtlMinutes(requestedDeadlineMs: number): Promise<number> {
     let usableMs = requestedDeadlineMs - now();
-    if (options.maxLifetimeSeconds !== undefined) {
-      // provider 能力上限收敛（01 §4.3）：可用期取请求与已核实上限较小值。
-      usableMs = Math.min(usableMs, options.maxLifetimeSeconds * 1000);
+    const cap = await resolveEffectiveMaxLifetimeSeconds(options);
+    if (cap !== undefined) {
+      usableMs = Math.min(usableMs, cap * 1000);
     }
     return Math.max(1, Math.ceil(usableMs / 60_000)); // 向上取整：绝不欠配期限
   }
@@ -126,7 +129,7 @@ export function createDaytonaSandboxDriver(options: DaytonaDriverOptions): Sandb
           requestedDeadline: input.requestedDeadline,
         });
       }
-      const ttlMinutes = clampTtlMinutes(input.requestedDeadline);
+      const ttlMinutes = await clampTtlMinutes(input.requestedDeadline);
       const requestBody = {
         snapshot: imageRef,
         labels: buildDaytonaLabels(input),
@@ -320,7 +323,7 @@ export function createDaytonaSandboxDriver(options: DaytonaDriverOptions): Sandb
           requestedDeadlineMs,
         });
       }
-      const minutes = clampTtlMinutes(requestedDeadlineMs);
+      const minutes = await clampTtlMinutes(requestedDeadlineMs);
       let response;
       try {
         response = await rest.request(DAYTONA_PATH_TTL(handle.sandboxId, minutes), {

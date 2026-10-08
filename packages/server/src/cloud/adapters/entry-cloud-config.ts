@@ -9,6 +9,7 @@ import {
   CLOUD_DEFAULT_MAX_CONCURRENT_RUNS,
   CloudEntryStartupError,
   ZCODE_CLOUD_ALLOW_UNVERIFIED_PROVIDERS_ENV,
+  ZCODE_CLOUD_AUTH_MODE_ENV,
   ZCODE_CLOUD_DATA_DIR_ENV,
   ZCODE_CLOUD_GITHUB_ALLOWED_INSTALLATIONS_ENV,
   ZCODE_CLOUD_GITHUB_APP_ID_ENV,
@@ -28,14 +29,7 @@ import {
   ZCODE_SERVER_AUTH_TOKEN_FILE_ENV,
   ZCODE_SERVER_MODE_ENV,
   assertWebDir,
-  parseIdList,
-  parsePositiveInt,
-  parsePublicOrigin,
-  parseSandboxLifetimeLimits,
-  parseSandboxTemplateRefs,
-  parseStaticModelFallback,
-  readTrimmed,
-  splitList,
+  type CloudAuthMode,
   type CloudEntryConfig,
   type CloudEntryConfigIssue,
   type CloudEntryConfigIssueCode,
@@ -45,6 +39,18 @@ import {
   type LocalEntryConfig,
   type ZCodeServerMode,
 } from "./entry-cloud-config-contract.js";
+import {
+  parseCloudAuthMode,
+  parseIdList,
+  parsePositiveInt,
+  parsePrincipalId,
+  parsePublicOrigin,
+  parseSandboxLifetimeLimits,
+  parseSandboxTemplateRefs,
+  parseStaticModelFallback,
+  readTrimmed,
+  splitList,
+} from "./entry-cloud-config-parse.js";
 
 // 公开配置契约（键名、默认值、启动错误类型、配置形状）原样再导出：外部消费方不变。
 export {
@@ -52,6 +58,7 @@ export {
   CLOUD_DEFAULT_MAX_CONCURRENT_RUNS,
   CloudEntryStartupError,
   ZCODE_CLOUD_ALLOW_UNVERIFIED_PROVIDERS_ENV,
+  ZCODE_CLOUD_AUTH_MODE_ENV,
   ZCODE_CLOUD_DATA_DIR_ENV,
   ZCODE_CLOUD_GITHUB_ALLOWED_INSTALLATIONS_ENV,
   ZCODE_CLOUD_GITHUB_APP_ID_ENV,
@@ -72,6 +79,7 @@ export {
   ZCODE_SERVER_MODE_ENV,
 } from "./entry-cloud-config-contract.js";
 export type {
+  CloudAuthMode,
   CloudEntryConfig,
   CloudEntryConfigIssue,
   CloudEntryConfigIssueCode,
@@ -104,6 +112,20 @@ export async function readCloudEntryConfig(
   }
 
   const issues: CloudEntryConfigIssue[] = [];
+
+  // 鉴权模式先解析：它决定 authTokenFile 是否必填（03 §3 修订 2026-10-07 的跨字段校验）。
+  const authMode = parseCloudAuthMode(readTrimmed(env, ZCODE_CLOUD_AUTH_MODE_ENV));
+  if (authMode === "invalid") {
+    issues.push({
+      code: "auth_mode_invalid",
+      field: ZCODE_CLOUD_AUTH_MODE_ENV,
+      message: `${ZCODE_CLOUD_AUTH_MODE_ENV} 只能是 token 或 anonymous`,
+    });
+  }
+  // anonymous 是本地调试逃生门：authToken 引用允许缺失；principalId 仍必填（下一条）。
+  const resolvedAuthMode: CloudAuthMode =
+    authMode === undefined || authMode === "invalid" ? "token" : authMode;
+
   const principalId = readTrimmed(env, ZCODE_CLOUD_PRINCIPAL_ID_ENV);
   if (!principalId) {
     issues.push({
@@ -111,9 +133,19 @@ export async function readCloudEntryConfig(
       field: ZCODE_CLOUD_PRINCIPAL_ID_ENV,
       message: "cloud 模式必须配置稳定的 deploymentPrincipalId（03 §3）",
     });
+  } else if (parsePrincipalId(principalId) === "invalid") {
+    // 2026-10-08 真实事故：非 UUID 的 principalId（如 local-debug）曾被启动放行并透传进
+    // capabilities 响应，客户端 safeParse 失败被误读为「版本不兼容」。启动期 fail-closed：
+    // 非法形状在配置解析层就报 principal_id_invalid，绝不进入 capabilities。
+    // 优先级：空值 → required（上方分支），非空且非法 → invalid（本分支）。
+    issues.push({
+      code: "principal_id_invalid",
+      field: ZCODE_CLOUD_PRINCIPAL_ID_ENV,
+      message: "principalId 形状必须是 UUID（与 capabilities 契约一致），非法值不得透传给客户端",
+    });
   }
   const authTokenFile = readTrimmed(env, ZCODE_SERVER_AUTH_TOKEN_FILE_ENV);
-  if (!authTokenFile) {
+  if (!authTokenFile && resolvedAuthMode === "token") {
     issues.push({
       code: "auth_required",
       field: ZCODE_SERVER_AUTH_TOKEN_FILE_ENV,
@@ -217,6 +249,7 @@ export async function readCloudEntryConfig(
     ok: true,
     config: {
       mode: "cloud",
+      authMode: resolvedAuthMode,
       publicOrigin,
       ...(readTrimmed(env, ZCODE_CLOUD_LISTEN_HOST_ENV)
         ? { listenHost: readTrimmed(env, ZCODE_CLOUD_LISTEN_HOST_ENV) }
@@ -257,8 +290,17 @@ export async function readCloudEntryConfig(
 export function configIssuesToStartupError(
   issues: readonly CloudEntryConfigIssue[],
 ): CloudEntryStartupError {
+  // 归一规则（2026-10-08 修订，与入口既有语义一致：entry-cloud-drivers 的「未知 provider」
+  // 等值非法也归 validation_failed）：issue code 以 `_invalid` 结尾 = 部署方**配了但形状非法**
+  // → `validation_failed`；其余（`*_required` 等）= **漏配** → `not_configured`。
+  // 两者排查方向不同，混在一个码里会误导运维（2026-10-08 事故中非法 principalId 若归成
+  // not_configured，会再次掩盖「值配错」这一真实根因）。非法值优先于缺失：更具体的根因先报，
+  // 全部 issue 仍随 details 透出。
+  const code = issues.some((issue) => issue.code.endsWith("_invalid"))
+    ? "validation_failed"
+    : "not_configured";
   return new CloudEntryStartupError(
-    "not_configured",
+    code,
     `cloud entry configuration is invalid: ${issues.map((issue) => issue.field).join(", ")}`,
     { issues: issues.map((issue) => ({ ...issue })) },
   );
@@ -275,4 +317,26 @@ export function readCloudDataDirFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): string | undefined {
   return readTrimmed(env, ZCODE_CLOUD_DATA_DIR_ENV);
+}
+
+/**
+ * 入口分派的模式读取（04 §2.1、W5 §3.1）：单一入口 `entry-http.ts` 必须在**加载服务图
+ * 之前**知道运行模式，用法与口径同 `readCloudDataDirFromEnv`。
+ *
+ * 三态而非布尔：`mode: "local"`（含未设置/空值，既有默认语义）走本地行为，`mode: "cloud"`
+ * 走云入口启动事务，③ 其它取值返回 `invalid` 由调用方 fail-closed 退出——非法值**不能**静默
+ * 当 local，那正是 W5 §5 禁止的「隐式切 local」。与 `readCloudEntryConfig` 共用同一键常量与
+ * 同一取值域，不引入第二份字面量（完整校验仍在那里）。
+ */
+export function readZCodeServerModeFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): { readonly mode: ZCodeServerMode } | { readonly invalid: string } {
+  const declared = readTrimmed(env, ZCODE_SERVER_MODE_ENV);
+  if (declared === "cloud") {
+    return { mode: "cloud" };
+  }
+  if (declared === undefined || declared === "local") {
+    return { mode: "local" };
+  }
+  return { invalid: declared };
 }

@@ -3,6 +3,10 @@ import { useStartPlanRecommendation } from "@/hooks/useStartPlanRecommendation.j
 import type { SessionCreateSource } from "@zcode/shared";
 import { reportSessionCreate } from "@/lib/sessionCreateTelemetry.js";
 import { getLocalTtftObserver } from "@/v4/telemetry/localTtftObserver.js";
+import { Button } from "@/components/ui/button.js";
+import { Spinner } from "@/components/ui/spinner.js";
+import { classifySubscribeError } from "@/v4/subscribeErrorPresentation.js";
+import { useCloudTaskStop } from "@/hooks/cloud/useCloudTaskStop.js";
 /* oxlint-disable eslint(max-lines) -- SessionPane 是单 pane 竖切的命令编排收口（订阅/发送/停止/fork/edit/retry/queue/slash 全集），与旧 ChatView 同粒度；HEAD 已超限（693 行计数），拆散命令组会打散 dispatchCommand/snapshotRef 的闭包纪律。 */
 import { useIsOfficeMode } from "@/hooks/useInterfaceMode.js";
 import {
@@ -20,6 +24,7 @@ import {
   BUILTIN_MODEL_PROVIDER_IDS,
   buildCustomSupplierKey,
   TID_CHAT_EMPTY,
+  TID_V4_RETRY_SUBSCRIBE,
   TID_V4_SESSION_PANE,
   testId,
   ZCODE_AGENT_PROVIDER,
@@ -2282,6 +2287,52 @@ export function SessionPane({
   // Cloud 工作区（specs/cloud-agent 04 §3.4.1、11 §9）例外：云 draft **禁止 runtime 预热**，
   // 没有 session 就是没有 session——用预热会话当附件宿主会绕开「task-owned 上传」边界。
   const cloudComposerSubmit = useCloudComposerSubmit(workspaceIdentity);
+  // 云任务停止（2026-10-08 巡检修订 P1）：v4-stop 按云工作区分流到控制面 stop 端点。
+  const cloudTaskStop = useCloudTaskStop(workspaceIdentity);
+
+  // ── 云输入的 pending optimistic overlay（2026-10-08 巡检修订 P2）──
+  //
+  // 实测缺陷：发送 202 后 composer 清空，但 runtime 投影的 userInput 行要等 run
+  // ready + 订阅建立才出现，首条消息在时间线里「不可见」直到刷新。AGENTS：Renderer
+  // 只保留未提交草稿与 pending optimistic overlay——这里按 commandId 关联权威投影，
+  // 不造第二份事实：投影出现同 commandId 的 queue/userInput 行即退场；run 到终态
+  // 也收口（outbox 事实由恢复路径呈现，不是本 overlay 的职责）。
+  const [pendingCloudInputs, setPendingCloudInputs] = useState<
+    readonly { commandId: string; text: string; issuedAt: number }[]
+  >([]);
+  const appendPendingCloudInput = useCallback((entry: { commandId: string; text: string }) => {
+    setPendingCloudInputs((current) => [...current, { ...entry, issuedAt: Date.now() }]);
+  }, []);
+  useEffect(() => {
+    if (pendingCloudInputs.length === 0) {
+      return;
+    }
+    // 权威投影接管：queue item 或 userInput 行带同 sourceCommandId。
+    const acknowledged = new Set<string>();
+    for (const item of snapshot?.queue.items ?? []) {
+      acknowledged.add(item.sourceCommandId);
+    }
+    for (const row of snapshot?.rows.window ?? []) {
+      if (row.kind === "userInput" && row.sourceCommandId) {
+        acknowledged.add(row.sourceCommandId);
+      }
+    }
+    // run 终态：未接管的 overlay 不再等待（输入交付事实由控制面/恢复路径呈现）。
+    const runStatus = cloudComposerSubmit.activeRunStatus;
+    const runTerminal =
+      runStatus === "stopped" || runStatus === "failed" || runStatus === "expired";
+    const remaining = runTerminal
+      ? []
+      : pendingCloudInputs.filter((entry) => !acknowledged.has(entry.commandId));
+    if (remaining.length !== pendingCloudInputs.length) {
+      setPendingCloudInputs(remaining);
+    }
+  }, [
+    cloudComposerSubmit.activeRunStatus,
+    pendingCloudInputs,
+    snapshot?.queue.items,
+    snapshot?.rows.window,
+  ]);
   const isCloudWorkspace = cloudComposerSubmit.enabled;
   const { binding: prewarmBinding } = useDraftSessionPrewarm({
     enabled: sessionId === null && draftAgentStartupAllowed && !isCloudWorkspace,
@@ -2975,13 +3026,16 @@ export function SessionPane({
       // 「同 commandId 不重复」失去依据。非云工作区完全不受影响。
       if (cloudComposerSubmit.enabled) {
         try {
-          const result = await cloudComposerSubmit.send(text);
-          if (result === "sent") {
+          const outcome = await cloudComposerSubmit.send(text);
+          if (outcome.status === "sent") {
             setSendSubmissionError(null);
+            // 202 ≠ runtime 已准入（03 §6.2）：optimistic 呈现用户消息（pending overlay，
+            // 按 commandId 关联权威投影），首发等待环境期间消息不再「不可见」。
+            appendPendingCloudInput({ commandId: outcome.commandId, text });
             focusTimelineToLatest();
             return "sent";
           }
-          if (result === "unknown") {
+          if (outcome.status === "unknown") {
             // 结果不明：保留正文并提示待对账，绝不显示成功（03 §5）。
             setSendSubmissionError({
               code: "CLOUD_INPUT_UNKNOWN",
@@ -3044,7 +3098,14 @@ export function SessionPane({
         throw error;
       }
     },
-    [cloudComposerSubmit, dispatchSendText, focusTimelineToLatest, intl, sessionId],
+    [
+      appendPendingCloudInput,
+      cloudComposerSubmit,
+      dispatchSendText,
+      focusTimelineToLatest,
+      intl,
+      sessionId,
+    ],
   );
 
   const handleComposerDraftStateChange = useCallback(
@@ -3593,6 +3654,25 @@ export function SessionPane({
   // 误停排障需要区分按钮与 Esc；普通 info 在生产禁用，必须走生命周期日志。
   const handleStop = useCallback(
     (source: "button" | "escape") => {
+      // 云任务工作区（2026-10-08 巡检修订 P1）：停止走控制面独立端点
+      // （POST /api/cloud/tasks/:taskId/stop，03 §6），agent command 通道不承载云任务
+      // 生命周期——继续 dispatch `stop` 只会零请求零状态变化。判定不依赖
+      // snapshot.control.canStop（那是 CLI runtime 的执行面事实，与服务端 run 状态
+      // 是两套所有者）；服务端按 run 状态裁决并幂等。
+      if (cloudTaskStop.enabled) {
+        logger.lifecycle.info("[v4-pane] 云任务 stop 请求发出", { source, sessionId });
+        void cloudTaskStop.stopTask().then((outcome) => {
+          if (outcome.ok) return;
+          logger.lifecycle.warn(`[v4-pane] 云任务 stop 失败: ${outcome.reason ?? ""}`);
+          toast(
+            intl.formatMessage(
+              { id: "cloud.run.stopFailed" },
+              { reason: outcome.reason ?? "unknown" },
+            ),
+          );
+        });
+        return;
+      }
       const current = snapshotRef.current;
       if (!sessionId || !current?.control.canStop) {
         logger.lifecycle.info("[v4-pane] stop 命令被跳过（无可停执行）", {
@@ -3617,7 +3697,7 @@ export function SessionPane({
         logger.lifecycle.warn(`[v4-pane] stop 失败: ${String(error)}`);
       });
     },
-    [dispatchCommand, sessionId],
+    [cloudTaskStop, dispatchCommand, intl, sessionId],
   );
 
   const handlePauseGoal = useCallback(() => {
@@ -3719,10 +3799,17 @@ export function SessionPane({
 
   // subscribe ACK 会先把 store 置 live，initial snapshot 稍后才到；只看
   // status 会在无投影窗口提前启用编辑器。正式 session 必须等首个 snapshot 才可输入。
-  const connecting = sessionId !== null && (state.status === "connecting" || snapshot === null);
+  // 2026-10-08 巡检修订（P2）：composer 的连接期禁用只看「是否持有投影」——
+  // 重连但已持有回放快照时不禁用（历史仍在展示、云输入走 HTTP 独立通道），避免
+  // 「Choose model」无解释灰掉；首连无快照仍禁用。
+  const composerConnectionDisabled = sessionId !== null && snapshot === null;
   const queueEditActiveForCurrentComposer =
     queueEditOperation?.sessionId === sessionId && queueEditOperation.workspaceKey === workspaceKey;
   const errored = sessionId !== null && state.status === "error";
+  // 订阅失败但已持有回放快照（2026-10-08 巡检修订，P2）：Reconnect 重连期间不清空时间线，
+  // 历史继续可见，错误降级为时间线上方的提示条（含重连入口）；只有从未拿到过投影时才
+  // 整面替换成错误面板。
+  const retainsReplayedSnapshot = errored && snapshot !== null;
   useSessionSubscriptionErrorTelemetry({
     supervisor: conversationTelemetry,
     sessionId,
@@ -4432,7 +4519,9 @@ export function SessionPane({
       onExternalTextInsertApplied={handleExternalTextInsertApplied}
       autoFocusEnabled={focused}
       disabled={
-        connecting ||
+        // 重连但已持有回放快照时不禁用 composer（含模型选择器）：历史仍在展示，
+        // 云输入也走 HTTP 独立通道，禁用只会表现成「Choose model」无解释灰掉。
+        composerConnectionDisabled ||
         draftRuntimeRebuilding ||
         queueEditActiveForCurrentComposer ||
         quotaBanner.state.blocksSubmit
@@ -4537,6 +4626,32 @@ export function SessionPane({
     )
   ) : (
     <>
+      {/* 云输入 pending optimistic overlay（2026-10-08 巡检修订 P2）：渲染在
+          composer dock 顶部——按对话气泡样式呈现已 202 的用户消息，等待权威投影
+          接管（同 commandId 的 queue/userInput 行出现即退场）。 */}
+      {isCloudWorkspace && pendingCloudInputs.length > 0 ? (
+        <div
+          data-testid="cloud-pending-inputs"
+          className="flex shrink-0 flex-col items-end gap-1.5 px-4 pb-1"
+        >
+          {pendingCloudInputs.map((entry) => (
+            <div
+              key={entry.commandId}
+              data-testid="cloud-pending-input"
+              data-command-id={entry.commandId}
+              className="flex max-w-[min(48rem,90%)] flex-col items-end gap-1 rounded-2xl rounded-br-md bg-brand/10 px-3 py-2 text-ui-base text-foreground"
+            >
+              <p className="min-w-0 whitespace-pre-wrap break-words text-left [overflow-wrap:anywhere]">
+                {entry.text}
+              </p>
+              <span className="flex items-center gap-1 text-ui-xs text-foreground-subtle">
+                <Spinner aria-hidden="true" className="size-3 animate-spin" />
+                {intl.formatMessage({ id: "cloud.run.pendingInputHint" })}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {quotaBanner.state.visible &&
       !quotaBanner.dismissed &&
       (!projectedComposerError || quotaBanner.takesOverError || quotaBanner.state.blocksSubmit) ? (
@@ -4762,7 +4877,40 @@ export function SessionPane({
           </div>
         ) : null}
 
-        {errored ? (
+        {/* 重连提示条（2026-10-08 巡检修订，P2）：订阅断开/重连中但已持有回放快照时，
+            历史继续展示，这里只放一条不遮挡时间线的状态提示；重连入口保留既有 testid，
+            e2e/巡检仍可定位。结构化校验错误按分类给文案，原始串不进对话区。 */}
+        {sessionId !== null && snapshot !== null && state.status !== "live" ? (
+          <div
+            role={state.status === "error" ? "alert" : "status"}
+            data-testid="v4-subscribe-reconnect-strip"
+            data-subscribe-status={state.status}
+            className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-surface px-4 py-1.5 text-ui-sm text-foreground-subtle"
+          >
+            <span className="min-w-0 flex-1 truncate">
+              {state.status === "error"
+                ? intl.formatMessage({
+                    id:
+                      classifySubscribeError(state.lastError).kind === "structured-validation"
+                        ? "cloud.run.error.validationRejected"
+                        : "cloud.run.liveReconnectFailed",
+                  })
+                : intl.formatMessage({ id: "cloud.run.liveReconnecting" })}
+            </span>
+            {state.status === "error" ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                data-testid={TID_V4_RETRY_SUBSCRIBE}
+                onClick={handleRetrySubscribe}
+              >
+                {intl.formatMessage({ id: "workspaceSidebar.reconnect" })}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+        {errored && !retainsReplayedSnapshot ? (
           <SessionSubscriptionErrorPanel
             error={state.lastError ?? intl.formatMessage({ id: "chat.error.connectionLost" })}
             sessionId={sessionId}

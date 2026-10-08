@@ -67,6 +67,7 @@ function testSecrets(): CloudDeploymentSecrets {
     principalId: PRINCIPAL,
     describe: () => ({
       principalId: PRINCIPAL,
+      authMode: "token",
       authToken: "configured",
       credentialSecret: "absent",
       gitHubApp: "absent",
@@ -83,6 +84,7 @@ function hostServices(): ServiceCollection {
 function baseConfig(dataDir: string): CloudEntryConfig {
   return {
     mode: "cloud",
+    authMode: "token",
     publicOrigin: "http://127.0.0.1:1",
     listenPort: 0,
     dataDir,

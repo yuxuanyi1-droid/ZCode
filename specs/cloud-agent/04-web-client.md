@@ -28,7 +28,18 @@
 | 手机 Desktop 远控  | 已配对 Desktop Host attachment | 复用现有运行时及 `web-remote-replayable`，不另起 Agent/Host/CloudTask  |
 | 本机 `zcode --web` | 原本机工作区                   | 明确选择本机服务，不作为公网云入口                                     |
 
-模式由部署/客户端显式配置。URL 缺少 `remote`、网络失败或 identity 解析失败不能自动切回本机。Cloud 的“禁本机”必须落到**路由边界**：云服务端确实运行 host 本体（含本机执行域），但云任务与浏览器执行请求只能路由到沙箱 attachment，部署机 host 执行域不构成 fallback（03 §2）；关闭“打开文件夹”只是呈现层。
+模式由**服务端**决定，客户端在启动时向同源地址探测（见 §2.1）。URL 缺少 `remote`、网络失败或 identity 解析失败不能自动切回本机。Cloud 的“禁本机”必须落到**路由边界**：云服务端确实运行 host 本体（含本机执行域），但云任务与浏览器执行请求只能路由到沙箱 attachment，部署机 host 执行域不构成 fallback（03 §2）；关闭“打开文件夹”只是呈现层。
+
+### 2.1 模式判定服务端驱动（2026-10-07 修订）
+
+决议：**客户端不再显式判定 cloud 模式**。同一个 Web 产物（编译、启动、使用均同一条路径）在启动时探测服务端模式，模式是服务端事实而非部署期/bundle 期声明。
+
+- 探测：`GET /api/cloud/capabilities`，**同源、不带凭据**（不带 `token`，不带 cookie 之外的自报模式）。这是启动阶段唯一的模式来源。
+- 结果映射：`200` 且 `mode=cloud` → 云客户端（云壳）；`401/403` → 云客户端 + 凭据门（服务端明确要求凭据）；`200` 且 `mode=local` → 原有本地 Web 路径，`?remote=` 语义不变；其余（404、5xx、网络失败、非契约响应体）→ **错误屏（可重试）**。
+- 作废条款（2026-10-07）：`?mode=`、构建期 `VITE_ZCODE_CLOUD_MODE`/`VITE_ZCODE_SERVER_MODE`、`VITE_ZCODE_CLOUD_ORIGIN` 声明 origin，以及由此产生的 `mode-invalid` / `origin-mismatch` 失败类。origin 不再是构建期契约：所有同源地址在运行时由 `window.location.origin` 拼装（03 §7.1「同源」本身已足够，不需要构建期重复声明）。
+- **fail-closed 精神保留且加强**：任何不确定（不可达、404、非法/未知响应体、协议版本不支持）都停在错误屏，**绝不回落 local**——这正是原「缺 remote、网络失败、identity 解析失败不得自动切回本机」的反 fallback 要求；且它不再依赖客户端自报，服务端没回答就无法进入任何模式。
+- 本地模式也必须回答该端点（无鉴权，`mode=local`，providers/features 为空集、`protocolVersion` 与云分支同源，见 [W5](./modules/W5-cloud-entry.md) §4）。否则探测无法区分「本地」与「不可达」，只能把本地部署误判成错误屏。
+- `?task=` 主路由、`?token=` 凭据通道保留：`?token=` 仍在探测被拒（401/403）后的凭据门里发起一次同源握手（12 §5），不在探测阶段携带。
 
 Desktop 本地和 Cloud 登录、service accessor、tab/cache 命名空间隔离，不导入本地路径作云 IO。原 Desktop SSH 由窗口连接注册表管理，保持原语义。Docker/WSL 远程目标按 06 移除；宿主 WSL、本地开发、手机桌面远控保留。云侧不再有 SSH attachment 与 Desktop 云入口（2026-10-06 决议，见 00 §11⑥：云客户端只有 Web）。最终 Desktop 本地模式产品去留见总览待定决策。
 
@@ -99,7 +110,7 @@ ready 使用 Cloud task RPC facade → 当前 attachment → 沙箱原 zcode-ser
 1. 新建任务先以 creationKey 创建持久 draft，不创建沙箱/session；未收到 Task 时不伪造已创建。
 2. 原输入框 contextHeader 展示基础分支/provider/受控模板及模型/模式。启动配置保存到唯一服务端 draftStartConfig，正文按稳定 Task scope 本地持久；配置并发冲突保留编辑。
 3. 发送前持久完整 submit attempt，随后依03提交 start/revision。失败保留正文；unknown 恢复原 key，不能重新组装 payload 或自动换 key。
-4. 202 后显示“已提交，等待环境”，ready 后后台投递固定 firstInputCommandId。浏览器只 attach，不 autoSend，receipt 不冒充 runtime ACK。
+4. 202 后显示“已提交，等待环境”，ready 后后台投递固定 firstInputCommandId。浏览器只 attach，不 autoSend，receipt 不冒充 runtime ACK。202/重开成功后客户端启动**有界 run 观察**（2026-10-08 修订）：只静默刷新唯一详情投影，2s 间隔、60s 上限，run 可见且非 provisioning 或进入终态即停，切换任务/组件卸载即停；不引入第二份状态副本。
 5. 客户端退出/刷新不撤销 accepted 工作；刷新先恢复 unknown attempt，并查询已提交正文、receipt、Task/Run/历史，而不只重新拉元数据。
 6. receipt 只清本次正文版本，等待期间新编辑不受迟到响应影响。ready 后继续走同一 durable input port，不能直发绕过控制面。
 
@@ -128,6 +139,35 @@ ready 使用 Cloud task RPC facade → 当前 attachment → 沙箱原 zcode-ser
 有效活动为 `idle` / `running` / `awaiting-input`；缺少可靠runtime事实时为 `unknown`，保留last-known并标过期，不猜idle。与Task/Run状态独立，无 `Task.connected`、`Task.running`。浏览器打开、心跳和终端输出不等于运行活动；等待审批/问题有明确入口，不能被闲置停止静默抹掉。
 
 stopRequested 是优先于 Run 状态的持久门控：收到受理后显示“正在停止”，禁止新输入、审批/写操作及新 Run；迟到 ready 不重新开放。可操作 actions 来自控制面/runtime 能力投影，但服务端仍独立验证。stopped 只表明环境终止，是否已保存必须另外显示 checkpoint/dataAtRisk。
+
+2026-10-08 修订（run 终态可见性与归档接线实测缺陷）：
+
+- 任务面板（工作区主区横幅）按详情投影呈现 run 状态：`provisioning`/run 未出现 → 进行中提示；`failed`/`stopped`/`expired` → 终止标题 + `activeRun.lastError`（shared 契约驼峰字段）或 `endReason`，不再让失败静默成「没反应」。
+- 重开入口只对服务端 actions 投影含 `reopen` 的任务给出；resume 模式**按持久事实自动选择**（`latestCheckpoint.state === "saved"` → checkpoint，否则 restart-from-base）并向用户说明依据（08 §9 分支两侧显式声明），不提供与服务端事实冲突的二选一。
+- 归档入口统一走控制面独立端点 `POST /tasks/:id/archive`（useCloudTask → port.archiveTask）：Header「归档任务」菜单对云任务工作区分流到该端点（不得落本机 zcodeTaskService），侧栏任务行提供同路径入口；可用性按 actions 投影门控，服务端拒绝的错误信封必须以既有反馈组件（toast）呈现，不得吞掉。归档成功后任务退出侧栏活动列表（云模式无本地归档视图）。
+
+2026-10-08 修订（无头巡检驱动：云壳层交互缺陷）：
+
+- **drag region 桌面限定**：`[app-region:drag]` 只在桌面端（Electron 窗口）渲染；侧栏顶部占位与 WorkspaceHeader 的 drag 容器在 Web/云 Web 保留布局高度但不渲染 drag region（浏览器中它只是悬在顶栏交互区之上的实体层，命中测试会吞掉按钮点击）。云入口的顶栏「New task」按钮始终可见（窄视口侧栏会被自动收起，顶栏按钮不能沿用「侧栏可见即隐藏」的桌面互斥规则）。
+- **侧栏已归档分区**：控制面列表里的 archived 任务不再被直接滤掉——项目任务列表下新增「已归档」可折叠分区（默认收起，头部显示数量），行内提供恢复入口（`POST /tasks/:id/restore` 独立端点，与归档对称分派）。恢复成功后任务回到活动列表；归档不再是死胡同。
+- **archived 只读呈现**：已归档任务详情在工作区主区呈现只读横幅（说明已归档 + 恢复入口），composer 按 `useCloudTaskWorkspaceStatus` 置为只读——不再出现「假可写、Send 静默无请求」。云任务 Header 标题回落控制面投影（云任务不在本机 CLI 任务索引，本地 meta 恒为空）。
+- **云入口移动端抽屉**：窄视口（<md）侧栏被 conversation 自动收起后，提供汉堡触发器 + 遮罩抽屉（复用同一份侧栏 DOM，不复制第二份组件与订阅），覆盖任务列表/新建入口；只作用于云入口，桌面与本地 Web 布局语义不变。
+- **主路由任务不存在**：`?task=<合法 UUID>` 但控制面返回 `not_found` 时，与非法 task id 一致地渲染整页错误屏（reason=`task-not-found`，恢复动作 open-home/reload），不静默回落欢迎页；错误屏同时卸载工作区树，收敛多个订阅方各自重发的 404 详情请求。判定按结构化错误码（控制器新增 `taskDetailErrorCode` 投影），不解析文案。
+- **错误文案用户可读**：任务动作（归档/恢复）失败 toast 的 reason 经 shared 错误码目录映射成 i18n 文案（`cloud.errors.*`），未映射码回落原始码展示；侧栏归档入口与 Header 菜单对齐按 actions 投影预禁用（有缓存详情而投影不含 `archive` 时禁用并说明原因）；入口错误屏文案去掉内部语义（如「链接不会退化成…」），诊断行标注「诊断信息」前缀。
+
+2026-10-08 修订（无头复检驱动：云壳层收尾缺陷，第三批）：
+
+- **抽屉跨回宽屏恢复停靠（P2）**：云 Web 宽视口没有任何再展开侧栏的入口（桌面靠标题栏按钮，云 Web 抽屉触发器 `md:hidden`），窄视口自动收起后跨回宽屏（≥md）若保持收起，`--workspace-sidebar-panel-width` 恒为 0px 且须刷新解锁。跨断点（narrow→wide 的 media change）时自动收起抽屉并恢复停靠侧栏：宽度取收起记忆值，无效/缺失回退默认宽，恢复宽度永不为 0（`resolveCloudMobileSidebarDockedRestorePlan` 纯函数，node:test 覆盖）；挂载即宽屏不触发恢复（保留用户静态宽屏下的收起选择）；非云入口不受影响。
+- **composer 运行中保留 Stop（P3）**：运行中 composer 有草稿时发送位切换成「Queue message」的旧状态机让 Stop 完全退场——手机端无 Esc 键，写下草稿后无法停止。修订为：运行中 + 有草稿 → 发送（入队）按钮旁并置 Stop（同一按钮形状与 testid，`v4-stop`）；运行中 + 空草稿 → Stop 独占发送位（旧语义不变，桌面布局零变化）。决策收口 `resolveComposerSubmitControls` 纯函数（node:test 覆盖），云任务停止沿用既有 `useCloudTaskStop` 分流（不经 agent command 通道）。
+
+2026-10-08 修订（无头巡检驱动：会话链路缺陷，第二批）：
+
+- **workspace 落定前不绑定会话（P1）**：runtime 会话绑定（pane 订阅 `conversation/<runtimeSessionId>`）要求 `activeRun.runtimeSessionId` 与 `activeRun.workspacePath` **同时落定**——路径未落定时按「无会话」渲染等待态，不得用 pane scope 的空串路径发起 `subscribeConversationV4`（02 §2 不变量 1：身份与路径同时传递，空串路径被 runtime zod 以 `workspace.workspacePath` too_small 拒绝）。控制器在详情投影刷新时把落定的路径同步进云任务 tab（按 `cloudTaskId` 匹配、不抢激活），pane scope 因此始终携带真实 checkout 路径。
+- **订阅错误不进对话正文（P1）**：订阅失败的错误呈现分类化——结构化校验错误（zod issues JSON / `Invalid params`）给专门文案，原始串收进可展开的次要细节区；任何 `lastError` 都不得作为对话正文渲染。
+- **stop 接线（P1）**：云任务工作区的 v4-stop 分流到控制面独立端点 `POST /tasks/:id/stop`（useCloudTask 生命周期分派），不经 agent command 通道；stop 受理后 run 进入 `draining`，任务面板横幅呈现「正在停止」（含保存/收尾进度语义），不再只有 composer 的 Working 计时。force-stop 入口按 actions 投影（含 `force-stop` 成员）给出，请求体携带 `lossAcknowledgement:true + expectedRevision + operationId`（shared `forceStopCloudTaskRequestSchema`）并带丢失确认对话框；普通 stop 失败不得自动升级（08 §8.2）。
+- **optimistic 用户消息（P2）**：发送 202 后按 commandId 登记 pending optimistic overlay（用户消息气泡 + 「等待环境」提示）；权威投影出现同 commandId 的 queue/userInput 行即退场，run 终态也收口。overlay 是 pending 呈现，不是第二份会话事实。
+- **重连保留历史（P2）**：订阅断开/重连中但已持有回放快照时不清空时间线——错误降级为时间线上方提示条（含重连入口），只有从未取得投影时才整面错误面板；composer（含模型选择器）不因重连中整体禁用（云输入走 HTTP 独立通道，目录已加载时选择器状态保持）。
+- **first-run 引导（P2）**：云模式下引导判定叠加账号域事实——账号已有任务/项目即不触发 first-run 引导（record 服务按 deviceMid 记录，浏览器「首跑」与账号事实可能脱节）；record 服务不可用时关闭引导回落 settings 的「跳过」保守默认（仅当从未作答），保证关闭持久。
 
 ### 3.4 输入层次与多端
 
@@ -167,15 +207,15 @@ submit attempt 在 HTTP 前持久冻结完整请求/commandId、正文版本和�
 
 ## 4. 服务与客户端落点（planned）
 
-| 落点                                            | 职责/边界                                                                                                                                      |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/shared` 公共契约                      | Cloud metadata、input投影、route tuple、错误/能力、runtime schema；不依赖 server/UI                                                            |
-| `packages/client/src/cloud/`（planned）         | HTTP/事件/attachment client，显式 origin，幂等/取消；SDK公开入口导出                                                                           |
-| `packages/ui/src/hooks/` cloud hooks（planned） | 查询/提交/绑定/取消订阅；组件只经 hooks/service accessor；含 JSX 用 `.tsx`                                                                     |
-| `packages/ui/src/store/` cloud投影（planned）   | 快照/revision/cursor、选择、optimistic；只缓存，不写业务事实或再建 admitted 队列                                                               |
-| `packages/web/src/main.tsx`                     | mode、origin、OAuth/分享公共路由、启动错误；云模式的 `/ws` 就是 host 本体服务通道（同源、lite-token），不得回落开发机/本机 workspace bootstrap |
-| `packages/ui/src/Root.tsx` 和sidebar            | 复用 shell/chat/tool/file/Git；按 service scope 适配导航                                                                                       |
-| `packages/server/src/cloud/`（planned）         | cloud 编排叠加层：API、投递/attachment owner；装配在 host 本体服务图上（`createLocalServices` + `/ws`，决议⑧），不恢复旧 src                   |
+| 落点                                            | 职责/边界                                                                                                                                                  |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/shared` 公共契约                      | Cloud metadata、input投影、route tuple、错误/能力、runtime schema；不依赖 server/UI                                                                        |
+| `packages/client/src/cloud/`（planned）         | HTTP/事件/attachment client，显式 origin，幂等/取消；SDK公开入口导出                                                                                       |
+| `packages/ui/src/hooks/` cloud hooks（planned） | 查询/提交/绑定/取消订阅；组件只经 hooks/service accessor；含 JSX 用 `.tsx`                                                                                 |
+| `packages/ui/src/store/` cloud投影（planned）   | 快照/revision/cursor、选择、optimistic；只缓存，不写业务事实或再建 admitted 队列                                                                           |
+| `packages/web/src/main.tsx`                     | 启动探测得出模式（§2.1）、OAuth/分享公共路由、启动错误；云模式的 `/ws` 就是 host 本体服务通道（同源、lite-token），不得回落开发机/本机 workspace bootstrap |
+| `packages/ui/src/Root.tsx` 和sidebar            | 复用 shell/chat/tool/file/Git；按 service scope 适配导航                                                                                                   |
+| `packages/server/src/cloud/`（planned）         | cloud 编排叠加层：API、投递/attachment owner；装配在 host 本体服务图上（`createLocalServices` + `/ws`，决议⑧），不恢复旧 src                               |
 
 准确 service interface/文件名在 architecture context 阶段确定。UI 不直接导入 server 实现、不调 Repo、不直接调用 `window.zcode`。原生能力经 `IPlatformService`，平台差异注入。
 
@@ -226,19 +266,19 @@ metadata SSE带entity revision，重连全量拉列表对账，不作为对话�
 
 schema/权限/并发/错误以03/08/09为准，不另造 `/v1/sessions` 链路。
 
-| 动作                  | 接口族/最低契约                                                                                                      |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| repo/base选择         | `/api/cloud/repositories`、branches子资源；账号权限、分页cursor、撤权                                                |
-| Project列表/增删      | `/api/cloud/projects`；幂等；删除活跃项目必须处理run                                                                 |
-| 启动能力              | `GET /api/cloud/capabilities`；mode、协议、provider/客户端能力，不含secret                                           |
-| Task创建/列表/详情    | `/api/cloud/tasks`、project tasks；Task/Run/活动分离、revision/账号域                                                |
-| 修改标题/草稿启动配置 | `PATCH /api/cloud/tasks/:taskId`；revision，配置仅draft可写，不任意赋值status/路径                                   |
-| 首发送/补充           | `POST /api/cloud/tasks/:taskId/inputs`；成功前持久，draft首发送可建run、ready继续复用run                             |
-| input查询/取消        | `GET /api/cloud/tasks/:taskId/inputs/:commandId`、`POST .../:commandId/cancel`；同receipt对账，admitted取消走runtime |
-| 显式重开              | `POST /api/cloud/tasks/:taskId/reopen`；新run；旧uncertain input不跨run replay                                       |
-| 停止/完成/归档        | `POST /api/cloud/tasks/:taskId/stop`、`/complete`、`/archive`；revision、tuple、状态门控；归档不走PATCH status       |
-| metadata/历史/input   | snapshot/events/input子资源；cursor/revision、恢复对账                                                               |
-| 工作区                | `/ws/cloud/tasks/:taskId`；认证受限proxy、当前tuple，cloud统一可回放；原continuous分开                               |
+| 动作                  | 接口族/最低契约                                                                                                                                               |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| repo/base选择         | `/api/cloud/repositories`、branches子资源；账号权限、分页cursor、撤权                                                                                         |
+| Project列表/增删      | `/api/cloud/projects`；幂等；删除活跃项目必须处理run                                                                                                          |
+| 启动能力              | `GET /api/cloud/capabilities`（启动探测的唯一来源，§2.1）；云模式返回 mode、协议、provider/客户端能力，不含secret；本地模式无鉴权返回 `mode=local` 与空能力集 |
+| Task创建/列表/详情    | `/api/cloud/tasks`、project tasks；Task/Run/活动分离、revision/账号域                                                                                         |
+| 修改标题/草稿启动配置 | `PATCH /api/cloud/tasks/:taskId`；revision，配置仅draft可写，不任意赋值status/路径                                                                            |
+| 首发送/补充           | `POST /api/cloud/tasks/:taskId/inputs`；成功前持久，draft首发送可建run、ready继续复用run                                                                      |
+| input查询/取消        | `GET /api/cloud/tasks/:taskId/inputs/:commandId`、`POST .../:commandId/cancel`；同receipt对账，admitted取消走runtime                                          |
+| 显式重开              | `POST /api/cloud/tasks/:taskId/reopen`；新run；旧uncertain input不跨run replay                                                                                |
+| 停止/完成/归档        | `POST /api/cloud/tasks/:taskId/stop`、`/complete`、`/archive`；revision、tuple、状态门控；归档不走PATCH status                                                |
+| metadata/历史/input   | snapshot/events/input子资源；cursor/revision、恢复对账                                                                                                        |
+| 工作区                | `/ws/cloud/tasks/:taskId`；认证受限proxy、当前tuple，cloud统一可回放；原continuous分开                                                                        |
 
 错误code区分未配置、认证失效、撤权、quota、provider不可用、stale run、checkpoint失败；UI不解析异常文字。
 
@@ -259,31 +299,32 @@ schema/权限/并发/错误以03/08/09为准，不另造 `/v1/sessions` 链路�
 | M6Android（已移除）       | 不适用：2026-10-06 决议移除，见00 §11⑥                                                                  |
 | M7多账号/公网上线/webhook | 条件性：单用户模型下不在路线图（00 §11⑤）                                                               |
 
-显式mode控制新入口；bundle回退遵守API兼容窗口，不删除持久input/Task。本机入口不能作cloud回退路径。
+模式由服务端探测得出（§2.1），无客户端开关；bundle回退遵守API兼容窗口，不删除持久input/Task。本机入口不能作cloud回退路径，探测不确定也不得回落本机。
 
 ## 9. 验收计划（全部planned）
 
 每例留UI+HTTP/事件+owner/runtime证据；通过故障注入/受控ACK验证时序，不依赖固定sleep。
 
-| ID   | Setup / Action                                                             | Assertions                                                                                          |
-| ---- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| W-01 | 两浏览器添加同repo                                                         | 一个Project；换设备一致；列表无沙箱连接                                                             |
-| W-02 | 未装App/未配置/撤权/>100repo                                               | 状态区分、权限过滤、分页可达                                                                        |
-| W-03 | 新建draft不发送                                                            | 有Task，无run，provider零创建                                                                       |
-| W-04 | 首输入202后关页面，另一设备看                                              | CLI仍admit一次；prompt持久；无autoSend                                                              |
-| W-05 | POST成功响应丢失，同key重试                                                | input/Task/run不重复；HTTP与CLI ACK区分                                                             |
-| W-06 | 同repo两个任务，不同provider/同path                                        | identity不同；消息/缓存/未读/file/Git/input/PR隔离                                                  |
-| W-07 | 切Task/重开换provider，迟到旧事件/响应                                     | identity稳定、新tuple；旧run终态不复活；旧事件拒绝                                                  |
-| W-08 | running/awaiting-input断网恢复                                             | 不凭断网变failed；正确回放；审批先对账                                                              |
-| W-09 | 持久input后CLI ACK前重启控制面                                             | query同commandId，不重复执行                                                                        |
-| W-10 | 保存失败/终止延迟/重复停止                                                 | 真实错误；未确认终止不称释放；不丢工作                                                              |
-| W-11 | cloud请求本机path/ws/file/terminal、unknown identity                       | 服务端拒绝；云任务执行目标只到沙箱 attachment，不落到部署机 host 执行域（host 进程本身按决议⑧存在） |
-| W-12 | （已移除）原 SSH 指纹/凭据用例随云 SSH attachment 移除                     | 不适用（2026-10-06 决议，见00 §11⑥）                                                                |
-| W-13 | Desktop本地/SSH、已配对手机远控                                            | window Host、owner/lease、连续/回放保留，无CloudTask                                                |
-| W-14 | 手机键盘/抽屉/横屏/中英/两主题                                             | 创建/输入/审批/停止/PR可达，无溢出/丢输入                                                           |
-| W-15 | completed/failed/archived、深链/返回                                       | 产品/run状态分离，门控一致，不隐式新run                                                             |
-| W-16 | 对照原 Web UI，打开云首页、创建项目/任务并进入任务                         | 原首页输入框、侧栏、App 工作区与设置交互保留；只增项目/任务管理，不进入独立 Cloud 页面              |
-| W-17 | 当前 attachment ready，操作模型/模式、工具/审批、文件/Git/终端与 Side Pane | 既有组件与操作路径可用，服务目标是当前 Run；无固定模型/模式文案或永久不可用 stub                    |
-| W-18 | draft/断连/重开、打开设置再返回，桌面与移动视口对照                        | 能力按真实生命周期门控；Task 草稿稳定；设置覆盖和返回沿用原行为，不重建另一套工作台                 |
+| ID   | Setup / Action                                                                | Assertions                                                                                                                                                                   |
+| ---- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W-01 | 两浏览器添加同repo                                                            | 一个Project；换设备一致；列表无沙箱连接                                                                                                                                      |
+| W-02 | 未装App/未配置/撤权/>100repo                                                  | 状态区分、权限过滤、分页可达                                                                                                                                                 |
+| W-03 | 新建draft不发送                                                               | 有Task，无run，provider零创建                                                                                                                                                |
+| W-04 | 首输入202后关页面，另一设备看                                                 | CLI仍admit一次；prompt持久；无autoSend                                                                                                                                       |
+| W-05 | POST成功响应丢失，同key重试                                                   | input/Task/run不重复；HTTP与CLI ACK区分                                                                                                                                      |
+| W-06 | 同repo两个任务，不同provider/同path                                           | identity不同；消息/缓存/未读/file/Git/input/PR隔离                                                                                                                           |
+| W-07 | 切Task/重开换provider，迟到旧事件/响应                                        | identity稳定、新tuple；旧run终态不复活；旧事件拒绝                                                                                                                           |
+| W-08 | running/awaiting-input断网恢复                                                | 不凭断网变failed；正确回放；审批先对账                                                                                                                                       |
+| W-09 | 持久input后CLI ACK前重启控制面                                                | query同commandId，不重复执行                                                                                                                                                 |
+| W-10 | 保存失败/终止延迟/重复停止                                                    | 真实错误；未确认终止不称释放；不丢工作                                                                                                                                       |
+| W-11 | cloud请求本机path/ws/file/terminal、unknown identity                          | 服务端拒绝；云任务执行目标只到沙箱 attachment，不落到部署机 host 执行域（host 进程本身按决议⑧存在）                                                                          |
+| W-12 | （已移除）原 SSH 指纹/凭据用例随云 SSH attachment 移除                        | 不适用（2026-10-06 决议，见00 §11⑥）                                                                                                                                         |
+| W-13 | Desktop本地/SSH、已配对手机远控                                               | window Host、owner/lease、连续/回放保留，无CloudTask                                                                                                                         |
+| W-14 | 手机键盘/抽屉/横屏/中英/两主题                                                | 创建/输入/审批/停止/PR可达，无溢出/丢输入                                                                                                                                    |
+| W-15 | completed/failed/archived、深链/返回                                          | 产品/run状态分离，门控一致，不隐式新run                                                                                                                                      |
+| W-16 | 对照原 Web UI，打开云首页、创建项目/任务并进入任务                            | 原首页输入框、侧栏、App 工作区与设置交互保留；只增项目/任务管理，不进入独立 Cloud 页面                                                                                       |
+| W-17 | 当前 attachment ready，操作模型/模式、工具/审批、文件/Git/终端与 Side Pane    | 既有组件与操作路径可用，服务目标是当前 Run；无固定模型/模式文案或永久不可用 stub                                                                                             |
+| W-18 | draft/断连/重开、打开设置再返回，桌面与移动视口对照                           | 能力按真实生命周期门控；Task 草稿稳定；设置覆盖和返回沿用原行为，不重建另一套工作台                                                                                          |
+| W-19 | 启动探测（2026-10-07 §2.1）：云入口、本地入口、需凭据入口、无该端点地址各一次 | 云→云壳；本地→原本地 Web（`?remote=` 不变）；401/403→云壳+凭据门；404/不可达/非法响应→错误屏（可重试）且**不进入任何本地工作区**。URL 无 `?mode=`、无构建期 env 也不影响结果 |
 
 当前根有 `pnpm typecheck`、`pnpm lint`、`pnpm architecture:check --changed`、`pnpm fmt:check`；Web/UI scripts没有统一单测/E2E入口。M0登记真实runner/fixtures/启动命令后再建立交互E2E，不能写现有覆盖。实现时实际执行typecheck、lint和适用架构检查，分别报告已跑、未跑、环境受限结果。

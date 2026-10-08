@@ -48,6 +48,8 @@ export function useReopenCloudTask(options?: UseReopenCloudTaskOptions): UseReop
   const principalId = context?.selection.principalId ?? null;
   const scopeKey = context?.selection.draftScope?.key ?? null;
   const taskId = context?.selection.taskId ?? null;
+  // 重开成功后新 run 从 provisioning 起步：请求控制器启动有界 run 观察（04 §3.2.4）。
+  const beginTaskRunWatch = context?.beginTaskRunWatch ?? null;
   const [lastOutcome, setLastOutcome] = useState<CloudSubmissionOutcome | null>(null);
 
   const deps = useMemo<CloudTaskSubmissionDeps | null>(() => {
@@ -87,14 +89,18 @@ export function useReopenCloudTask(options?: UseReopenCloudTaskOptions): UseReop
         deps,
       });
       setLastOutcome(outcome);
-      if (outcome.kind === "persisted" && principalId) {
+      if (outcome.kind === "persisted") {
         // reopen 响应里的 detail 才是新 run 的权威投影；这里刷新一次，不自行拼 run。
         const detail: TaskDetailResponse = await controlPlane.getTask(taskId);
-        useCloudTasksStore.getState().applyTaskDetail(principalId, detail, Date.now());
+        if (principalId !== null) {
+          useCloudTasksStore.getState().applyTaskDetail(principalId, detail, Date.now());
+        }
+        // 新 run 通常还在 provisioning：继续有界观察直到 ready/终态（04 §3.2.4）。
+        beginTaskRunWatch?.();
       }
       return outcome;
     },
-    [controlPlane, deps, principalId, scopeKey, taskId],
+    [beginTaskRunWatch, controlPlane, deps, principalId, scopeKey, taskId],
   );
 
   return useMemo(() => ({ lastOutcome, reopenTask }), [lastOutcome, reopenTask]);

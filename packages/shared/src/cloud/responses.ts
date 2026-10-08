@@ -26,7 +26,7 @@ import { commandAckSchema } from "../zcode-protocol-v4/command.js";
 import { cloudProjectionKindSchema } from "./bridge-protocol.js";
 import { cloudTaskIdSchema, cloudUuidSchema } from "./identity.js";
 import { cloudHistoryCursorSchema, CLOUD_HISTORY_LIMIT_MAX } from "./http-contracts.js";
-import { cloudWireProtocolVersionSchema } from "./endpoints.js";
+import { cloudWireProtocolVersionSchema, CLOUD_WIRE_PROTOCOL_VERSION } from "./endpoints.js";
 
 const nonEmptyString = z.string().trim().min(1);
 const epochMs = z.number().int().nonnegative();
@@ -177,13 +177,19 @@ export const sandboxProviderCapabilitiesSchema = z
     maxLifetimeSeconds: z.number().int().positive().optional(),
     deadlineSource: z.enum(["provider", "estimated"]),
     supportsOutboundWss: z.boolean(),
+    /**
+     * 生效 provider key 是否已配置（01 §4.3 修订 2026-10-08、12 §2 修订）：生效 key =
+     * credential 存储值 ?? env 部署值。布尔投影，不暴露值与来源细节；key 本体
+     * 任何路径不得进响应体（01 §7.1）。
+     */
+    apiKeyConfigured: z.boolean(),
   })
   .strict();
 export type SandboxProviderCapabilities = z.infer<typeof sandboxProviderCapabilitiesSchema>;
 
-export const capabilitiesResponseSchema = z
+export const cloudCapabilitiesResponseSchema = z
   .object({
-    mode: z.enum(["local", "cloud"]),
+    mode: z.literal("cloud"),
     /**
      * 当前主体 id（部署/账号 principal）。
      *
@@ -206,7 +212,60 @@ export const capabilitiesResponseSchema = z
     taskOwnedAttachments: z.boolean(),
   })
   .strict();
+export type CloudCapabilitiesResponse = z.infer<typeof cloudCapabilitiesResponseSchema>;
+
+/**
+ * 本地模式的模式探测响应（04 §2.1，2026-10-07 修订：模式判定服务端驱动）。
+ *
+ * Web 客户端不再有 `?mode=` / 构建期 `VITE_*`，改为启动时用同源
+ * `GET /api/cloud/capabilities` 探测，因此**本地入口也必须无鉴权回答这个端点**：
+ * 否则客户端分不清「本地部署」与「不可达」，只能把本地开发误判成错误屏。
+ *
+ * 本地响应没有主体、没有能力、也没有秘密：`providers`/`features` 是空集，
+ * `taskOwnedAttachments` 恒 false（本地没有 cloud task 上传通道）。`protocolVersion`
+ * 与云分支同源（同一个 `CLOUD_WIRE_PROTOCOL_VERSION`），两个分支都保持 `.strict()`：
+ * 未知字段（含误塞的 principalId）一律拒绝，不用「忽略多余字段」掩盖契约漂移。
+ */
+export const localCapabilitiesResponseSchema = z
+  .object({
+    mode: z.literal("local"),
+    providers: z.array(sandboxProviderCapabilitiesSchema).max(0),
+    features: z.array(nonEmptyString.max(64)).max(0),
+    protocolVersion: cloudWireProtocolVersionSchema,
+    taskOwnedAttachments: z.literal(false),
+  })
+  .strict();
+export type LocalCapabilitiesResponse = z.infer<typeof localCapabilitiesResponseSchema>;
+
+/**
+ * `GET /api/cloud/capabilities` 的响应，按 `mode` 判别联合（04 §2.1）。
+ *
+ * 云分支字段与冻结前完全一致（`principalId` 仍必填）；本地分支是新增的最小面，
+ * 但**保留云分支出现的所有非主体键**（providers/features/protocolVersion/
+ * taskOwnedAttachments），使消费方（W8/W9）在模式判定前读这些字段仍是合法访问，
+ * 不因分支差异被迫在编译期处处加分支。
+ */
+export const capabilitiesResponseSchema = z.discriminatedUnion("mode", [
+  cloudCapabilitiesResponseSchema,
+  localCapabilitiesResponseSchema,
+]);
 export type CapabilitiesResponse = z.infer<typeof capabilitiesResponseSchema>;
+
+/**
+ * 本地探测响应的唯一构造点（本地入口 `http.ts` 与测试共用）。
+ *
+ * 字段固定为空集/恒 false，协议版本只取 `CLOUD_WIRE_PROTOCOL_VERSION` 这一份来源，
+ * 不在入口里写字面量，避免本地与云声明出两个版本号。
+ */
+export function createLocalCapabilitiesResponse(): LocalCapabilitiesResponse {
+  return {
+    mode: "local",
+    providers: [],
+    features: [],
+    protocolVersion: CLOUD_WIRE_PROTOCOL_VERSION,
+    taskOwnedAttachments: false,
+  };
+}
 
 // ── 生命周期动作响应（03 §6）──
 

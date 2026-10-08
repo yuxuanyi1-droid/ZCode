@@ -26,6 +26,16 @@ import { useSubmitCloudInput } from "./useSubmitCloudInput.js";
 
 export type CloudComposerSubmitResult = "sent" | "blocked" | "unknown";
 
+/**
+ * 一次云发送的结构化结果（2026-10-08 巡检修订 P2）：
+ * - `status === "sent"`（HTTP 202）携带 `commandId`，pane 用它登记 optimistic
+ *   pending overlay（AGENTS：pending optimistic overlay，不造第二份事实）；
+ * - blocked/unknown 保留正文（composer 原语义），不需要 overlay。
+ */
+export type CloudComposerSendOutcome =
+  | { readonly status: "sent"; readonly commandId: string }
+  | { readonly status: "blocked" | "unknown" };
+
 export interface UseCloudComposerSubmitResult {
   /** 当前工作区是否是云任务；false 时调用方必须走原有本机发送路径。 */
   readonly enabled: boolean;
@@ -33,7 +43,9 @@ export interface UseCloudComposerSubmitResult {
   readonly errorDetail: string | null;
   /** 未决 attempt 数：>0 表示有命令等待对账，UI 应提示而不是放行重复提交。 */
   readonly pendingAttemptCount: number;
-  send(prompt: string): Promise<CloudComposerSubmitResult>;
+  /** 当前 activeRun 状态（无 run 为 null）：pending overlay 的终态收口依据。 */
+  readonly activeRunStatus: string | null;
+  send(prompt: string): Promise<CloudComposerSendOutcome>;
 }
 
 export function useCloudComposerSubmit(
@@ -57,13 +69,13 @@ export function useCloudComposerSubmit(
   const enabled = taskId !== null;
 
   const send = useCallback(
-    async (prompt: string): Promise<CloudComposerSubmitResult> => {
+    async (prompt: string): Promise<CloudComposerSendOutcome> => {
       if (!enabled) {
         throw new Error("cloud composer submit used outside a cloud task workspace");
       }
       if (!task) {
         // 还没有任务投影：不猜状态，更不能落到本机发送路径。
-        return "blocked";
+        return { status: "blocked" };
       }
 
       if (task.status === "draft") {
@@ -71,25 +83,31 @@ export function useCloudComposerSubmit(
         if (!start) {
           // start 必须携带与已保存 draftStartConfig 一致的选择（03 §6 start 行）：
           // 没有保存过配置就不允许首发，而不是拿默认值凑一个。
-          return "blocked";
+          return { status: "blocked" };
         }
         const outcome = await submit.submitFirstInput({
           prompt,
           start,
           expectedTaskRevision: task.revision,
         });
-        return mapOutcome(outcome.kind);
+        if (outcome.kind === "persisted") {
+          return { status: "sent", commandId: outcome.commandId };
+        }
+        return { status: mapOutcome(outcome.kind) };
       }
 
       if (!activeRun) {
         // 没有活跃 run 时只能显式 reopen，不能借 append 自动起一个（08 §9）。
-        return "blocked";
+        return { status: "blocked" };
       }
       const outcome = await submit.submitAppendInput({
         prompt,
         expectedRunGeneration: activeRun.runGeneration,
       });
-      return mapOutcome(outcome.kind);
+      if (outcome.kind === "persisted") {
+        return { status: "sent", commandId: outcome.commandId };
+      }
+      return { status: mapOutcome(outcome.kind) };
     },
     [activeRun, enabled, submit, task],
   );
@@ -107,18 +125,15 @@ export function useCloudComposerSubmit(
       enabled,
       errorDetail,
       pendingAttemptCount: submit.pendingAttempts.length,
+      activeRunStatus: activeRun?.status ?? null,
       send,
     }),
-    [enabled, errorDetail, send, submit.pendingAttempts.length],
+    [activeRun?.status, enabled, errorDetail, send, submit.pendingAttempts.length],
   );
 }
 
-function mapOutcome(
-  kind: "persisted" | "not-frozen" | "unknown" | "rejected",
-): CloudComposerSubmitResult {
+function mapOutcome(kind: "not-frozen" | "unknown" | "rejected"): "blocked" | "unknown" {
   switch (kind) {
-    case "persisted":
-      return "sent";
     case "unknown":
       return "unknown";
     case "not-frozen":

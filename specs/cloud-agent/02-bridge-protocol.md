@@ -42,7 +42,7 @@
 
 必须保持：
 
-1. 仓库任务 `workspaceIdentity = cloud-task:<taskId>`，由服务端生成并固定，不含 provider、workspacePath、runId 或 connectionEpoch。`workspacePath` 用于 IO、cwd、Git 和显示；两者同时传递，禁止从身份猜执行路径。
+1. 仓库任务 `workspaceIdentity = cloud-task:<taskId>`，由服务端生成并固定，不含 provider、workspacePath、runId 或 connectionEpoch。`workspacePath` 用于 IO、cwd、Git 和显示；两者同时传递，禁止从身份猜执行路径。2026-10-08 修订（无头巡检，P1）：「同时传递」意味着 workspace 未就绪时**不得下发空串路径**——客户端在 run 的 checkout 路径落定前不发起携带 workspace 描述的 v4 订阅（等路径落定再 ready，见 04 §3.3 修订）；协议侧维持 `zcodeWorkspaceRefSchema.workspacePath` 的非空约束不变，不做 optional 化。
 2. （2026-10-06 决议移除）：原 SSH 云 attachment 条款作废，见 07 §11；`remote:ssh` 身份仅用于 Desktop 本机/远控，云 Task 只落在独占沙箱。
 3. 每个新 Run 在 Task 内事务性递增 `runGeneration`；同 Run 每次 attachment 接管递增 `connectionEpoch`。旧 generation 不得修改新 Run；旧 epoch 不得继续投递或发布在线状态。
 4. 网络断连只改变 connectivity，不把 Run 自动变为 expired/failed，也不授权另建 Run。终态必须有 provider 终止确认、受控停止结果或执行节点退出事实。

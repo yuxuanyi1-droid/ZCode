@@ -1,3 +1,5 @@
+/* oxlint-disable eslint(max-lines) -- 引导三步表单 + 键盘/预填/云模式判定集中在此；
+   2026-10-08 云模式账号事实与关闭持久化接线后超过 400 行，进一步拆分收益低。 */
 import { useOnboardingTelemetry } from "@/onboarding/useOnboardingTelemetry.js";
 import { OnboardingHeader } from "@/onboarding/OnboardingHeader.js";
 import { OccupationOnboardingVisual } from "@/onboarding/OccupationOnboardingVisual.js";
@@ -18,6 +20,10 @@ import { useZCodeStore } from "@/store/StoreProvider.js";
 import type { InterfaceMode } from "@/lib/interfaceMode.js";
 import { logger } from "@/logger.js";
 import { DesktopWindowControls } from "@/DesktopWindowControls.js";
+import {
+  persistOnboardingDismissalFallback,
+  useCloudAccountHasActivity,
+} from "@/onboarding/useCloudOnboardingFacts.js";
 import type { OnboardingRecordEntry } from "@zcode/shared";
 
 /** 追加本地引导记录（userId 由 host 补全）；channel 缺失挂起时 5 秒超时按写失败处理。 */
@@ -74,10 +80,13 @@ export function OccupationOnboarding({
   const [error, setError] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const loadDeviceMid = useCallback(() => platform.getDeviceId(), [platform]);
+  // 云模式账号域事实（2026-10-08 巡检修订 P2）：已有任务/项目即不是 first-run。
+  const cloudAccountHasActivity = useCloudAccountHasActivity();
   const [needsOnboarding, markOnboarded] = useOnboardingTrigger({
     onboardingRecord,
     userId,
     hasStoredOccupation: Boolean(settings?.onboardingOccupation),
+    cloudAccountHasActivity,
     loadDeviceMid,
     update,
   });
@@ -105,8 +114,21 @@ export function OccupationOnboarding({
       void onboardingRecord.dismissOnboarding(platform.getDeviceId()).catch((cause: unknown) => {
         logger.warn("[occupation-onboarding] 写入关闭决策失败", { error: String(cause) });
       });
+      return;
     }
-  }, [captureEnd, intl, onboardingRecord, platform, setRequested]);
+    persistOnboardingDismissalFallback({
+      update,
+      hasStoredOccupation: Boolean(settings?.onboardingOccupation),
+    });
+  }, [
+    captureEnd,
+    intl,
+    onboardingRecord,
+    platform,
+    setRequested,
+    settings?.onboardingOccupation,
+    update,
+  ]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (

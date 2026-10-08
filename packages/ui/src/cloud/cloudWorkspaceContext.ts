@@ -6,7 +6,7 @@
  * Task/Run 权威状态——原 `Root` / `App` / `WorkspaceShellLayout` 仍是唯一渲染路径。
  */
 import { createContext, useContext } from "react";
-import type { CapabilitiesResponse, TaskDetailResponse } from "@zcode/shared";
+import type { CapabilitiesResponse, CloudErrorCode, TaskDetailResponse } from "@zcode/shared";
 import type { IServiceAccessor } from "@zcode/services";
 import type { CloudAttachmentAccessor } from "./cloudBrowserServices.js";
 import type { CloudControlPlanePort } from "./cloudPorts.js";
@@ -44,11 +44,24 @@ export interface CloudWorkspaceContextValue {
   readonly taskDetail: TaskDetailResponse | null;
   readonly taskDetailStatus: CloudCapabilitiesStatus;
   readonly taskDetailError: string | null;
+  /**
+   * 详情加载失败的结构化错误码（2026-10-08 巡检修订）：`not_found` 表示主路由任务
+   * 不存在，入口据此渲染 task-not-found 错误屏而不是回落欢迎页；文案投影见
+   * `taskDetailError`。
+   */
+  readonly taskDetailErrorCode: CloudErrorCode | null;
 
   selectProject(projectId: string | null): void;
   selectTask(taskId: string | null): void;
   reloadCapabilities(): Promise<void>;
   reloadTask(taskId?: string): Promise<void>;
+  /**
+   * 请求对**当前选中的任务**启动一次有界 run 观察（04 §3.2.4「202 后等待环境」）：
+   * 首发/reopen 被控制面持久接收（202/200）后调用，控制器按 2s 间隔、60s 上限
+   * 静默刷新详情，run 可见且非 provisioning、或到达上限、或切换任务时停止。
+   * 非云模式下 context 为 null，调用方直接跳过。
+   */
+  beginTaskRunWatch(): void;
 }
 
 const CloudWorkspaceContext = createContext<CloudWorkspaceContextValue | null>(null);

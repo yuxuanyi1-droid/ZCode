@@ -24,6 +24,7 @@ import type { AttachmentRegistry } from "../app/attachments/registry.js";
 import type { LoopSchedulerPort } from "../app/ports/loopSchedulerPort.js";
 import type { OperationOutboxPort } from "../app/ports/operationOutboxPort.js";
 import type { SandboxDriverRegistryPort } from "../app/ports/sandboxDriverRegistryPort.js";
+import type { SandboxRuntimeSettingsPort } from "../app/ports/sandboxRuntimeSettingsPort.js";
 import type { StoragePort, StorageReadiness } from "../app/ports/storagePort.js";
 import type { ArtifactRead, ExecutionProjectionRead } from "../app/ports/projectionPort.js";
 import type { InteractionDecisionRepo } from "../app/ports/inputPort.js";
@@ -71,6 +72,11 @@ export interface CloudControlPlaneContext {
   };
   readonly secrets: CloudDeploymentSecrets;
   readonly drivers: SandboxDriverRegistryPort;
+  /**
+   * 沙箱运行时账号设置端口（01 §4.3/§5.1 修订 2026-10-08）：capabilities 投影的
+   * `apiKeyConfigured` 与 env 核实上限来源；未注入时 providers 投影按 env 装配校验处理。
+   */
+  readonly sandboxRuntimeSettings?: SandboxRuntimeSettingsPort;
   /** worker 入口绝对路径（W2 `createCloudStorage({workerEntryPath})`）。 */
   readonly storageWorkerEntryPath: string;
   /** 定时器：入口创建并注入；控制面不得自建。 */
@@ -194,6 +200,9 @@ export async function assembleCloudControlPlane(
       operations: storage.operations,
       github: github.port,
       drivers: context.drivers,
+      ...(context.sandboxRuntimeSettings
+        ? { sandboxRuntimeSettings: context.sandboxRuntimeSettings }
+        : {}),
       attachments: bridge.port,
       runtimeCommands: bridge.runtimeCommands,
       clock,

@@ -10,15 +10,32 @@ import { logger } from "@/logger.js";
  *
  * 返回 [needsOnboarding, markOnboarded]：null 表示异步判定中；markOnboarded 在引导
  * 保存成功后把判定置 false（记录已落盘，本次会话不再触发）。
+ *
+ * 2026-10-08 巡检修订（P2，云模式）：`cloudAccountHasActivity` 为 true 时**账号域已有
+ * 事实**（已有任务/项目），first-run 引导不再弹出——云模式下 record 服务按 deviceMid
+ * 记录，浏览器侧的「首跑」判定与账号实际使用事实可能脱节（实测：已有任务+run 的账号
+ * reload 后仍弹 Welcome，关闭也不持久）。账号事实优先于本地记录判定。
  */
 export function useOnboardingTrigger(options: {
   onboardingRecord: ReturnType<typeof useOnboardingRecordService>;
   userId: string | null;
   hasStoredOccupation: boolean;
+  /**
+   * 云模式下「账号已有使用事实」（已有任务/项目）；非云模式传 null（判定不变）。
+   * true 时直接跳过 first-run 引导，不等待 record RPC。
+   */
+  cloudAccountHasActivity: boolean | null;
   loadDeviceMid: () => string;
   update: (patch: Partial<AppSettings>) => Promise<void>;
 }): [boolean | null, () => void] {
-  const { onboardingRecord, userId, hasStoredOccupation, loadDeviceMid, update } = options;
+  const {
+    onboardingRecord,
+    userId,
+    hasStoredOccupation,
+    cloudAccountHasActivity,
+    loadDeviceMid,
+    update,
+  } = options;
   // null 表示异步判定中（按本地使用记录判断是否触发）。
   const [needsOnboarding, setNeedsOnboarding] = useState<boolean | null>(null);
   // 记录上一次判定时的 userId，回填只在身份实际变化后发生（见下方回填条件）。
@@ -26,6 +43,12 @@ export function useOnboardingTrigger(options: {
   useEffect(() => {
     let cancelled = false;
     const fallback = () => !hasStoredOccupation;
+    // 云模式账号域已有使用事实（已有任务/项目）：first-run 引导不弹（2026-10-08 巡检
+    // 修订 P2）。这里同步短路，不进入 record RPC 等待窗口，杜绝判定期间的闪弹。
+    if (cloudAccountHasActivity === true) {
+      setNeedsOnboarding(false);
+      return;
+    }
     // 服务不可用（旧测试 double / 未注册的 host）时退回旧 settings 判定，行为不回退。
     if (!onboardingRecord) {
       setNeedsOnboarding(fallback());
@@ -84,6 +107,6 @@ export function useOnboardingTrigger(options: {
     };
     // 不依赖 hasStoredOccupation（对应 settings?.onboardingOccupation）：保存成功会改写该字段，
     // 若记录写入失败会在当场重开引导；记录缺失导致的再次触发按约定留给下次启动。
-  }, [onboardingRecord, userId, loadDeviceMid]);
+  }, [cloudAccountHasActivity, onboardingRecord, userId, loadDeviceMid]);
   return [needsOnboarding, () => setNeedsOnboarding(false)];
 }

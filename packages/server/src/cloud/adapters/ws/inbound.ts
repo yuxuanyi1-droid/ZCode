@@ -88,6 +88,19 @@ export async function routeInboundFrame(
       });
       return;
     case "projection.batch": {
+      // 帧级代际围栏（02 §2 不变量 3）：批次携带的 attachment epoch 必须与本 socket
+      // 绑定的 connectionEpoch 一致。不匹配即丢弃——不 ingest、不回 ack（旧代际批次的
+      // 记录仍留在执行节点 WAL，由接管后的 snapshot/续传恢复，02 §7.1）。
+      // 修复依据（2026-10-07 review P0）：ingest 服务层的围栏依赖 registry session 存在，
+      // 无认证 attachment 时会被旁路；帧级校验保证旧代际/未绑定批次在任何情况下都进不了库。
+      if (frame.connectionEpoch !== connection.connectionEpoch) {
+        logger.warn(undefined, "stale projection batch frame", {
+          runId: connection.runId,
+          frameEpoch: frame.connectionEpoch,
+          connectionEpoch: connection.connectionEpoch,
+        });
+        return;
+      }
       const result = await context.services().projections.ingest.ingestProjectionBatch(frame);
       // 只有事务提交成功才回 ack；只覆盖连续持久水位，不跳缺口（02 §7.2）。
       for (const cursor of result.cursors) {

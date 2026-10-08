@@ -13,6 +13,7 @@ import {
   newUuid,
   openTestStorage,
   removeTestRoot,
+  seedActiveRun,
   seedDraftTask,
   type SeededTask,
   type TestStorageHandle,
@@ -208,6 +209,105 @@ test("投递状态迁移只允许前进，同状态幂等", async () => {
       }),
       null,
       "不存在的决定不得伪造状态",
+    );
+  });
+});
+
+test("决定取消路径 delivering→uncertain→cancelled 在真实存储可达（2026-10-07 P1 回归）", async () => {
+  await withTask(async ({ handle, seeded }) => {
+    const run = await seedActiveRun(handle.storage, seeded);
+    const interactionId = newUuid();
+    const payloadJson = JSON.stringify({ optionId: "allow-once" });
+    await handle.storage.interactions.recordDecision({
+      taskId: seeded.taskId,
+      interactionId,
+      deliveryCommandId: newUuid(),
+      runId: run.runId,
+      runGeneration: 1,
+      kind: "permission",
+      payloadJson,
+      payloadHash: hashOf(payloadJson),
+    });
+
+    // 回归背景（specs/cloud-agent/02 §6.3、CP-14）：storage 侧曾有第二份边表且缺少
+    // uncertain→cancelled，使 app 层 cancelDecision（app/commands/interactions.ts）
+    // 的「先对账落 uncertain，再撤销投递意图」在真实存储上被 CAS 拒绝后静默丢弃。
+    // 这里按 app 层实际序列走真实 repo（含 SQL 事务与 CAS）。
+    const delivering = await handle.storage.interactions.setDecisionDeliveryStatus({
+      taskId: seeded.taskId,
+      interactionId,
+      status: "delivering",
+    });
+    assert.equal(delivering?.deliveryStatus, "delivering");
+
+    const uncertain = await handle.storage.interactions.setDecisionDeliveryStatus({
+      taskId: seeded.taskId,
+      interactionId,
+      status: "uncertain",
+      lastError: "reconciled-no-runtime-record",
+    });
+    assert.equal(
+      uncertain?.deliveryStatus,
+      "uncertain",
+      "delivering → uncertain：已发出但结果未知，只能对账（02 §6.3）",
+    );
+
+    const cancelled = await handle.storage.interactions.setDecisionDeliveryStatus({
+      taskId: seeded.taskId,
+      interactionId,
+      status: "cancelled",
+    });
+    assert.equal(
+      cancelled?.deliveryStatus,
+      "cancelled",
+      "uncertain → cancelled：对账确认 runtime 无该命令事实后撤销投递意图（02 §6.3）",
+    );
+
+    // cancelled 是终态：迟到的 ACK 不得改写已落地的结论。
+    assert.equal(
+      await handle.storage.interactions.setDecisionDeliveryStatus({
+        taskId: seeded.taskId,
+        interactionId,
+        status: "admitted",
+      }),
+      null,
+      "cancelled 后不得再落 admitted",
+    );
+  });
+});
+
+test("决定的 delivering 仍不可直接撤销：必须先对账落 uncertain（02 §6.3）", async () => {
+  await withTask(async ({ handle, seeded }) => {
+    const interactionId = newUuid();
+    const payloadJson = JSON.stringify({ optionId: "allow-always" });
+    await handle.storage.interactions.recordDecision({
+      taskId: seeded.taskId,
+      interactionId,
+      deliveryCommandId: newUuid(),
+      kind: "permission",
+      payloadJson,
+      payloadHash: hashOf(payloadJson),
+    });
+    await handle.storage.interactions.setDecisionDeliveryStatus({
+      taskId: seeded.taskId,
+      interactionId,
+      status: "delivering",
+    });
+    // 统一边表后仍需保留这条约束：已投递未对账时取消不能直接落 cancelled，否则会
+    // 谎称 runtime 已停止（02 §6.3；app 层 cancelDecision 先写 uncertain 再写 cancelled）。
+    assert.equal(
+      await handle.storage.interactions.setDecisionDeliveryStatus({
+        taskId: seeded.taskId,
+        interactionId,
+        status: "cancelled",
+      }),
+      null,
+      "delivering → cancelled 越级被拒",
+    );
+    assert.equal(
+      (await handle.storage.interactions.getDecision(seeded.taskId, interactionId))?.deliveryStatus,
+      "delivering",
+      "被拒的写入不得留下任何状态痕迹",
     );
   });
 });

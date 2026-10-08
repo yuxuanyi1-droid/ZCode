@@ -13,6 +13,7 @@ import type { Hono } from "hono";
 import type { StoragePort, StorageReadiness } from "../app/ports/storagePort.js";
 import type { OperationOutboxPort } from "../app/ports/operationOutboxPort.js";
 import type { SandboxDriverRegistryPort } from "../app/ports/sandboxDriverRegistryPort.js";
+import type { SandboxRuntimeSettingsPort } from "../app/ports/sandboxRuntimeSettingsPort.js";
 import type { SandboxTemplateResolverPort } from "../app/ports/sandboxDriverPort.js";
 import type { CloudGitGrantService } from "../app/gitGrants.js";
 import type { GitGrantStore } from "../app/ports/gitGrantPort.js";
@@ -93,6 +94,11 @@ export interface CloudControlPlaneContext {
   /** 裁剪后的 host 暴露面（账号域），注册路由需要时可用；执行域不在其中。 */
   readonly hostChannelServices: ServiceCollection;
   readonly drivers: SandboxDriverRegistryPort;
+  /**
+   * 沙箱运行时账号设置端口（01 §4.3/§5.1 修订 2026-10-08）：capabilities 投影
+   * `apiKeyConfigured` 与 env 核实上限的来源；host 本体启动后由入口接上服务图。
+   */
+  readonly sandboxRuntimeSettings?: SandboxRuntimeSettingsPort;
   /**
    * 沙箱模板解析（01 §5.1）：镜像引用的唯一部署侧来源；未配置的 provider 返回 null，
    * 由接纳事务按 `unsupported_template` 明确失败，不在 create 期读新默认值。

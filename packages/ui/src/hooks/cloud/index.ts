@@ -6,6 +6,7 @@
  */
 export {
   useCloudComposerSubmit,
+  type CloudComposerSendOutcome,
   type CloudComposerSubmitResult,
   type UseCloudComposerSubmitResult,
 } from "./useCloudComposerSubmit.js";

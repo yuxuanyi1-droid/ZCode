@@ -53,6 +53,16 @@ export interface LiveConnection {
   runGeneration: number;
   connectionEpoch: number;
   runtimeIncarnation: string;
+  /**
+   * hello 凭据校验是否已完成（02 §5.1）。
+   *
+   * 修复依据（2026-10-07 review P0）：此前 socket 在 accept 时即进入连接表并挂
+   * detach/markDisconnected 副作用，而 `/ws/cloud/bridge/*` 在 HTTP 升级层豁免
+   * lite-token——知道 runId 的未鉴权方可占据路由槽、截获 bootstrap.config 并把真实桥
+   * 挤下线。修复后：未完成 hello 的连接不得进入路由表、不得处理任何非 hello 帧、
+   * 关闭也不触发 registry/run 状态副作用。
+   */
+  authenticated: boolean;
 }
 
 export interface CloudBridgeChannel {

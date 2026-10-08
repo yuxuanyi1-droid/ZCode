@@ -502,6 +502,74 @@ test("输入投递状态机只允许前进，acceptanceSeq 在 Task 内唯一递
   });
 });
 
+test("accepted→uncertain→accepted→admitted 在真实存储可达（2026-10-07 P1 回归）", async () => {
+  await withStorage(async ({ storage }) => {
+    const seeded = await seedDraftTask(storage);
+    const accepted = await storage.storage.acceptInput(startRequest(seeded.taskId));
+    if (accepted.status !== "accepted") throw new Error("unreachable");
+    const commandId = accepted.receipt.commandId;
+    const runId = accepted.runId as string;
+
+    // 回归背景（specs/cloud-agent/02 §6.3）：storage 侧曾有第二份边表且边集不一致
+    // （accepted 缺 admitted/uncertain、uncertain 缺 accepted），使 app 层按 domain
+    // 边表写入的合法迁移在真实存储被 CAS 拒绝后静默丢弃。下面三步正是旧边表下走不通
+    // 的边，必须走真实 repo（含 SQL 事务与 CAS）验证。
+    const uncertain = await storage.storage.inputs.markDelivery({
+      taskId: seeded.taskId,
+      commandId,
+      to: "uncertain",
+      lastError: "rpc-timeout",
+      now: TEST_NOW + 2,
+    });
+    assert.equal(
+      uncertain?.deliveryStatus,
+      "uncertain",
+      "accepted → uncertain：RPC timeout/断连不是 rejected，先置待对账（02 §6.3）",
+    );
+
+    const requeued = await storage.storage.inputs.markDelivery({
+      taskId: seeded.taskId,
+      commandId,
+      to: "accepted",
+      lastError: "requeued-after-reconcile",
+      now: TEST_NOW + 3,
+    });
+    assert.equal(
+      requeued?.deliveryStatus,
+      "accepted",
+      "uncertain → accepted：对账确认未到达后退回 accepted，由 dispatcher 用同 commandId 重投",
+    );
+
+    const admitted = await storage.storage.inputs.markDelivery({
+      taskId: seeded.taskId,
+      commandId,
+      to: "admitted",
+      runtimeAck: { commandId, status: "accepted", revisionAtDecision: 1 },
+      runId,
+      now: TEST_NOW + 4,
+    });
+    assert.equal(
+      admitted?.deliveryStatus,
+      "admitted",
+      "accepted → admitted：runtime ACK 快于控制面 delivering 写入时 ACK 仍须落地（02 §6.3）",
+    );
+    assert.equal(admitted?.runtimeAck?.status, "accepted", "ACK 事实随状态一起持久");
+
+    // 终态不再前进：更慢的 ACK / 迟到写入不得覆盖已落地结论。
+    assert.equal(
+      await storage.storage.inputs.markDelivery({
+        taskId: seeded.taskId,
+        commandId,
+        to: "delivering",
+        now: TEST_NOW + 5,
+      }),
+      null,
+      "admitted 是 runtime 裁决事实，后续写入必须被拒",
+    );
+    assert.deepEqual(await storage.storage.inputs.listDeliverable(seeded.taskId), []);
+  });
+});
+
 test("取消只作用于未开始投递的输入，且幂等", async () => {
   await withStorage(async ({ storage }) => {
     const seeded = await seedDraftTask(storage);

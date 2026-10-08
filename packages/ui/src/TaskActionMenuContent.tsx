@@ -22,6 +22,9 @@ export function TaskActionMenuContent({
   disableTaskActions = false,
   disableTaskTargetActions = false,
   disablePinTaskAction = false,
+  /** 单独禁用归档项：云任务的可用性来自服务端 actions 投影（04 §3.3）。 */
+  disableArchiveTaskAction = false,
+  archiveDisabledReason,
   disabledReason,
   hideMobileUnsupportedActions = false,
   Item,
@@ -55,6 +58,8 @@ export function TaskActionMenuContent({
   disableTaskActions?: boolean;
   disableTaskTargetActions?: boolean;
   disablePinTaskAction?: boolean;
+  disableArchiveTaskAction?: boolean;
+  archiveDisabledReason?: string;
   disabledReason?: string;
   hideMobileUnsupportedActions?: boolean;
   Item: React.ComponentType<TaskActionMenuItemProps>;
@@ -102,10 +107,15 @@ export function TaskActionMenuContent({
         {intl.formatMessage({ id: "taskList.rename" })}
       </Item>
       <Item
-        disabled={taskTargetActionsDisabled}
-        title={disabledReason}
+        disabled={taskTargetActionsDisabled || disableArchiveTaskAction}
+        title={
+          disableArchiveTaskAction
+            ? (archiveDisabledReason ?? disabledReason)
+            : (disabledReason ?? undefined)
+        }
+        data-testid="task-menu-archive"
         onSelect={() => {
-          if (!taskTargetActionsDisabled) {
+          if (!taskTargetActionsDisabled && !disableArchiveTaskAction) {
             onArchiveTask();
           }
         }}

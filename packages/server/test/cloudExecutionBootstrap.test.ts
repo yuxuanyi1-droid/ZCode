@@ -39,6 +39,8 @@ import {
 const TASK_ID = "8f14e45f-ceea-467a-9a1e-1f0d3b2a4c51";
 const RUN_ID = "1f14e45f-ceea-467a-9a1e-1f0d3b2a4c52";
 const BASE_SHA = "a".repeat(40);
+/** checkpoint 提交后的本地新 HEAD（与远端旧 HEAD 必须区分开）。 */
+const NEW_SHA = "b".repeat(40);
 
 function configFrame() {
   return {
@@ -233,8 +235,10 @@ test("checkpoint：无变更不建空提交、push 以远端 SHA 为准、operat
   });
 
   // 工作区干净 → committed=false、hadNewCommits=false；push 仍走远端核验。
+  // clean 情形下本地 HEAD 就是待推送内容（上一次已保存的 sha），同一比对规则适用。
   runner.responses = [
     { code: 0, stdout: "", stderr: "" }, // status --porcelain
+    { code: 0, stdout: `${BASE_SHA}\n`, stderr: "" }, // rev-parse --verify HEAD
     { code: 0, stdout: "", stderr: "" }, // push
     { code: 0, stdout: `${BASE_SHA}\trefs/heads/zcode/task-1\n`, stderr: "" }, // ls-remote
   ];
@@ -252,6 +256,13 @@ test("checkpoint：无变更不建空提交、push 以远端 SHA 为准、operat
   assert.equal(saved.hadNewCommits, false, "无变更必须上报 hadNewCommits=false");
   assert.equal(saved.remoteSha, BASE_SHA);
   assert.deepEqual(runner.calls[0]!.argv, ["status", "--porcelain", "--untracked-files=normal"]);
+  assert.deepEqual(runner.calls[1]!.argv, ["rev-parse", "--verify", "HEAD"]);
+  assert.deepEqual(runner.calls[2]!.argv, [
+    "push",
+    "--porcelain",
+    "origin",
+    "zcode/task-1:zcode/task-1",
+  ]);
   assert.ok(
     runner.calls.every(
       (call) => call.argv.includes("push") === false || call.argv.includes("--force") === false,
@@ -280,6 +291,7 @@ test("checkpoint：远端无对应 HEAD 时不报 saved（不伪造保存事实�
     { code: 0, stdout: " M src/a.ts\n", stderr: "" }, // 有变更
     { code: 0, stdout: "", stderr: "" }, // git add
     { code: 0, stdout: "", stderr: "" }, // git commit
+    { code: 0, stdout: `${NEW_SHA}\n`, stderr: "" }, // rev-parse --verify HEAD（本次新提交）
     { code: 1, stdout: "", stderr: "rejected" }, // push 失败
     { code: 0, stdout: "", stderr: "" }, // ls-remote 查不到
   ];
@@ -295,6 +307,127 @@ test("checkpoint：远端无对应 HEAD 时不报 saved（不伪造保存事实�
   assert.notEqual(result.status, "saved");
   assert.equal(result.remoteSha, undefined);
   assert.equal(result.errorCode, "non_fast_forward");
+});
+
+test("checkpoint：push 被拒且远端仍停在上一次 checkpoint 的旧 HEAD 时不报 saved", async () => {
+  // 修复依据（2026-10-07 review P1）：远端存在旧 HEAD 时，旧实现只看 ls-remote 是否命中，
+  // 会把「push 被拒」当成 saved 并放行 stop/terminate，新提交静默丢失（01 §8）。
+  const runner = createGitRunnerFake();
+  const git = createSandboxGit({ runner, grants: createGitGrantFake(), logger: testLogger() });
+  const checkpoint = createCheckpoint({
+    git,
+    quiesce: { quiesce: async () => ({ ok: true as const }), release: async () => undefined },
+    checkout: () => ({ workspacePath: "/workspace/demo", taskBranch: "zcode/task-1" }),
+    logger: testLogger(),
+    clock: { now: () => 0, wait: async () => undefined },
+  });
+  runner.responses = [
+    { code: 0, stdout: " M src/a.ts\n", stderr: "" }, // 有变更
+    { code: 0, stdout: "", stderr: "" }, // git add
+    { code: 0, stdout: "", stderr: "" }, // git commit → 新提交 NEW_SHA
+    { code: 0, stdout: `${NEW_SHA}\n`, stderr: "" }, // rev-parse --verify HEAD
+    { code: 1, stdout: "", stderr: "! [rejected] non-fast-forward" }, // push 被拒
+    {
+      code: 0,
+      stdout: `${BASE_SHA}\trefs/heads/zcode/task-1\n`, // 远端只剩上一次 checkpoint 的旧 HEAD
+      stderr: "",
+    },
+  ];
+  const result = await checkpoint.run({
+    protocolVersion: 1,
+    type: "checkpoint.request",
+    operationId: "5f14e45f-ceea-467a-9a1e-1f0d3b2a4c56",
+    runId: RUN_ID,
+    runGeneration: 1,
+    connectionEpoch: 1,
+    purpose: "stop",
+  });
+  assert.notEqual(result.status, "saved", "远端 HEAD 不是本次待推送 sha，不得标 saved");
+  assert.equal(result.remoteSha, undefined, "不得把旧远端 SHA 当作本次保存事实");
+  assert.equal(result.errorCode, "non_fast_forward");
+  assert.equal(result.hadNewCommits, true);
+});
+
+test("checkpoint：push 成功且远端 sha 等于本地新提交时才报 saved", async () => {
+  const runner = createGitRunnerFake();
+  const git = createSandboxGit({ runner, grants: createGitGrantFake(), logger: testLogger() });
+  const checkpoint = createCheckpoint({
+    git,
+    quiesce: { quiesce: async () => ({ ok: true as const }), release: async () => undefined },
+    checkout: () => ({ workspacePath: "/workspace/demo", taskBranch: "zcode/task-1" }),
+    logger: testLogger(),
+    clock: { now: () => 0, wait: async () => undefined },
+  });
+  runner.responses = [
+    { code: 0, stdout: " M src/a.ts\n", stderr: "" }, // 有变更
+    { code: 0, stdout: "", stderr: "" }, // git add
+    { code: 0, stdout: "", stderr: "" }, // git commit
+    { code: 0, stdout: `${NEW_SHA}\n`, stderr: "" }, // rev-parse --verify HEAD
+    { code: 0, stdout: "* zcode/task-1\n", stderr: "" }, // push 成功
+    { code: 0, stdout: `${NEW_SHA}\trefs/heads/zcode/task-1\n`, stderr: "" }, // ls-remote 对账相等
+  ];
+  const result = await checkpoint.run({
+    protocolVersion: 1,
+    type: "checkpoint.request",
+    operationId: "6f14e45f-ceea-467a-9a1e-1f0d3b2a4c57",
+    runId: RUN_ID,
+    runGeneration: 1,
+    connectionEpoch: 1,
+    purpose: "stop",
+  });
+  assert.equal(result.status, "saved");
+  assert.equal(result.remoteSha, NEW_SHA);
+  assert.equal(result.hadNewCommits, true);
+});
+
+test("checkpoint：push 成功但远端 sha 对不上（外部改写）时归 checkpoint_failed", async () => {
+  const runner = createGitRunnerFake();
+  const git = createSandboxGit({ runner, grants: createGitGrantFake(), logger: testLogger() });
+  const checkpoint = createCheckpoint({
+    git,
+    quiesce: { quiesce: async () => ({ ok: true as const }), release: async () => undefined },
+    checkout: () => ({ workspacePath: "/workspace/demo", taskBranch: "zcode/task-1" }),
+    logger: testLogger(),
+    clock: { now: () => 0, wait: async () => undefined },
+  });
+  runner.responses = [
+    { code: 0, stdout: " M src/a.ts\n", stderr: "" }, // 有变更
+    { code: 0, stdout: "", stderr: "" }, // git add
+    { code: 0, stdout: "", stderr: "" }, // git commit
+    { code: 0, stdout: `${NEW_SHA}\n`, stderr: "" }, // rev-parse --verify HEAD
+    { code: 0, stdout: "= zcode/task-1\n", stderr: "" }, // push 退出 0（结果仍以远端为准）
+    { code: 0, stdout: `${BASE_SHA}\trefs/heads/zcode/task-1\n`, stderr: "" }, // 远端被外部改写
+  ];
+  const result = await checkpoint.run({
+    protocolVersion: 1,
+    type: "checkpoint.request",
+    operationId: "7f14e45f-ceea-467a-9a1e-1f0d3b2a4c58",
+    runId: RUN_ID,
+    runGeneration: 1,
+    connectionEpoch: 1,
+    purpose: "stop",
+  });
+  assert.notEqual(result.status, "saved");
+  assert.equal(result.status, "unknown", "push 成功但对不上远端：按对账处理，不伪装 saved");
+  assert.equal(result.errorCode, "checkpoint_failed");
+  assert.match(result.error ?? "", /remote head mismatch/);
+});
+
+test("sandboxGit：本地 HEAD 不可判读时不发 push、不报 saved（fail closed）", async () => {
+  // 比对基准读不到时不能退回「只看远端是否命中」，否则等于恢复本次修复前的缺陷（01 §8）。
+  const runner = createGitRunnerFake();
+  const git = createSandboxGit({ runner, grants: createGitGrantFake(), logger: testLogger() });
+  runner.responses = [
+    { code: 128, stdout: "HEAD\n", stderr: "fatal: ambiguous argument 'HEAD'" }, // rev-parse 失败
+  ];
+  const pushed = await git.pushAndVerify({ cwd: "/workspace/demo", taskBranch: "zcode/task-1" });
+  assert.equal(pushed.ok, false);
+  assert.equal(pushed.ok === false ? pushed.code : "", "checkpoint_failed");
+  assert.deepEqual(
+    runner.calls.map((call) => call.argv[0]),
+    ["rev-parse"],
+    "读不到本地 HEAD 就不该发 push（不作无对账基准的推送）",
+  );
 });
 
 test("workspace 准备：拒绝越界 path 与 symlink 逃逸", async () => {

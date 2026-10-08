@@ -39,6 +39,7 @@ function testSecrets(): CloudDeploymentSecrets {
     principalId: "deployment-principal",
     describe: () => ({
       principalId: "deployment-principal",
+      authMode: "token",
       authToken: "configured",
       credentialSecret: "absent",
       gitHubApp: "absent",
@@ -84,6 +85,7 @@ async function startHarness(webDir?: string): Promise<{
   const dataDir = await mkdtemp(path.join(tmpdir(), "cloud-host-channel-"));
   const config: CloudEntryConfig = {
     mode: "cloud",
+    authMode: "token",
     publicOrigin: "http://127.0.0.1:0",
     listenPort: 0,
     dataDir,

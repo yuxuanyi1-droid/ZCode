@@ -146,6 +146,7 @@ Daytona 分别定义生命周期、自动停止与 wall-clock TTL，需核实实
 
 - 持久化 hardDeadline、providerDeadline?、deadlineEstimate?、deadlineConfidence 和最近续期 Operation。UI 对估计倒计时明确标注，不把控制面时间当 provider 保证。
 - 可用期取部署预算与 provider 能力较小值；Run 硬上限候选4h是待冻结的产品上限，provider更小时收敛并提示。不得无声换provider或自动新建Run。
+- **修订（2026-10-08，账号设置覆盖部署基线）**：沙箱 provider 秘密与可用期上限支持「账号设置覆盖部署基线」——部署 env（`ZCODE_CLOUD_SANDBOX_MAX_LIFETIME_SECONDS`、`E2B_API_KEY` 等）是**基线与硬上界**；账号设置（设置页，归属账号域，见 [12 §2 修订](./12-account-domain.md)）可覆盖 E2B key 与超时预算：**生效超时 = min(设置值, env 核实上限)**，**生效 key = credential 存储值 ?? env 部署值**。E2B hobby 订阅核实上限为 1 小时（3600 秒）。覆盖只影响**新 create**：进行中 Run 的 recipe（§2 第 5 条）不变，续期仍按生效上限收敛（不放大旧 Run 的已确认期限）。动机（2026-10-08 真实事故）：部署 env 键名拼错（`ZCODE_CLOUD_MAX_LIFETIME_SECONDS` 少写 `SANDBOX`）被静默忽略 → 控制面按默认预算（>1h）请求 E2B create 被 hobby 上限拒绝 → run failed 且 UI 无感知；把预算与 key 搬进设置页后，用户无需重部署即可纠正这类漂移，且 capabilities 会如实透出 env 核实上限（`maxLifetimeSeconds`）与生效 key 是否已配置（`apiKeyConfigured` 布尔，不暴露值与来源细节）。
 - 全局并发上限候选3，M0冻结。provisioning、ready、disconnected、draining，以及终止结果未知的资源都占槽；事务 reserve / release。provider确认资源释放后才释放计费槽，不能靠页面取消或删Task释放。
 - 续期结果未知保持旧的已确认期限并重查。活动节流合并为一次续期，不逐stream chunk调API。
 - 分开识别用户输入、runtime执行、工具执行、有限页面presence；heartbeat、轮询、SSE、日志和协议ACK不算用户活动。Agent常驻进程不等于任务运行。
@@ -164,6 +165,8 @@ Daytona 分别定义生命周期、自动停止与 wall-clock TTL，需核实实
 5. 控制面投递固定firstInputCommandId的createSession(firstInput)，同commandId和query key持久映射。后续输入仍经过durable port；ready不是CLI admission。
 
 本地校验/DB失败不建资源。provider已建而初始化失败持久补偿terminate；结果未知对账不盲重建。输入确定未投递时按03收口为rejected，资源清理未确认仍占额；create成功而写handle前崩溃为必测断点。
+
+实施决议（2026-10-08，账号设置覆盖的解析时点）：create worker 调用 provider 前经 `SandboxRuntimeSettingsPort.readEffectiveSandboxConfig(provider)` 解析生效配置（超时与 key 的收敛公式见 §4.3 修订）。解析发生在 **create 时点**而非启动期固化——账号设置保存后对新 create 立即生效，无需重启部署；进行中 Run 沿用其 recipe 与已确认期限。部署 env 仍是启动期 fail-closed 的装配基线（缺 env 秘密的 provider 照旧拒绝启动，账号设置不解除装配校验）；host 设置/凭据读取失败时回落 env 基线并留 warn，不因设置存储故障阻断 create。
 
 ### 5.2 Readiness 与错误
 

@@ -28,6 +28,7 @@ import type {
   CloudTaskRecord,
   CreateCloudProjectRequest,
   CreateCloudTaskRequest,
+  ForceStopCloudTaskRequest,
   InputReceipt,
   InputRecordPage,
   PatchCloudProjectRequest,
@@ -128,6 +129,16 @@ export interface CloudControlPlanePort {
     options?: CloudControlPlaneRequestOptions,
   ): Promise<TaskDetailResponse>;
   stopTask(taskId: string, options?: CloudControlPlaneRequestOptions): Promise<TaskDetailResponse>;
+  /**
+   * force-stop（03 §6、08 §8.2；2026-10-08 巡检修订 P1）：显式丢失确认的独立端点，
+   * body 必须携带 `lossAcknowledgement: true` + `expectedRevision` + `operationId`
+   * （shared `forceStopCloudTaskRequestSchema`），普通 stop 失败不得自动升级到这里。
+   */
+  forceStopTask(
+    taskId: string,
+    body: ForceStopCloudTaskRequest,
+    options?: CloudControlPlaneRequestOptions,
+  ): Promise<TaskDetailResponse>;
   completeTask(
     taskId: string,
     options?: CloudControlPlaneRequestOptions,

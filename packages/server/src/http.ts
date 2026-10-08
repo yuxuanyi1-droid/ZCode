@@ -22,6 +22,7 @@ import {
 } from "./rpcChannelServer.js";
 import {
   botProviders,
+  createLocalCapabilitiesResponse,
   detectRetiredRemoteTargetKind,
   formatLogPrefix,
   formatZodError,
@@ -110,6 +111,11 @@ export function createHttpServer(
   const hostCapabilities = createHostCapabilityStore();
 
   const authToken = options.authToken?.trim();
+  // 模式探测端点**必须先于** lite-token 中间件注册（Hono 的 `app.use` 只作用于其后注册的
+  // handler），且不得要求凭据：Web 客户端启动时用同源、不带 token 的探测判定模式
+  // （specs/cloud-agent/04 §2.1），本地部署若被 token 门挡住就会被误判成「云入口需要凭据」。
+  // 云入口的同名路径仍由 token 保护（mode=cloud，401 = 客户端应给凭据门），两分支语义不同。
+  app.get("/api/cloud/capabilities", (c) => c.json(createLocalCapabilitiesResponse()));
   if (authToken) {
     app.use("*", createLiteTokenGuard(authToken));
   }

@@ -113,7 +113,9 @@ export async function bootstrapCloudRuntime(
       failure: classifyCloudBootError(error, { tokenProvided: plan.token !== undefined }),
     };
   }
-  const mismatch = classifyCapabilitiesMismatch(capabilities);
+  // 云启动流程要求能力响应确为 cloud（04 §2.1：探测已经把本地分流走；这里再对账一次，
+  // 模式不符按 not-configured 失败，不把本地答案当云能力继续用）。
+  const mismatch = classifyCapabilitiesMismatch(capabilities, { expectedMode: "cloud" });
   if (mismatch) {
     return { ok: false, failure: mismatch };
   }

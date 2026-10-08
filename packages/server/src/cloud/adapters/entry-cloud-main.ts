@@ -1,12 +1,18 @@
 /**
- * 云入口可执行引导（specs/cloud-agent/modules/W5-cloud-entry.md §3/§4）。
+ * 云入口可执行引导（specs/cloud-agent/modules/W5-cloud-entry.md §3/§3.1/§4）。
  *
  * 只做进程级事务：**隔离 HOME** → 读配置 → 启动 → 装信号处理 → 按关闭顺序收尾。业务与技术
  * 细节都在 `entry-cloud-server.ts`（组装）与其下各适配器里，本文件不承载任何规则。
  *
+ * 两个消费者共用这一份事务（2026-10-07 单一入口，W5 §3.1）：
+ * 1) 构建产物 `dist/entry-cloud.js`（运维方直接运行）；
+ * 2) `src/entry-http.ts` 在 `ZCODE_SERVER_MODE=cloud` 时动态 import 本模块——
+ *    分派与隔离放在这里，入口层不复制第二套启动顺序。
+ *
  * 顺序约束（03 §8、`entry-cloud-home.ts`）：HOME 隔离必须发生在**服务图被 import 之前**——
  * `services/paths.ts` 在模块加载时就固化 `HOME`。所以本文件只用轻量静态 import（配置解析 +
- * 隔离助手），`@zcode/services/node` 与 `entry-cloud-server.js` 一律走动态 import。
+ * 隔离助手），`@zcode/services/node` 与 `entry-cloud-server.js` 一律走动态 import；调用方
+ * 也必须动态 import 本模块（静态引入会把整条服务图提前到入口模块求值）。
  *
  * 失败语义（03 §8）：启动失败必须显式退出，不留"半个云入口"进程——没有任何路由或
  * 只跑了一半后台循环的进程比直接退出更危险。

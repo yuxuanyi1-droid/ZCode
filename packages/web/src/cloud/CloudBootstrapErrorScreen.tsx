@@ -1,9 +1,12 @@
 /**
- * 云入口启动失败面（specs/cloud-agent/modules/W9 §3/§5；04 §8「不用白屏或通用报错」）。
+ * 云入口启动失败面（specs/cloud-agent/modules/W9 §3/§5；04 §2.1/§8「不用白屏或通用报错」）。
  *
- * 每个失败原因都有独立的标题、说明与恢复动作（未配置 / 认证失效 / origin 不符 /
- * bundle 不兼容 / 后端不可达各自可操作），并展示结构化诊断（reason/code/traceId/origin）。
+ * 每个失败原因都有独立的标题、说明与恢复动作（未配置/探测端点不回答、认证失效、
+ * bundle 不兼容、后端不可达各自可操作），并展示结构化诊断（reason/code/traceId）。
  * 诊断信息只来自 `CloudBootFailure`：不含 token、prompt 正文或仓库内容（AGENTS 日志规范）。
+ *
+ * 2026-10-07（04 §2.1）：`mode-invalid` 与 `origin-mismatch` 两个失败面随客户端模式声明
+ * 一并作废——模式由服务端探测得出，不再存在「客户端写错模式」或「构建期 origin 不符」。
  */
 import type { CloudBootFailure, CloudBootRecovery } from "./cloudBoot.js";
 
@@ -29,23 +32,7 @@ const RECOVERY_LABELS: Readonly<Record<CloudBootRecovery, { "zh-CN": string; en:
 
 function copyFor(failure: CloudBootFailure, locale: CloudEntryLocale): FailureCopy {
   const zh = locale === "zh-CN";
-  const buildOrigin = failure.detail?.buildOrigin ?? "?";
-  const runtimeOrigin = failure.detail?.runtimeOrigin ?? "?";
   switch (failure.reason) {
-    case "mode-invalid":
-      return {
-        title: zh ? "启动模式无效" : "Invalid start mode",
-        description: zh
-          ? "入口把模式解析成了未知取值。请用 ?mode=cloud 或构建期 VITE_ZCODE_SERVER_MODE=cloud 明确指定，模式不会被静默当成 local。"
-          : "The entry resolved an unknown mode. Specify it explicitly with ?mode=cloud or a VITE_ZCODE_SERVER_MODE=cloud build; mode is never silently treated as local.",
-      };
-    case "origin-mismatch":
-      return {
-        title: zh ? "入口 origin 不一致" : "Entry origin mismatch",
-        description: zh
-          ? `该 Web 产物为 ${buildOrigin} 构建，但当前页面运行在 ${runtimeOrigin}。云入口的 host /ws 与 /api/cloud/* 都是同源的，跨 origin 不会建立连接也不会回落本机。`
-          : `This bundle was built for ${buildOrigin} but the page runs on ${runtimeOrigin}. The cloud entry serves /ws and /api/cloud/* same-origin; a cross-origin page neither connects nor falls back to a local workspace.`,
-      };
     case "remote-unsupported":
       return {
         title: zh ? "云入口不支持桌面远控链接" : "Remote control link is unavailable here",
@@ -57,8 +44,15 @@ function copyFor(failure: CloudBootFailure, locale: CloudEntryLocale): FailureCo
       return {
         title: zh ? "任务链接无效" : "Invalid task link",
         description: zh
-          ? "?task= 不是合法 taskId（cloud task 由控制面生成的 UUID）。链接不会退化成“没有选中任务”。"
-          : "?task= is not a valid cloud task id. The link is not downgraded to “no task selected”.",
+          ? "链接里的任务 ID（?task=）格式不正确，无法打开对应任务。请回到云首页，从项目任务列表重新进入。"
+          : "The task id in the link (?task=) is malformed, so the task cannot be opened. Go back to the cloud home and open the task from the project list.",
+      };
+    case "task-not-found":
+      return {
+        title: zh ? "任务不存在" : "Task not found",
+        description: zh
+          ? "这个任务不存在，或已被删除。它可能属于其他账号，也可能链接已过期。请回到云首页从任务列表重新进入。"
+          : "This task does not exist or has been deleted. It may belong to another account, or the link may be out of date. Go back to the cloud home and reopen it from the task list.",
       };
     case "missing-token":
       return {
@@ -83,10 +77,10 @@ function copyFor(failure: CloudBootFailure, locale: CloudEntryLocale): FailureCo
       };
     case "not-configured":
       return {
-        title: zh ? "该地址不是可用的云入口" : "This address is not a configured cloud entry",
+        title: zh ? "该地址不是可用的入口" : "This address is not a usable entry",
         description: zh
-          ? "能力端点 /api/cloud/capabilities 没有以 cloud 模式返回。请确认部署已按云模式启动，并使用了正确的 origin。"
-          : "/api/cloud/capabilities did not report cloud mode. Verify the deployment was started in cloud mode and that this is the right origin.",
+          ? "模式探测端点 /api/cloud/capabilities 没有按契约回答（404/503 等）。请确认部署已按云或本地模式启动，并使用了正确的地址。"
+          : "/api/cloud/capabilities did not answer per contract (404/503 …). Verify the deployment was started in cloud or local mode and that this is the right address.",
       };
     case "incompatible-bundle":
       return {
@@ -131,6 +125,7 @@ export function CloudBootstrapErrorScreen({
   onRecover,
 }: CloudBootstrapErrorScreenProps) {
   const copy = copyFor(failure, locale);
+  const diagnosticsLabel = locale === "zh-CN" ? "诊断信息" : "Diagnostics";
   const diagnostics = [
     `reason=${failure.reason}`,
     failure.code === undefined ? undefined : `code=${failure.code}`,
@@ -151,7 +146,7 @@ export function CloudBootstrapErrorScreen({
           </div>
           <p className="mt-2 text-ui-xs/relaxed text-foreground-subtle">{copy.description}</p>
           <p className="mt-3 break-all font-mono text-ui-caption text-foreground-subtle">
-            {diagnostics.join(" · ")}
+            {diagnosticsLabel}: {diagnostics.join(" · ")}
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
             {failure.recoveries.map((recovery) => (

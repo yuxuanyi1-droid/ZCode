@@ -1,74 +1,40 @@
 /**
- * 设置页「Cloud 运行时」分组视图（specs/cloud-agent/04 §3.1、09 §2.2、01 §4.1）。
+ * 设置页「Cloud 运行时」分组视图（specs/cloud-agent/04 §3.1、09 §2.2、01 §4.1、
+ * 01 §4.3 修订 2026-10-08、12 §2 修订）。
  *
  * 规则：
  * - GitHub 与 Sandbox 位于**该分组**，不能落进基础设置（04 §3.1）。
  * - 只展示当前主体**可访问的操作**；App/provider 密钥由控制面秘密 owner 保存，
- *   这里既不请求也不回显真实秘密（01 §4.1、09）。
+ *   设置页不请求也不回显真实秘密（01 §4.1、09）。
  * - 两种引导必须与空态区分：`not_configured`（部署未装配）与撤权 / 未安装 App
  *   是不同事实，不能都渲染成「没有仓库」（04 §3.1、CT-02）。
- * - Provider 能力是控制面自述的**只读**投影：不给密钥/配额写入口（01 §4.1）。
+ * - 沙箱分区自 2026-10-08 修订起支持账号设置覆盖（key / 超时预算），见
+ *   `CloudSandboxSettingsSection.tsx`；本文件保留 GitHub 分区与分组外壳。
  *
  * i18n：文案走仓库既有的 `useZCodeIntl()`（键位 `settings.cloudRuntime.*`）。
  */
-import type { ReactNode } from "react";
-import { ExternalLink, RefreshCw } from "lucide-react";
-import type { CapabilitiesResponse, CloudRepositoryRecord } from "@zcode/shared";
+import { ExternalLink } from "lucide-react";
+import type { CloudRepositoryRecord } from "@zcode/shared";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { Button } from "@/components/ui/button.js";
-import { useCloudCapabilities } from "@/hooks/cloud/useCloudCapabilities.js";
 import { useCloudRepositories } from "@/hooks/cloud/useCloudRepositories.js";
-import { SettingsGroupCard, SettingsRow } from "@/settings/SettingsPageParts.js";
+import { SettingsRow } from "@/settings/SettingsPageParts.js";
+import {
+  CloudSectionHint,
+  CloudSectionShell,
+  describeCloudSettingsError,
+} from "@/settings/cloudRuntimeSectionParts.js";
+import { CloudSandboxSettingsSection } from "@/settings/CloudSandboxSettingsSection.js";
 import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
+
+// 公开入口（packages/ui/src/index.ts）历史上从本文件导出沙箱分区与错误描述：
+// 拆分后在此原样转出，外部 import 路径不变。
+export { describeCloudSettingsError } from "@/settings/cloudRuntimeSectionParts.js";
+export { CloudSandboxSettingsSection } from "@/settings/CloudSandboxSettingsSection.js";
 
 /** 供设置导航注册的 id 常量（导航配置不在本工作单 roots 内，由设置 owner 接线）。 */
 export const CLOUD_RUNTIME_SETTINGS_GROUP_ID = "cloudRuntime";
 export const CLOUD_RUNTIME_SETTINGS_SECTION_ID = "cloudRuntime";
-
-/** 控件区文案统一在这里取：错误只按 code 归类，不解析服务端文案（04 §6）。 */
-export function describeCloudSettingsError(error: unknown): string {
-  if (typeof error === "string") {
-    return error;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
-}
-
-function CloudSectionShell({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description: string;
-  children: ReactNode;
-}) {
-  return (
-    <section className="space-y-2">
-      <div className="px-0.5">
-        <h3 className="text-ui-base font-medium text-foreground">{title}</h3>
-        <p className="mt-1 text-ui-base leading-6 text-foreground-subtle">{description}</p>
-      </div>
-      <SettingsGroupCard>{children}</SettingsGroupCard>
-    </section>
-  );
-}
-
-function CloudSectionHint({ tone, children }: { tone: "muted" | "warning"; children: ReactNode }) {
-  return (
-    <p
-      className={
-        tone === "warning"
-          ? "px-4 py-3 text-ui-base leading-6 text-destructive"
-          : "px-4 py-3 text-ui-base leading-6 text-foreground-subtle"
-      }
-    >
-      {children}
-    </p>
-  );
-}
 
 function formatRepositoryLabel(repository: CloudRepositoryRecord): string {
   const owner = repository.owner ?? "";
@@ -133,7 +99,6 @@ export function CloudGithubSettingsSection() {
               size="sm"
               onClick={() => void repositories.refresh()}
             >
-              <RefreshCw className="size-3.5" aria-hidden="true" />
               {intl.formatMessage({ id: "settings.cloudRuntime.retry" })}
             </Button>
           }
@@ -167,84 +132,6 @@ export function CloudGithubSettingsSection() {
           </Button>
         </div>
       ) : null}
-    </CloudSectionShell>
-  );
-}
-
-/** Sandbox 分区：控制面自述的 provider 能力（只读）。 */
-export function CloudSandboxSettingsSection() {
-  const { intl } = useZCodeIntl();
-  const capabilities = useCloudCapabilities();
-  const providers: CapabilitiesResponse["providers"] = capabilities.capabilities?.providers ?? [];
-
-  return (
-    <CloudSectionShell
-      title={intl.formatMessage({ id: "settings.cloudRuntime.sandbox.title" })}
-      description={intl.formatMessage({ id: "settings.cloudRuntime.sandbox.description" })}
-    >
-      {capabilities.status !== "ready" && providers.length === 0 ? (
-        <CloudSectionHint tone="muted">
-          {capabilities.status === "error"
-            ? describeCloudSettingsError(capabilities.error)
-            : intl.formatMessage({ id: "settings.cloudRuntime.loading" })}
-        </CloudSectionHint>
-      ) : null}
-      {capabilities.status === "ready" && providers.length === 0 ? (
-        <CloudSectionHint tone="muted">
-          {intl.formatMessage({ id: "settings.cloudRuntime.sandbox.none" })}
-        </CloudSectionHint>
-      ) : null}
-      {providers.map((provider) => (
-        <SettingsRow
-          key={provider.provider}
-          label={provider.provider}
-          detail={
-            <span className="text-ui-base text-foreground-subtle">
-              {intl.formatMessage({
-                id: "settings.cloudRuntime.sandbox.capability.deadlineSource",
-              })}
-              : {provider.deadlineSource}
-              {provider.maxLifetimeSeconds === undefined
-                ? null
-                : ` · ${intl.formatMessage({ id: "settings.cloudRuntime.sandbox.capability.maxLifetime" })}: ${provider.maxLifetimeSeconds}`}
-            </span>
-          }
-          controlLayout="wide"
-          control={
-            <span className="flex flex-wrap gap-2 text-ui-base text-foreground-subtle">
-              <span>
-                {intl.formatMessage({
-                  id: "settings.cloudRuntime.sandbox.capability.createOperationLookup",
-                })}
-                : {provider.createOperationLookup}
-              </span>
-              <span>
-                {intl.formatMessage({ id: "settings.cloudRuntime.sandbox.capability.inspect" })}:{" "}
-                {String(provider.canInspect)}
-              </span>
-              <span>
-                {intl.formatMessage({
-                  id: "settings.cloudRuntime.sandbox.capability.extendDeadline",
-                })}
-                : {String(provider.canExtendDeadline)}
-              </span>
-              <span>
-                {intl.formatMessage({
-                  id: "settings.cloudRuntime.sandbox.capability.confirmTermination",
-                })}
-                : {String(provider.canConfirmTermination)}
-              </span>
-              <span>
-                {intl.formatMessage({ id: "settings.cloudRuntime.sandbox.capability.outboundWss" })}
-                : {String(provider.supportsOutboundWss)}
-              </span>
-            </span>
-          }
-        />
-      ))}
-      <CloudSectionHint tone="muted">
-        {intl.formatMessage({ id: "settings.cloudRuntime.sandbox.secretNote" })}
-      </CloudSectionHint>
     </CloudSectionShell>
   );
 }

@@ -7,7 +7,8 @@
  *   不写 `.git/config`、不落盘、不进日志；系统/全局/仓库 helper 一律清空防继承缓存；
  * - grant 短效单次，只经 TLS 取回；任务结束/失败即释放引用（尽力 revoke 在控制面）。
  *
- * 远端事实优先：push 是否成功以 `ls-remote` 的 HEAD 为准，不用本地推断（01 §8）。
+ * 远端事实优先：push 是否成功以 `ls-remote` 的 HEAD 为准，且必须**等于**本地 HEAD
+ * （本次待推送内容）才算保存事实，不用 push 退出码推断（01 §8）。
  */
 import { Buffer } from "node:buffer";
 import type { CloudErrorCode } from "@zcode/shared";
@@ -23,12 +24,19 @@ import {
   planLsRemote,
   planPush,
   planRevParse,
+  planRevParseHead,
   planStatusPorcelain,
   planCheckoutRemoteBranch,
   type CloneFacts,
   type GitPlan,
 } from "../domain/gitPlan.js";
 import type { ExecutionLogger } from "./ports.js";
+
+/** `rev-parse` 的输出必须是完整 object id（40/64 hex），其他形态一律视为不可判读。 */
+function parseRevParseSha(stdout: string): string | null {
+  const sha = stdout.trim();
+  return /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha) ? sha : null;
+}
 
 export interface GitRunOutcome {
   code: number;
@@ -79,7 +87,7 @@ export interface SandboxGit {
     | { ok: true; clean: boolean; committed: boolean }
     | { ok: false; code: CloudErrorCode; message: string }
   >;
-  /** 正常 push（禁止 force）+ 远端 SHA 核验。 */
+  /** 正常 push（禁止 force）+ 远端 SHA 核验：远端 HEAD 必须等于本地 HEAD 才算 saved。 */
   pushAndVerify(input: {
     cwd: string;
     taskBranch: string;
@@ -148,6 +156,17 @@ export function createSandboxGit(options: SandboxGitOptions): SandboxGit {
     };
   }
 
+  /**
+   * 本地 HEAD 的 sha = 本次 checkpoint 的**待推送内容**（01 §8）：
+   * commitWorktree 之后调用，有变更时即新提交，clean worktree 时即上一次已保存的 HEAD。
+   * 读不到（非零退出/输出不是 object id）返回 null，由调用方 fail closed，不猜。
+   */
+  async function readLocalHead(cwd: string): Promise<string | null> {
+    const result = await runPlan(cwd, planRevParseHead());
+    if (result.code !== 0) return null;
+    return parseRevParseSha(result.stdout);
+  }
+
   return {
     async cloneAtBase(facts, workspacePath, cwd) {
       const clone = planClone(facts, workspacePath);
@@ -186,8 +205,7 @@ export function createSandboxGit(options: SandboxGitOptions): SandboxGit {
       const plan = planRevParse(ref);
       const result = await runPlan(cwd, plan);
       if (result.code !== 0) return null;
-      const sha = result.stdout.trim();
-      return /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha) ? sha : null;
+      return parseRevParseSha(result.stdout);
     },
 
     async remoteHead(taskBranch, cwd) {
@@ -214,6 +232,16 @@ export function createSandboxGit(options: SandboxGitOptions): SandboxGit {
     },
 
     async pushAndVerify({ cwd, taskBranch }) {
+      // 修复依据（2026-10-07 review P1，数据丢失级）：修复前只要 `ls-remote` **命中**
+      // 任务分支就返回 ok:true，push 被拒（non-fast-forward/网络失败）时命中的是上一次
+      // checkpoint 留在远端的旧 HEAD，于是 checkpoint 标 saved、dataAtRisk=false，
+      // 随后的 stop/terminate 让本次新提交静默丢失。
+      // spec 01 §8：只有 GitHub taskBranch HEAD 查询确认才推进 lastCheckpointSha，
+      // 「确认」= 远端 HEAD **等于**本次待推送的本地 sha，而不是「远端存在某个 HEAD」。
+      const localSha = await readLocalHead(cwd);
+      if (!localSha) {
+        return { ok: false, code: "checkpoint_failed", message: "local HEAD unavailable" };
+      }
       const push = planPush(taskBranch);
       const pushed = await withGrant("push", (env) =>
         options.runner.run(push.ok ? push.argv : [], { cwd, env, timeoutMs }),
@@ -227,11 +255,15 @@ export function createSandboxGit(options: SandboxGitOptions): SandboxGit {
         return { ok: false, code: "checkpoint_failed", message: "remote HEAD verification failed" };
       }
       const remoteSha = parseLsRemoteSha(verified.stdout, taskBranch);
-      if (!remoteSha) {
+      if (remoteSha !== localSha) {
+        // push 非零退出沿用 non_fast_forward/checkpoint_failed 现有目录；push 成功却对不上
+        // 远端（含远端仍停在旧 checkpoint）归 checkpoint_failed，禁止标 saved（01 §8）。
         return {
           ok: false,
           code: pushed.code === 0 ? "checkpoint_failed" : "non_fast_forward",
-          message: "task branch head not found on remote",
+          message: remoteSha
+            ? `remote head mismatch: local ${localSha}, remote ${remoteSha}`
+            : "task branch head not found on remote",
         };
       }
       return { ok: true, remoteSha };

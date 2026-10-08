@@ -14,7 +14,7 @@
  */
 import { useCallback, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
-import type { CloudProjectRecord, CloudTaskRecord } from "@zcode/shared";
+import type { CloudProjectRecord } from "@zcode/shared";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import {
   Collapsible,
@@ -25,8 +25,13 @@ import { cn } from "@/components/lib/utils.js";
 import { CloudRepositoryPickerDialog } from "@/cloud/CloudRepositoryPickerDialog.js";
 import type { UseCloudProjectsResult } from "@/hooks/cloud/useCloudProjects.js";
 import { useCloudTasks } from "@/hooks/cloud/useCloudTasks.js";
-import { createCloudCreationKey } from "@/cloud/cloudDraftScope.js";
 import { useCloudCapabilities } from "@/hooks/cloud/useCloudCapabilities.js";
+import { createCloudCreationKey } from "@/cloud/cloudDraftScope.js";
+import { CloudArchivedTaskRow, CloudTaskRow } from "@/cloud/CloudProjectTaskRows.js";
+import {
+  projectCloudTasksForArchivedSection,
+  projectCloudTasksForSidebar,
+} from "@/cloud/cloudSidebarTaskList.js";
 import { CloudTaskCreateDialog } from "@/cloud/CloudTaskCreateDialog.js";
 
 export interface CloudProjectTaskSectionProps {
@@ -254,6 +259,12 @@ function CloudProjectTaskList({
 }: CloudProjectTaskListProps) {
   const { intl } = useZCodeIntl();
   const tasks = useCloudTasks({ projectId });
+  // 归档分区（04 §3 2026-10-08 巡检修订）：默认收起，头部显示数量；恢复入口在行内。
+  const [archivedSectionOpen, setArchivedSectionOpen] = useState(false);
+  const archivedTasks = useMemo(
+    () => projectCloudTasksForArchivedSection(tasks.tasks),
+    [tasks.tasks],
+  );
 
   return (
     <div className="flex flex-col gap-0.5 pb-1 pl-4 pr-1">
@@ -284,7 +295,7 @@ function CloudProjectTaskList({
       ) : null}
 
       <ul className="flex flex-col gap-0.5" data-testid="cloud-task-list">
-        {sortCloudTasksForSidebar(tasks.tasks).map((task) => (
+        {projectCloudTasksForSidebar(tasks.tasks).map((task) => (
           <li key={task.taskId}>
             <CloudTaskRow
               task={task}
@@ -294,58 +305,50 @@ function CloudProjectTaskList({
           </li>
         ))}
       </ul>
+
+      {archivedTasks.length > 0 ? (
+        // 已归档分区：可折叠、默认收起。归档不再是死胡同——行内可恢复（04 §3 巡检修订）。
+        <Collapsible open={archivedSectionOpen} onOpenChange={setArchivedSectionOpen}>
+          <div className="mt-1 flex h-6 min-w-0 items-center rounded-md">
+            <CollapsibleTrigger asChild>
+              <button
+                type="button"
+                data-testid="cloud-task-archived-section"
+                className="flex h-6 min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 text-left text-ui-base text-foreground-subtlest outline-none hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/30"
+              >
+                {archivedSectionOpen ? (
+                  <ChevronDown aria-hidden="true" className="size-3.5 shrink-0" />
+                ) : (
+                  <ChevronRight aria-hidden="true" className="size-3.5 shrink-0" />
+                )}
+                <span className="truncate">
+                  {intl.formatMessage(
+                    { id: "cloud.tasks.archivedSection" },
+                    { count: archivedTasks.length },
+                  )}
+                </span>
+              </button>
+            </CollapsibleTrigger>
+          </div>
+          <CollapsibleContent>
+            {archivedSectionOpen ? (
+              <ul className="flex flex-col gap-0.5" data-testid="cloud-task-archived-list">
+                {archivedTasks.map((task) => (
+                  <li key={task.taskId}>
+                    <CloudArchivedTaskRow
+                      task={task}
+                      selected={task.taskId === activeTaskId}
+                      onOpen={() => onOpenTask(task.taskId)}
+                    />
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </CollapsibleContent>
+        </Collapsible>
+      ) : null}
     </div>
   );
-}
-
-function CloudTaskRow({
-  task,
-  selected,
-  onOpen,
-}: {
-  readonly task: CloudTaskRecord;
-  readonly selected: boolean;
-  readonly onOpen: () => void;
-}) {
-  const { intl } = useZCodeIntl();
-  const isDraft = task.status === "draft";
-  return (
-    <button
-      type="button"
-      data-testid="cloud-task-row"
-      data-status={task.status}
-      data-selected={selected ? "true" : undefined}
-      className={cn(
-        "flex h-6 min-w-0 items-center gap-1.5 rounded-md px-1.5 text-left text-ui-base outline-none focus-visible:ring-2 focus-visible:ring-ring/30",
-        selected
-          ? "bg-active text-foreground"
-          : "text-foreground-subtle hover:bg-hover hover:text-foreground",
-      )}
-      onClick={onOpen}
-    >
-      <span className="min-w-0 flex-1 truncate">{task.title}</span>
-      {isDraft ? (
-        <span className="shrink-0 rounded bg-surface px-1 text-ui-base text-foreground-subtlest">
-          {intl.formatMessage({ id: "cloud.tasks.draftBadge" })}
-        </span>
-      ) : null}
-    </button>
-  );
-}
-
-/** 供测试与调用方复用的排序：草稿在前、其余按更新时间降序（沿用任务列表习惯）。 */
-export function sortCloudTasksForSidebar(
-  tasks: readonly CloudTaskRecord[],
-): readonly CloudTaskRecord[] {
-  return [...tasks].sort((a, b) => {
-    if (a.status === "draft" && b.status !== "draft") {
-      return -1;
-    }
-    if (b.status === "draft" && a.status !== "draft") {
-      return 1;
-    }
-    return b.updatedAt - a.updatedAt;
-  });
 }
 
 /** 项目展示名：owner/name 优先，其次 displayName，最后回退 projectId。 */

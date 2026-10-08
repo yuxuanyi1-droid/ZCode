@@ -8,10 +8,18 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Root as ReactRoot } from "react-dom/client";
-import { AppErrorBoundary, Root, ZCodeIntlProvider, useServices } from "@zcode/ui";
+import {
+  AppErrorBoundary,
+  Root,
+  ZCodeIntlProvider,
+  resolveCloudTaskRouteFailure,
+  useCloudWorkspaceContext,
+  useServices,
+} from "@zcode/ui";
 import type { IPlatformService } from "@zcode/shared";
 import {
   classifyCloudBootError,
+  createCloudBootFailure,
   type CloudBootFailure,
   type CloudBootRecovery,
   type CloudEntryPlan,
@@ -49,10 +57,18 @@ export interface CloudAppProps {
 export function CloudApp({ plan }: CloudAppProps) {
   const locale: CloudEntryLocale = resolveCloudEntryLocale();
   const [attempt, setAttempt] = useState(0);
-  const [phase, setPhase] = useState<CloudAppPhase>({ kind: "booting" });
+  // 探测被 401/403 拒绝（`plan.credentialRequired`，04 §2.1）时直接进凭据门：
+  // 服务端已经明确要求凭据，不必再跑一次必然失败的启动流程。
+  const [needsToken, setNeedsToken] = useState(plan.credentialRequired);
+  const [phase, setPhase] = useState<CloudAppPhase>(
+    plan.credentialRequired ? { kind: "token-required" } : { kind: "booting" },
+  );
   const platform = useMemo(() => createWebPlatform({ mode: "cloud" }), []);
 
   useEffect(() => {
+    if (needsToken) {
+      return;
+    }
     let cancelled = false;
     let started: CloudRuntime | null = null;
     void bootstrapCloudRuntime(plan, { ui: cloudUiComposition })
@@ -89,12 +105,18 @@ export function CloudApp({ plan }: CloudAppProps) {
       cancelled = true;
       started?.dispose();
     };
-  }, [attempt, plan]);
+  }, [attempt, needsToken, plan]);
 
   const retry = useCallback(() => {
     setPhase({ kind: "booting" });
     setAttempt((value) => value + 1);
   }, []);
+
+  const handleTokenAccepted = useCallback(() => {
+    // cookie 已建立：清掉凭据门，再把启动流程跑一遍（needsToken 与 attempt 同一轮变化）。
+    setNeedsToken(false);
+    retry();
+  }, [retry]);
 
   const handleRecover = useCallback(
     (recovery: CloudBootRecovery) => {
@@ -106,10 +128,11 @@ export function CloudApp({ plan }: CloudAppProps) {
           window.location.reload();
           return;
         case "provide-token":
+          setNeedsToken(true);
           setPhase({ kind: "token-required" });
           return;
         case "open-home": {
-          // 丢弃入口参数（?mode=/?task=/?remote=）回到云首页；不涉及任务事实写入。
+          // 丢弃入口参数（?task=/?remote=/?token=）回到云首页；不涉及任务事实写入。
           const url = new URL(window.location.href);
           url.search = "";
           window.location.replace(url.toString());
@@ -121,7 +144,14 @@ export function CloudApp({ plan }: CloudAppProps) {
   );
 
   if (phase.kind === "token-required") {
-    return <CloudTokenGate origin={plan.origin} onTokenAccepted={retry} />;
+    return (
+      <CloudTokenGate
+        origin={plan.origin}
+        // 部署链接 `?token=` 仍是凭据传入通道（04 §2.1）：门里自动用它握手一次，失败再手填。
+        {...(plan.token === undefined ? {} : { initialToken: plan.token })}
+        onTokenAccepted={handleTokenAccepted}
+      />
+    );
   }
 
   if (phase.kind === "failed") {
@@ -167,6 +197,8 @@ export function CloudApp({ plan }: CloudAppProps) {
            */}
           <CloudRootBridge
             platform={platform}
+            locale={locale}
+            onRecover={handleRecover}
             {...(runtime.bootstrap.taskId === undefined
               ? {}
               : { taskId: runtime.bootstrap.taskId })}
@@ -180,6 +212,8 @@ export function CloudApp({ plan }: CloudAppProps) {
 export interface CloudRootBridgeProps {
   readonly platform: IPlatformService;
   readonly taskId?: string | undefined;
+  readonly locale: CloudEntryLocale;
+  readonly onRecover: (recovery: CloudBootRecovery) => void;
 }
 
 /**
@@ -187,8 +221,29 @@ export interface CloudRootBridgeProps {
  * Run attachment），这里只把合成结果读回来交给 Root，因此组件里没有 `isCloud` 分支
  * （04 §3.0「禁止提前返回独立外壳」、12 §5）。
  */
-function CloudRootBridge({ platform, taskId }: CloudRootBridgeProps) {
+function CloudRootBridge({ platform, taskId, locale, onRecover }: CloudRootBridgeProps) {
   const services = useServices();
+  const cloudWorkspace = useCloudWorkspaceContext();
+  // 主路由任务不存在（?task=<合法 UUID> 但控制面 404，2026-10-08 巡检修订）：与非法
+  // task id 一致地渲染错误屏，不静默回落欢迎页；同时整棵工作区树卸载，收敛多个订阅方
+  // 各自重发的 404 详情请求。判定按结构化错误码（not_found），不解析文案。
+  const routeFailure = resolveCloudTaskRouteFailure({
+    bootstrappedTaskId: taskId,
+    selectionTaskId: cloudWorkspace?.selection.taskId ?? null,
+    taskDetailStatus: cloudWorkspace?.taskDetailStatus ?? "idle",
+    taskDetailErrorCode: cloudWorkspace?.taskDetailErrorCode ?? null,
+  });
+
+  if (routeFailure) {
+    return (
+      <CloudBootstrapErrorScreen
+        failure={createCloudBootFailure(routeFailure.reason)}
+        locale={locale}
+        onRecover={onRecover}
+      />
+    );
+  }
+
   return (
     <Root
       services={services}
@@ -212,8 +267,8 @@ export function renderCloudApp(root: ReactRoot, plan: CloudEntryPlan): void {
 }
 
 /**
- * 入口本身失败（例如 `?mode=` 非法）时的失败面：任何模式都可渲染，避免回落到白屏或
- * 通用报错（W9 §5）。
+ * 入口本身失败（启动探测 404/不可达、`?task=` 非法、云入口下的 `?remote=` 等）时的失败面：
+ * 任何模式都可渲染，避免回落到白屏或通用报错（W9 §5；04 §2.1 探测不确定不回落 local）。
  */
 export function renderCloudEntryFailure(root: ReactRoot, failure: CloudBootFailure): void {
   root.render(

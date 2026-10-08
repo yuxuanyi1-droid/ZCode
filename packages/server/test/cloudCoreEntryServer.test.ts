@@ -28,6 +28,7 @@ function testSecrets(): CloudDeploymentSecrets {
     principalId: "deployment-principal",
     describe: () => ({
       principalId: "deployment-principal",
+      authMode: "token",
       authToken: "configured",
       credentialSecret: "absent",
       gitHubApp: "absent",
@@ -43,6 +44,7 @@ const fakeDrivers: SandboxDriverRegistryPort = {
 function baseConfig(dataDir: string): CloudEntryConfig {
   return {
     mode: "cloud",
+    authMode: "token",
     publicOrigin: "http://127.0.0.1:1",
     listenPort: 0,
     dataDir,

@@ -14,12 +14,14 @@
  * 3. **秘密只经参数流动**：值不进日志、不进错误 details、不进 provider labels/metadata。
  */
 import type { SandboxDriverPort } from "../../app/ports/sandboxDriverPort.js";
+import type { SandboxRuntimeSettingsPort } from "../../app/ports/sandboxRuntimeSettingsPort.js";
 import type { CloudAdapterLogger } from "./adapterError.js";
 import { type SandboxProviderId } from "./capabilities.js";
 import { createDaytonaSandboxDriver } from "./daytonaDriver.js";
 import { createE2bSandboxDriver } from "./e2bDriver.js";
 import { createModalSandboxDriver } from "./modalDriver.js";
 import { createModalSdkBridge } from "./modalSdkBridge.js";
+import type { SandboxFetch } from "./sandboxRest.js";
 
 /**
  * 适配器实现的 driver 契约版本（能力声明字段、期限单位、对账结论的语义版本）。
@@ -48,6 +50,12 @@ export interface SandboxDriverBindingContext {
    * 优先于绑定配置里的同名值（部署键是运行期事实，配置只用于直接构造）。
    */
   readonly maxLifetimeSeconds?: number;
+  /**
+   * 账号设置覆盖的解析端口（01 §4.3/§5.1 修订 2026-10-08）：key 与生效超时都在
+   * **create 时点**经此解析（不启动期固化）；未接线时保持 env 静态值（测试/嵌入装配）。
+   * key 生效值 = credential ?? env；超时生效值 = min(设置值, env 核实上限)。
+   */
+  readonly runtimeSettings?: SandboxRuntimeSettingsPort;
 }
 
 /** 单条 driver 绑定（与 W5 `CloudSandboxDriverBinding` 结构一致）。 */
@@ -65,6 +73,8 @@ export interface E2bDriverDeploymentConfig {
   baseUrl?: string;
   /** 账号核实的生命周期上限（秒）；未核实保持 undefined。 */
   maxLifetimeSeconds?: number;
+  /** 测试注入的 fetch（同 baseUrl 缝：测试绝不触达真实 provider API）。 */
+  fetch?: SandboxFetch;
 }
 
 export interface DaytonaDriverDeploymentConfig {
@@ -74,6 +84,8 @@ export interface DaytonaDriverDeploymentConfig {
   baseUrl?: string;
   /** 账号核实的墙钟 TTL 上限（秒）；未核实保持 undefined。 */
   maxLifetimeSeconds?: number;
+  /** 测试注入的 fetch（同 baseUrl 缝：测试绝不触达真实 provider API）。 */
+  fetch?: SandboxFetch;
 }
 
 /**
@@ -145,6 +157,41 @@ export function createSandboxDriverBindings(
 
 // ── 内部：按 provider 装配 driver（唯一构造点） ──
 
+/**
+ * create 时点的 provider key 解析（01 §5.1 决议 2026-10-08）：账号设置覆盖优先，
+ * 回落 env 部署基线；值只流向 provider 请求，不进日志/错误 details。
+ */
+function createApiKeyResolver(
+  provider: SandboxProviderId,
+  envValue: string | undefined,
+  runtimeSettings: SandboxRuntimeSettingsPort | undefined,
+): () => string | Promise<string> {
+  return async () => {
+    if (!runtimeSettings) {
+      return envValue!;
+    }
+    const effective = await runtimeSettings.readEffectiveSandboxConfig(provider);
+    return effective.apiKey ?? envValue!;
+  };
+}
+
+/**
+ * create 时点的生效超时上限解析（01 §4.3 修订）：min(账号设置, env 核实上限)；
+ * 未接端口时回落静态 env 值（driver 内部处理 undefined = 未核实不虚构）。
+ */
+function createMaxLifetimeResolver(
+  provider: SandboxProviderId,
+  runtimeSettings: SandboxRuntimeSettingsPort | undefined,
+): (() => Promise<number | undefined>) | undefined {
+  if (!runtimeSettings) {
+    return undefined;
+  }
+  return async () => {
+    const effective = await runtimeSettings.readEffectiveSandboxConfig(provider);
+    return effective.timeoutSeconds;
+  };
+}
+
 function buildDriver(
   provider: SandboxProviderId,
   configs: SandboxDriverDeploymentConfigs,
@@ -152,14 +199,19 @@ function buildDriver(
   fallbackLogger: CloudAdapterLogger | undefined,
 ): SandboxDriverPort {
   const logger = context.logger ?? fallbackLogger;
+  const runtimeMaxLifetime = createMaxLifetimeResolver(provider, context.runtimeSettings);
+  const runtimeLifetimeOption =
+    runtimeMaxLifetime === undefined ? {} : { resolveMaxLifetimeSeconds: runtimeMaxLifetime };
   if (provider === "e2b") {
     const config = configs.e2b!;
     // 部署核实的上限优先（context），配置值只作直接构造时的兜底。
     const maxLifetimeSeconds = context.maxLifetimeSeconds ?? config.maxLifetimeSeconds;
     return createE2bSandboxDriver({
-      apiKey: () => config.apiKey!,
+      apiKey: createApiKeyResolver("e2b", config.apiKey, context.runtimeSettings),
       ...(config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl }),
+      ...(config.fetch === undefined ? {} : { fetch: config.fetch }),
       ...(maxLifetimeSeconds === undefined ? {} : { maxLifetimeSeconds }),
+      ...runtimeLifetimeOption,
       ...(logger === undefined ? {} : { logger }),
     });
   }
@@ -167,9 +219,11 @@ function buildDriver(
     const config = configs.daytona!;
     const maxLifetimeSeconds = context.maxLifetimeSeconds ?? config.maxLifetimeSeconds;
     return createDaytonaSandboxDriver({
-      apiKey: () => config.apiKey!,
+      apiKey: createApiKeyResolver("daytona", config.apiKey, context.runtimeSettings),
       ...(config.baseUrl === undefined ? {} : { baseUrl: config.baseUrl }),
+      ...(config.fetch === undefined ? {} : { fetch: config.fetch }),
       ...(maxLifetimeSeconds === undefined ? {} : { maxLifetimeSeconds }),
+      ...runtimeLifetimeOption,
       ...(logger === undefined ? {} : { logger }),
     });
   }
@@ -189,6 +243,7 @@ function buildDriver(
     ...(config.imageContextDir === undefined ? {} : { imageContextDir: config.imageContextDir }),
     ...(config.appName === undefined ? {} : { appName: config.appName }),
     ...(maxLifetimeSeconds === undefined ? {} : { maxLifetimeSeconds }),
+    ...runtimeLifetimeOption,
     ...(logger === undefined ? {} : { logger }),
   });
 }

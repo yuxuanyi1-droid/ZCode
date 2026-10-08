@@ -34,6 +34,8 @@ import {
   describeCapabilities,
   MODAL_GATED_CAPABILITIES,
   MODAL_SDK_CHANNEL_CAPABILITIES,
+  resolveEffectiveMaxLifetimeSeconds,
+  type SandboxLifetimeOptions,
 } from "./capabilities.js";
 import { launchModalSupervisor } from "./modalBootstrap.js";
 import {
@@ -57,7 +59,7 @@ export const MODAL_PROVIDER = "modal";
 export const MODAL_DEFAULT_RECONCILIATION_WINDOW_MS = 300_000;
 const DEFAULT_WORKDIR = "/workspace";
 
-export interface ModalDriverOptions {
+export interface ModalDriverOptions extends SandboxLifetimeOptions {
   /** SDK 子进程桥（modalSdkBridge.ts）：唯一的 Modal 控制面通道；未注入 → 门禁降级。 */
   bridge?: ModalSdkBridge;
   /** 模板镜像来源（01 §6.2）：显式 dockerfile 优先，其次 templateDir 内 Dockerfile。 */
@@ -68,8 +70,6 @@ export interface ModalDriverOptions {
   appName?: string;
   /** 沙箱工作目录（缺省 /workspace，01 §6.2 步骤 2 的 workspacePath 根）。 */
   workdir?: string;
-  /** 账号核实的生命周期上限（秒）；未核实保持 undefined（不虚构上限）。 */
-  maxLifetimeSeconds?: number;
   createReconciliationWindowMs?: number;
   /** 测试注入的 supervisor 启动器（缺省按 bridge 选通道/门禁）。 */
   startSupervisor?: SupervisorStarter;
@@ -114,12 +114,11 @@ export function createModalSandboxDriver(options: ModalDriverOptions): SandboxDr
     return contextDir ? { dockerfile, contextDir } : { dockerfile };
   }
 
-  /** 期限换算：请求 epoch 毫秒 → provider timeout 秒（取已核实上限较小值）。 */
-  function clampTimeoutSeconds(requestedDeadline: number): number {
+  /** 期限换算：请求 epoch 毫秒 → provider timeout 秒（取生效上限较小值，01 §4.3 修订）。 */
+  async function clampTimeoutSeconds(requestedDeadline: number): Promise<number> {
     const requested = Math.floor((requestedDeadline - now()) / 1000);
-    return options.maxLifetimeSeconds !== undefined
-      ? Math.min(requested, options.maxLifetimeSeconds)
-      : requested;
+    const cap = await resolveEffectiveMaxLifetimeSeconds(options);
+    return cap !== undefined ? Math.min(requested, cap) : requested;
   }
 
   /** 补偿终止探测：桥已确认（ok / not_found）才算已清理（01 §5.1）。 */
@@ -156,7 +155,7 @@ export function createModalSandboxDriver(options: ModalDriverOptions): SandboxDr
       }
       // 本地校验先于任何 provider 调用：确定失败不得被网络分支改判未知（01 §4.1）。
       const image = resolveImageDockerfile();
-      const timeoutSeconds = clampTimeoutSeconds(input.requestedDeadline);
+      const timeoutSeconds = await clampTimeoutSeconds(input.requestedDeadline);
       if (timeoutSeconds < 1) {
         throw new CloudAdapterError("validation_failed", "requested deadline already elapsed", {
           requestedDeadline: input.requestedDeadline,

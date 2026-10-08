@@ -1,39 +1,40 @@
 /**
- * W9 入口解析与启动错误分类用例（specs/cloud-agent/modules/W9 §4/§5/§6；04 §2/§4/§5；03 §7.1）。
+ * W9 入口探测与启动错误分类用例（specs/cloud-agent/04 §2.1；modules/W9 §4/§5/§6；03 §7.1）。
  *
- * 断言的是入口契约本身：mode/origin/token/route 只由显式来源决定，五类启动错误各自可分，
- * 且任何一类都**不会**变成「回落到本机 / 开发机」的计划。
+ * 2026-10-07 修订：模式不再是客户端声明（`?mode=`/构建期 `VITE_*`/origin 一致性校验已作废），
+ * 而是启动时同源探测 `GET /api/cloud/capabilities` 的结果。断言的是入口契约本身：
+ * 探测的四种答案各自落到哪个入口，且**没有任何一种不确定会变成 local 计划**。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CloudApiError, cloudTransportError } from "@zcode/client";
-import type { CapabilitiesResponse } from "@zcode/shared";
+import { createLocalCapabilitiesResponse, type CapabilitiesResponse } from "@zcode/shared";
 import {
   CLOUD_BOOT_FAILURE_REASONS,
   CLOUD_CAPABILITIES_PATH,
+  bootWebEntry,
   buildCloudHostChannelUrl,
   classifyCapabilitiesMismatch,
   classifyCloudBootError,
   classifyCloudBootHttpStatus,
   completeCloudTokenHandshake,
   createCloudBootFailure,
+  probeWebEntryMode,
   resolveWebEntryBoot,
 } from "../src/cloud/cloudBoot.js";
 
 const RUNTIME_ORIGIN = "https://cloud.example.com";
 const TASK_ID = "8f14e45f-ceea-467a-9a1e-1f0d3b2a4c51";
-/** 当前主体：W0 已把它冻结进 `capabilitiesResponseSchema`，是草稿 scope 的唯一来源。 */
+/** 当前主体：W0 已把它冻结进 capabilities 的云分支（必填）。 */
 const PRINCIPAL_ID = "3c8a6d2b-0e4f-4a9b-8c1d-2e3f4a5b6c7d";
 
-function resolve(search: string, extra?: { buildMode?: string; buildCloudOrigin?: string }) {
-  return resolveWebEntryBoot({ search, runtimeOrigin: RUNTIME_ORIGIN, ...extra });
-}
+type CloudCapabilities = Extract<CapabilitiesResponse, { mode: "cloud" }>;
 
-/** 能力信封按 frozen schema 构造：不再用 `as` 绕过类型，字段缺失必须当场暴露。 */
-function capabilities(overrides: Partial<CapabilitiesResponse> = {}): CapabilitiesResponse {
+/** 能力信封按 frozen schema 构造：不用 `as` 绕过类型，字段缺失必须当场暴露。 */
+function cloudCapabilities(overrides: Partial<CloudCapabilities> = {}): CloudCapabilities {
   return {
-    principalId: PRINCIPAL_ID,
     mode: "cloud",
+    principalId: PRINCIPAL_ID,
     providers: [],
     features: ["durable-input"],
     protocolVersion: 1,
@@ -42,97 +43,221 @@ function capabilities(overrides: Partial<CapabilitiesResponse> = {}): Capabiliti
   };
 }
 
-test("mode comes only from explicit URL/env; default stays the existing local path", () => {
-  const base = resolve("?remote=abc");
-  assert.equal(base.ok, true);
-  assert.deepEqual(base.ok ? base.plan : null, { mode: "local", remoteId: "abc" });
+const LOCAL_CAPABILITIES = createLocalCapabilitiesResponse();
 
-  // 构建期声明 cloud，URL 未覆盖。
-  const fromEnv = resolve("", { buildMode: "cloud" });
-  assert.equal(fromEnv.ok && fromEnv.plan.mode, "cloud");
+function jsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
 
-  // URL 覆盖优先于构建期，且 local 也是显式取值。
-  const urlWins = resolve("?mode=cloud", { buildMode: "local" });
-  assert.equal(urlWins.ok && urlWins.plan.mode, "cloud");
-  const forcedLocal = resolve("?mode=local", { buildMode: "cloud" });
-  assert.deepEqual(forcedLocal.ok ? forcedLocal.plan : null, { mode: "local" });
+/** 用一份固定响应驱动探测，并把请求记下来供「同源、不带凭据」断言使用。 */
+function probeWith(response: Response | Error): {
+  fetchImpl: typeof fetch;
+  seen: { url: string; init: RequestInit | undefined }[];
+} {
+  const seen: { url: string; init: RequestInit | undefined }[] = [];
+  const fetchImpl = ((input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push({ url: String(input), init });
+    return response instanceof Error ? Promise.reject(response) : Promise.resolve(response);
+  }) as typeof fetch;
+  return { fetchImpl, seen };
+}
+
+test("探测：同源 capabilities 端点、不带凭据", async () => {
+  const { fetchImpl, seen } = probeWith(jsonResponse(cloudCapabilities()));
+  const result = await probeWebEntryMode({ origin: RUNTIME_ORIGIN, fetchImpl });
+  assert.equal(result.kind, "mode");
+  assert.equal(result.kind === "mode" && result.mode, "cloud");
+  assert.deepEqual(
+    seen.map((entry) => entry.url),
+    [`${RUNTIME_ORIGIN}${CLOUD_CAPABILITIES_PATH}`],
+  );
+  // 探测不得携带 token：带 token 探测会把「需要凭据」的部署变成 200，模式分面随之丢失。
+  assert.equal(seen[0]?.url.includes("token"), false);
+  assert.equal(seen[0]?.init?.credentials, "same-origin");
 });
 
-test("invalid mode fails closed instead of silently running as local", () => {
-  for (const search of ["?mode=", "?mode=bogus"]) {
-    const result = resolve(search);
-    assert.equal(result.ok, false);
-    assert.equal(!result.ok && result.failure.reason, "mode-invalid");
+test("探测四种答案：cloud / local / credential-required / failure，绝不假设 local", async () => {
+  const cloud = await probeWebEntryMode({
+    origin: RUNTIME_ORIGIN,
+    fetchImpl: probeWith(jsonResponse(cloudCapabilities())).fetchImpl,
+  });
+  assert.deepEqual(cloud.kind === "mode" ? [cloud.kind, cloud.mode] : [cloud.kind], [
+    "mode",
+    "cloud",
+  ]);
+
+  const local = await probeWebEntryMode({
+    origin: RUNTIME_ORIGIN,
+    fetchImpl: probeWith(jsonResponse(LOCAL_CAPABILITIES)).fetchImpl,
+  });
+  assert.deepEqual(local.kind === "mode" ? [local.kind, local.mode] : [local.kind], [
+    "mode",
+    "local",
+  ]);
+
+  // 401/403 是「服务端在、但要求凭据」的明确回答，不是失败面。
+  for (const status of [401, 403]) {
+    const credential = await probeWebEntryMode({
+      origin: RUNTIME_ORIGIN,
+      fetchImpl: probeWith(
+        jsonResponse(
+          { code: "unauthenticated", message: "no", retryable: false, traceId: "t-1" },
+          status,
+        ),
+      ).fetchImpl,
+    });
+    assert.equal(credential.kind, "credential-required", `status ${status}`);
   }
-  const badEnv = resolve("", { buildMode: "clod" });
-  assert.equal(!badEnv.ok && badEnv.failure.reason, "mode-invalid");
+
+  // 404：地址不是入口 → 明确失败（而不是当本地、也不是当「没有模式」）。
+  const notFound = await probeWebEntryMode({
+    origin: RUNTIME_ORIGIN,
+    fetchImpl: probeWith(new Response("not found", { status: 404 })).fetchImpl,
+  });
+  assert.equal(notFound.kind === "failure" && notFound.failure.reason, "not-configured");
+
+  // 200 但不是契约响应体：不猜字段，也不回落本机。
+  const garbage = await probeWebEntryMode({
+    origin: RUNTIME_ORIGIN,
+    fetchImpl: probeWith(new Response("<html>proxy</html>", { status: 200 })).fetchImpl,
+  });
+  assert.equal(garbage.kind === "failure" && garbage.failure.reason, "incompatible-bundle");
+
+  // 不可达：失败面，不是 local。
+  const unreachable = await probeWebEntryMode({
+    origin: RUNTIME_ORIGIN,
+    fetchImpl: probeWith(new Error("ECONNREFUSED")).fetchImpl,
+  });
+  assert.equal(unreachable.kind === "failure" && unreachable.failure.reason, "backend-unreachable");
 });
 
-test("cloud entry never serves ?remote= and never falls back to the local entry", () => {
-  const result = resolve("?mode=cloud&remote=desktop-1");
+test("探测到不支持的 wire 版本时 fail-closed", async () => {
+  const result = await probeWebEntryMode({
+    origin: RUNTIME_ORIGIN,
+    fetchImpl: probeWith(jsonResponse({ ...cloudCapabilities(), protocolVersion: 99 })).fetchImpl,
+  });
+  // 未知版本在冻结 schema 层就被拒绝（`cloudWireProtocolVersionSchema` = literal 1），
+  // 因此这里只有 incompatible-bundle 这个结论，没有可解析出的版本细节——不猜、不降级。
+  assert.equal(result.kind === "failure" && result.failure.reason, "incompatible-bundle");
+  assert.equal(result.kind === "failure" ? result.failure.detail : undefined, undefined);
+});
+
+test("启动：探测结果映射到三个入口（云壳 / 凭据门 / 本地路径）", async () => {
+  const cloud = await bootWebEntry({
+    search: `?task=${TASK_ID}`,
+    runtimeOrigin: RUNTIME_ORIGIN,
+    fetchImpl: probeWith(jsonResponse(cloudCapabilities())).fetchImpl,
+  });
+  assert.deepEqual(cloud.ok ? cloud.plan : null, {
+    mode: "cloud",
+    origin: RUNTIME_ORIGIN,
+    credentialRequired: false,
+    taskId: TASK_ID,
+  });
+
+  // 401 → 云壳 + 凭据门：`?token=` 仍作为凭据传入通道保留。
+  const gate = await bootWebEntry({
+    search: "?token=lite-token-value",
+    runtimeOrigin: RUNTIME_ORIGIN,
+    fetchImpl: probeWith(new Response("unauthorized", { status: 401 })).fetchImpl,
+  });
+  assert.deepEqual(gate.ok ? gate.plan : null, {
+    mode: "cloud",
+    origin: RUNTIME_ORIGIN,
+    credentialRequired: true,
+    token: "lite-token-value",
+  });
+
+  // 本地：原 Web 路径，`?remote=` 语义不变（探测结果说了算，不受 URL 左右）。
+  const local = await bootWebEntry({
+    search: "?remote=desktop-1",
+    runtimeOrigin: RUNTIME_ORIGIN,
+    fetchImpl: probeWith(jsonResponse(LOCAL_CAPABILITIES)).fetchImpl,
+  });
+  assert.deepEqual(local.ok ? local.plan : null, { mode: "local", remoteId: "desktop-1" });
+});
+
+test("探测不确定一律停在错误屏：404 / 非契约响应 / 5xx / 不可达都不回落 local", async () => {
+  for (const response of [
+    new Response("not found", { status: 404 }),
+    new Response("<html>proxy</html>", { status: 200 }),
+    new Response("boom", { status: 500 }),
+    new Error("ECONNREFUSED"),
+  ]) {
+    const boot = await bootWebEntry({
+      search: "",
+      runtimeOrigin: RUNTIME_ORIGIN,
+      fetchImpl: probeWith(response).fetchImpl,
+    });
+    assert.equal(boot.ok, false, String(response));
+    // 失败面必须带可操作恢复动作（错误屏渲染的按钮），且不可能是 local 计划。
+    assert.ok(!boot.ok && boot.failure.recoveries.length > 0, String(response));
+  }
+});
+
+test("云入口不服务 ?remote=，也不回落本机入口", () => {
+  const result = resolveWebEntryBoot({
+    search: "?remote=desktop-1",
+    runtimeOrigin: RUNTIME_ORIGIN,
+    serverMode: "cloud",
+  });
   assert.equal(result.ok, false);
   assert.equal(!result.ok && result.failure.reason, "remote-unsupported");
   assert.deepEqual(!result.ok ? result.failure.recoveries : [], ["open-home"]);
 });
 
-test("cloud requires a same-origin runtime and rejects a build/runtime origin mismatch", () => {
-  const match = resolve("?mode=cloud", { buildCloudOrigin: RUNTIME_ORIGIN });
-  assert.equal(match.ok && match.plan.mode === "cloud" && match.plan.origin, RUNTIME_ORIGIN);
-
-  const mismatch = resolve("?mode=cloud", { buildCloudOrigin: "https://preview.example.com" });
-  assert.equal(mismatch.ok, false);
-  assert.equal(!mismatch.ok && mismatch.failure.reason, "origin-mismatch");
-  assert.deepEqual(!mismatch.ok ? mismatch.failure.detail : null, {
-    buildOrigin: "https://preview.example.com",
+test("?task= 按 cloud task 身份校验，不被静默丢弃", () => {
+  const ok = resolveWebEntryBoot({
+    search: `?task=${TASK_ID}`,
     runtimeOrigin: RUNTIME_ORIGIN,
+    serverMode: "cloud",
   });
-
-  const invalid = resolve("?mode=cloud", { buildCloudOrigin: "not-an-origin" });
-  assert.equal(!invalid.ok && invalid.failure.reason, "not-configured");
-});
-
-test("?task= is validated as a cloud task identity instead of being dropped", () => {
-  const ok = resolve(`?mode=cloud&task=${TASK_ID}`);
   assert.equal(ok.ok && ok.plan.mode === "cloud" && ok.plan.taskId, TASK_ID);
 
-  const bad = resolve("?mode=cloud&task=not-a-task");
+  const bad = resolveWebEntryBoot({
+    search: "?task=not-a-task",
+    runtimeOrigin: RUNTIME_ORIGIN,
+    serverMode: "cloud",
+  });
   assert.equal(bad.ok, false);
   assert.equal(!bad.ok && bad.failure.reason, "invalid-task-id");
-
   // identity 解析失败不得退化成「没有选中任务」的首页。
   assert.notEqual(!bad.ok && bad.failure.reason, "missing-token");
+
+  // 本地模式不认云主路由：`?task=` 不参与、也不改变本地计划（原 Web 行为不变）。
+  const local = resolveWebEntryBoot({
+    search: "?task=not-a-task&remote=desktop-1",
+    runtimeOrigin: RUNTIME_ORIGIN,
+    serverMode: "local",
+  });
+  assert.deepEqual(local.ok ? local.plan : null, { mode: "local", remoteId: "desktop-1" });
 });
 
-test("token is read from the deployment link and never required to be somewhere else", () => {
-  const withToken = resolve("?mode=cloud&token=lite-token-value");
-  assert.equal(
-    withToken.ok && withToken.plan.mode === "cloud" && withToken.plan.token,
-    "lite-token-value",
-  );
-  const withoutToken = resolve("?mode=cloud");
-  assert.equal(withoutToken.ok && withoutToken.plan.mode, "cloud");
-  assert.equal(
-    withoutToken.ok && withoutToken.plan.mode === "cloud" ? withoutToken.plan.token : "no-plan",
-    undefined,
-  );
-});
-
-test("host channel address is same-origin /ws in ws(s) scheme, with no credential in the URL", () => {
+test("host 通道地址：同源 /ws、ws(s) 协议、URL 不含凭据", () => {
   assert.equal(buildCloudHostChannelUrl(RUNTIME_ORIGIN), "wss://cloud.example.com/ws");
   assert.equal(buildCloudHostChannelUrl("http://localhost:3030"), "ws://localhost:3030/ws");
   assert.equal(buildCloudHostChannelUrl(RUNTIME_ORIGIN).includes("token"), false);
   assert.equal(CLOUD_CAPABILITIES_PATH, "/api/cloud/capabilities");
 });
 
-test("every boot failure reason carries an actionable recovery", () => {
+test("每个失败原因都带可操作恢复动作，且不含已作废的客户端模式失败类", () => {
   for (const reason of CLOUD_BOOT_FAILURE_REASONS) {
     const failure = createCloudBootFailure(reason);
     assert.ok(failure.recoveries.length > 0, `${reason} must expose a recovery action`);
     assert.equal(failure.reason, reason);
   }
+  // 04 §2.1：`mode-invalid` / `origin-mismatch` 随客户端模式声明作废。
+  assert.equal((CLOUD_BOOT_FAILURE_REASONS as readonly string[]).includes("mode-invalid"), false);
+  assert.equal(
+    (CLOUD_BOOT_FAILURE_REASONS as readonly string[]).includes("origin-mismatch"),
+    false,
+  );
 });
 
-test("auth failures split into 'missing' and 'invalid' by whether a token was provided", () => {
+test("认证失败按「是否提供过凭据」分成 missing 与 invalid", () => {
   const unauthorized = new CloudApiError({
     code: "unauthenticated",
     message: "Unauthorized",
@@ -163,7 +288,7 @@ test("auth failures split into 'missing' and 'invalid' by whether a token was pr
   assert.equal(classifyCloudBootError(forbidden, { tokenProvided: true }).reason, "not-authorized");
 });
 
-test("version/protocol mismatch and unreachable backend stay distinct failure surfaces", () => {
+test("协议不兼容与后端不可达是各自独立的失败面", () => {
   const incompatible = new CloudApiError({
     code: "protocol_incompatible",
     message: "unsupported protocol",
@@ -185,7 +310,7 @@ test("version/protocol mismatch and unreachable backend stay distinct failure su
   );
 });
 
-test("not-configured deployment is reported from the envelope or a bare 404/503", () => {
+test("未配置部署由错误信封或裸 404/503 判定", () => {
   const notConfigured = new CloudApiError({
     code: "not_configured",
     message: "cloud mode is not configured",
@@ -207,43 +332,41 @@ test("not-configured deployment is reported from the envelope or a bare 404/503"
   );
 });
 
-test("capabilities must report cloud mode and a supported wire version", () => {
-  assert.equal(classifyCapabilitiesMismatch(capabilities()), undefined);
+test("能力不匹配只在调用方要求某个模式时才成立（探测两模式都合法）", () => {
+  // 探测：两个模式都是合法答案，只有协议版本受约束（04 §2.1）。
+  assert.equal(classifyCapabilitiesMismatch(cloudCapabilities()), undefined);
+  assert.equal(classifyCapabilitiesMismatch(LOCAL_CAPABILITIES), undefined);
+  // 云启动流程/凭据门要求云：本地答案在这里才是不匹配。
   assert.equal(
-    classifyCapabilitiesMismatch(capabilities({ mode: "local" }))?.reason,
+    classifyCapabilitiesMismatch(LOCAL_CAPABILITIES, { expectedMode: "cloud" })?.reason,
     "not-configured",
   );
   const futureVersion = {
-    ...capabilities(),
+    ...cloudCapabilities(),
     protocolVersion: 99,
   } as unknown as CapabilitiesResponse;
   assert.equal(classifyCapabilitiesMismatch(futureVersion)?.reason, "incompatible-bundle");
 });
 
-function jsonResponse(payload: unknown, status = 200): Response {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-test("token gate handshake exchanges the token for the lite-token cookie", async () => {
+test("凭据门握手：令牌换成 lite-token cookie，并带回当前主体", async () => {
   const seen: string[] = [];
   const ok = await completeCloudTokenHandshake({
     origin: RUNTIME_ORIGIN,
     token: "lite-token-value",
     fetchImpl: ((input: RequestInfo | URL) => {
       seen.push(String(input));
-      return Promise.resolve(jsonResponse(capabilities()));
+      return Promise.resolve(jsonResponse(cloudCapabilities()));
     }) as typeof fetch,
   });
   assert.equal(ok.ok, true);
   assert.equal(seen[0], `${RUNTIME_ORIGIN}${CLOUD_CAPABILITIES_PATH}?token=lite-token-value`);
-  // 同一次握手就把当前主体带回来（scope 隔离键的唯一来源，04 §3.4.1）。
-  assert.equal(ok.ok && ok.capabilities.principalId, PRINCIPAL_ID);
+  assert.equal(
+    ok.ok && ok.capabilities.mode === "cloud" && ok.capabilities.principalId,
+    PRINCIPAL_ID,
+  );
 });
 
-test("token gate handshake fails closed on rejection, mismatch and unreachable backend", async () => {
+test("凭据门握手在拒绝、模式不符与不可达时 fail-closed", async () => {
   const rejected = await completeCloudTokenHandshake({
     origin: RUNTIME_ORIGIN,
     token: "wrong",
@@ -268,8 +391,7 @@ test("token gate handshake fails closed on rejection, mismatch and unreachable b
   const notCloud = await completeCloudTokenHandshake({
     origin: RUNTIME_ORIGIN,
     token: "lite",
-    fetchImpl: (() =>
-      Promise.resolve(jsonResponse(capabilities({ mode: "local" })))) as typeof fetch,
+    fetchImpl: (() => Promise.resolve(jsonResponse(LOCAL_CAPABILITIES))) as typeof fetch,
   });
   assert.equal(!notCloud.ok && notCloud.failure.reason, "not-configured");
 

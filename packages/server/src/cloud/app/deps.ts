@@ -18,6 +18,7 @@ import type { IdGeneratorPort } from "./ports/idGeneratorPort.js";
 import type { OperationOutboxPort } from "./ports/operationOutboxPort.js";
 import type { RuntimeCommandQueryPort } from "./ports/runtimeCommandQueryPort.js";
 import type { SandboxDriverRegistryPort } from "./ports/sandboxDriverRegistryPort.js";
+import type { SandboxRuntimeSettingsPort } from "./ports/sandboxRuntimeSettingsPort.js";
 import type { StoragePort } from "./ports/storagePort.js";
 import type { CloudCoreConfig } from "./config.js";
 
@@ -30,6 +31,12 @@ export interface CloudCoreDeps {
   github: GitHubPort;
   /** provider driver 解析（01 §4.2；不无声换 provider）。 */
   drivers: SandboxDriverRegistryPort;
+  /**
+   * 沙箱运行时账号设置（01 §4.3/§5.1 修订 2026-10-08）：capabilities 投影的
+   * `apiKeyConfigured` 与 env 核实上限来源。未接线（测试/嵌入装配）时 providers 投影
+   * 按「env 装配校验已通过」处理（apiKeyConfigured=true），不伪造端口。
+   */
+  sandboxRuntimeSettings?: SandboxRuntimeSettingsPort;
   /** 控制面 → attachment（02 §6.1 唯一投递出口）。 */
   attachments: AttachmentPort;
   /** runtime 命令事实查询（03 §7.2 对账；ACK 丢失不重复副作用）。 */

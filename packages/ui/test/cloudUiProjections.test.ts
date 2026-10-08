@@ -18,7 +18,10 @@ import type {
 } from "@zcode/shared";
 import { readCloudTaskActions } from "../src/cloud/cloudTaskActionsProjection.js";
 import { useCloudProjectsStore } from "../src/store/cloud/cloudProjectsStore.js";
-import { useCloudTasksStore } from "../src/store/cloud/cloudTasksStore.js";
+import {
+  selectCloudTaskStatusById,
+  useCloudTasksStore,
+} from "../src/store/cloud/cloudTasksStore.js";
 import { useCloudTaskHistoryStore } from "../src/store/cloud/cloudTaskHistoryStore.js";
 import {
   canApplyCloudConversationSnapshot,
@@ -171,6 +174,35 @@ test("a missing detail projection yields an empty action set instead of a guess"
   // 还没有详情投影（未加载 / 未选中任务）：没有动作可点，不猜状态。
   assert.deepEqual(readCloudTaskActions(null), []);
   assert.equal(Object.isFrozen(readCloudTaskActions(null)), true);
+});
+
+test("workspace status lookup prefers detail and falls back to the project list", () => {
+  // 巡检修订（04 §3）：archived 只读呈现需要按 workspaceIdentity 查任务状态。
+  // 详情优先（选中/打开过的任务必然有），项目列表兜底，两处都没有 → null（不猜）。
+  useCloudTasksStore.getState().reset();
+  useCloudTasksStore.getState().setPrincipal(PRINCIPAL);
+  assert.equal(selectCloudTaskStatusById(useCloudTasksStore.getState(), TASK_ID), null);
+
+  // 只在项目列表里（侧栏展开过、未打开详情）。
+  useCloudTasksStore
+    .getState()
+    .applyProjectTasks(
+      PRINCIPAL,
+      PROJECT_ID,
+      { items: [createTask({ status: "archived" })] },
+      { append: false },
+    );
+  assert.equal(selectCloudTaskStatusById(useCloudTasksStore.getState(), TASK_ID), "archived");
+
+  // 详情到达后以详情为准（revision 更新的投影会同时回填列表）。
+  const detail: TaskDetailResponse = {
+    task: createTask({ status: "active", revision: 2 }),
+    actions: ["send-input"],
+  };
+  useCloudTasksStore.getState().applyTaskDetail(PRINCIPAL, detail, Date.now());
+  assert.equal(selectCloudTaskStatusById(useCloudTasksStore.getState(), TASK_ID), "active");
+
+  useCloudTasksStore.getState().reset();
 });
 
 test("conversation fold dedupes, orders and flags gaps without filling them", () => {

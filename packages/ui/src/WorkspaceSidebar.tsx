@@ -1355,7 +1355,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebarComponent({
       // 这里用设计系统的结构面 token 固定侧栏层级，避免不同合成器把左侧容器混成异常灰块。
       className="flex h-full flex-col overflow-hidden"
     >
-      <div className="h-12 [app-region:drag]"></div>
+      {/* 顶部 48px 是顶栏浮层（返回/前进/新建）的槽位：占位高度在所有平台一致。
+          drag region 只在桌面端渲染（2026-10-08 巡检修订）：云 Web 没有原生窗口可
+          拖动，`[app-region:drag]` 在浏览器里只是悬在浮层按钮槽位上的实体层，
+          命中测试会落到 drag 层而不是按钮（顶栏 New task 被「挡死」）。 */}
+      <div className={isDesktop ? "h-12 [app-region:drag]" : "h-12"}></div>
       <div className="relative flex-1 min-h-0 overflow-hidden">
         <div
           className={cn(

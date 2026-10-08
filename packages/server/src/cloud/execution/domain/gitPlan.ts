@@ -83,6 +83,17 @@ export function planRevParse(ref: string): GitPlan {
   return { ok: true, argv: ["rev-parse", ref] };
 }
 
+/**
+ * 本地 HEAD 的 SHA（01 §8：checkpoint 只有被远端 HEAD 查询确认才推进 lastCheckpointSha，
+ * 确认对象就是这里的本地 sha，而不是「远端存在任意 HEAD」）。
+ *
+ * `--verify` 保证 HEAD 不可解析（未提交的空仓库、损坏 worktree）时直接非零退出，
+ * 而不是把符号名 `HEAD` 当成 SHA 返回——调用方据此 fail closed，不猜。
+ */
+export function planRevParseHead(): GitPlan {
+  return { ok: true, argv: ["rev-parse", "--verify", "HEAD"] };
+}
+
 /** 工作区状态：porcelain 输出为空 = 无变更（此时不建空提交）。 */
 export function planStatusPorcelain(): GitPlan {
   return { ok: true, argv: ["status", "--porcelain", "--untracked-files=normal"] };

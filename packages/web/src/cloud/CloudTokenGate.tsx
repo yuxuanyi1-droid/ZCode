@@ -1,17 +1,22 @@
 /**
- * 云入口的凭据门（specs/cloud-agent/modules/W9 §3/§5；03 §3；12 §5）。
+ * 云入口的凭据门（specs/cloud-agent/modules/W9 §3/§5；04 §2.1；03 §3；12 §5）。
  *
- * 只在「客户端完全没有凭据」时出现：URL 无 `?token=` 且服务端未下发 lite-token cookie。
+ * 出现的条件只有一个：**服务端明确要求凭据**——启动探测 `/api/cloud/capabilities` 返回
+ * 401/403（04 §2.1），或启动流程报 `missing-token`。本地部署走的是本地路径，不会到这里。
+ *
  * 用户粘贴的令牌只用于**一次**同源握手（`/api/cloud/capabilities?token=`），服务端按既有
  * 约定下发 HttpOnly cookie；此后 `/api/cloud/*` 与 `/ws` 都走 cookie，令牌不进 URL、不写
- * localStorage/sessionStorage，也不进日志（12 §5「浏览器不持有 token 正文」）。
+ * localStorage/sessionStorage，也不进日志（12 §5「浏览器不持有 token 正文」）。部署链接里
+ * 的 `?token=` 仍是凭据传入通道：`initialToken` 会在挂载时自动握手一次，失败再手填。
  */
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { completeCloudTokenHandshake } from "./cloudBoot.js";
 import { resolveCloudEntryLocale, type CloudEntryLocale } from "./CloudBootstrapErrorScreen.js";
 
 export interface CloudTokenGateProps {
   readonly origin: string;
+  /** 部署链接携带的 `?token=`：只用于挂载时的一次自动握手，之后不再出现在任何位置。 */
+  readonly initialToken?: string | undefined;
   /** 握手成功：cookie 已建立，入口可以重跑启动流程。 */
   readonly onTokenAccepted: () => void;
 }
@@ -39,29 +44,43 @@ const COPY = {
   },
 } as const;
 
-export function CloudTokenGate({ origin, onTokenAccepted }: CloudTokenGateProps) {
+export function CloudTokenGate({ origin, initialToken, onTokenAccepted }: CloudTokenGateProps) {
   const locale: CloudEntryLocale = resolveCloudEntryLocale();
   const copy = COPY[locale];
-  const [value, setValue] = useState("");
+  const [value, setValue] = useState(initialToken ?? "");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const submit = useCallback(async () => {
-    const token = value.trim();
-    if (!token) {
-      setError(copy.empty);
+  const submit = useCallback(
+    async (candidate: string) => {
+      const token = candidate.trim();
+      if (!token) {
+        setError(copy.empty);
+        return;
+      }
+      setPending(true);
+      setError(null);
+      const result = await completeCloudTokenHandshake({ origin, token });
+      setPending(false);
+      // 只保留「成功/失败」两个结果：失败原因由启动流程的失败面统一呈现，这里不复制文案。
+      setError(result.ok ? null : copyFailure(locale, result.failure.reason));
+      if (result.ok) {
+        onTokenAccepted();
+      }
+    },
+    [copy.empty, locale, onTokenAccepted, origin],
+  );
+
+  // 部署链接的 `?token=` 自动握手一次（04 §2.1「?token= 仍是凭据传入通道」）：
+  // ref 保证只尝试一次——失败后保留输入框内容让用户改，不自动重试（避免凭据被反复上送）。
+  const autoSubmitted = useRef(false);
+  useEffect(() => {
+    if (autoSubmitted.current || initialToken === undefined) {
       return;
     }
-    setPending(true);
-    setError(null);
-    const result = await completeCloudTokenHandshake({ origin, token });
-    setPending(false);
-    // 只保留「成功/失败」两个结果：失败原因由启动流程的失败面统一呈现，这里不复制文案。
-    setError(result.ok ? null : copyFailure(locale, result.failure.reason));
-    if (result.ok) {
-      onTokenAccepted();
-    }
-  }, [copy.empty, locale, onTokenAccepted, origin, value]);
+    autoSubmitted.current = true;
+    void submit(initialToken);
+  }, [initialToken, submit]);
 
   return (
     <div className="h-dvh min-h-dvh w-screen overflow-y-auto bg-background text-foreground">
@@ -76,7 +95,7 @@ export function CloudTokenGate({ origin, onTokenAccepted }: CloudTokenGateProps)
             className="mt-4 flex flex-col gap-2"
             onSubmit={(event) => {
               event.preventDefault();
-              void submit();
+              void submit(value);
             }}
           >
             <label className="text-ui-caption text-foreground-subtle" htmlFor="cloud-token-input">

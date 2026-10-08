@@ -17,7 +17,12 @@ import type {
   TerminationObservation,
 } from "../../app/ports/sandboxDriverPort.js";
 import { CloudAdapterError, type CloudAdapterLogger } from "./adapterError.js";
-import { E2B_SANDBOX_CAPABILITIES, describeCapabilities } from "./capabilities.js";
+import {
+  describeCapabilities,
+  E2B_SANDBOX_CAPABILITIES,
+  resolveEffectiveMaxLifetimeSeconds,
+  type SandboxLifetimeOptions,
+} from "./capabilities.js";
 import { launchE2bSupervisor } from "./e2bBootstrap.js";
 import {
   asRecord,
@@ -53,15 +58,13 @@ export const E2B_PROVIDER = "e2b";
 /** create 结果对账窗口：窗口内「清单查不到」不足以判定未创建（01 §4.1）。 */
 export const E2B_DEFAULT_RECONCILIATION_WINDOW_MS = 300_000;
 
-export interface E2bDriverOptions {
+export interface E2bDriverOptions extends SandboxLifetimeOptions {
   /** provider API key 经注入函数读取；绝不进 URL、日志或 metadata。 */
   apiKey: () => string | Promise<string>;
   baseUrl?: string;
   fetch?: SandboxFetch;
   now?: () => number;
   requestTimeoutMs?: number;
-  /** 账号计划核实的生命周期上限（秒）；未核实保持 undefined（不虚构上限）。 */
-  maxLifetimeSeconds?: number;
   createReconciliationWindowMs?: number;
   /** supervisor 即时失败探测窗口（毫秒；缺省 3s，见 e2bBootstrap）。 */
   probeWindowMs?: number;
@@ -93,13 +96,11 @@ export function createE2bSandboxDriver(options: E2bDriverOptions): SandboxDriver
     logger,
   };
 
-  /** 期限换算：请求的 epoch 毫秒 → provider 的 timeout 秒（取上限较小值）。 */
-  function clampTimeoutSeconds(requestedDeadline: number): number {
+  /** 期限换算：请求的 epoch 毫秒 → provider 的 timeout 秒（取生效上限较小值，01 §4.3 修订）。 */
+  async function clampTimeoutSeconds(requestedDeadline: number): Promise<number> {
     const requested = Math.floor((requestedDeadline - now()) / 1000);
-    // provider 能力上限收敛（01 §4.3）：可用期取请求与已核实上限较小值。
-    return options.maxLifetimeSeconds !== undefined
-      ? Math.min(requested, options.maxLifetimeSeconds)
-      : requested;
+    const cap = await resolveEffectiveMaxLifetimeSeconds(options);
+    return cap !== undefined ? Math.min(requested, cap) : requested;
   }
 
   return {
@@ -115,7 +116,7 @@ export function createE2bSandboxDriver(options: E2bDriverOptions): SandboxDriver
           imageRefLen: imageRef.length,
         });
       }
-      const timeoutSeconds = clampTimeoutSeconds(input.requestedDeadline);
+      const timeoutSeconds = await clampTimeoutSeconds(input.requestedDeadline);
       if (timeoutSeconds < 1) {
         throw new CloudAdapterError("validation_failed", "requested deadline already elapsed", {
           requestedDeadline: input.requestedDeadline,
@@ -326,7 +327,7 @@ export function createE2bSandboxDriver(options: E2bDriverOptions): SandboxDriver
           sandboxId: handle.sandboxId,
         });
       }
-      const timeoutSeconds = clampTimeoutSeconds(requestedDeadlineMs);
+      const timeoutSeconds = await clampTimeoutSeconds(requestedDeadlineMs);
       if (timeoutSeconds < 1) {
         throw new CloudAdapterError("validation_failed", "requested deadline already elapsed", {
           requestedDeadlineMs,

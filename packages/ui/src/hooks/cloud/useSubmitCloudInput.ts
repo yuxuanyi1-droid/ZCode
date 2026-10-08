@@ -79,6 +79,9 @@ export function useSubmitCloudInput(
   const selection = context?.selection ?? null;
   const scopeKey = selection?.draftScope?.key ?? null;
   const taskId = selection?.taskId ?? null;
+  // 首发 202 后请求控制器启动有界 run 观察（04 §3.2.4）。函数引用由控制器保证稳定，
+  // 不把整个 context 对象放进依赖（它随每次详情刷新换引用）。
+  const beginTaskRunWatch = context?.beginTaskRunWatch ?? null;
 
   const [lastOutcome, setLastOutcome] = useState<CloudSubmissionOutcome | null>(null);
 
@@ -156,9 +159,16 @@ export function useSubmitCloudInput(
               : { requestedConfig: args.requestedConfig }),
           },
         },
+      }).then((outcome) => {
+        // 首发 202 ≠ run 已可见（04 §3.2.4）：立刻请求有界轮询，把详情从 draft 翻到
+        // provisioning/ready/failed，否则用户要手动刷新才能看到任务已启动。
+        if (outcome.kind === "persisted") {
+          beginTaskRunWatch?.();
+        }
+        return outcome;
       });
     },
-    [run],
+    [beginTaskRunWatch, run],
   );
 
   const submitAppendInput = useCallback(

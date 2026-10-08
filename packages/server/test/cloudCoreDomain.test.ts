@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { CloudTaskRecord } from "@zcode/shared";
+import type { CloudTaskRecord, InputDeliveryStatus } from "@zcode/shared";
 import {
   canArchiveTask,
   canReactivateTask,
@@ -51,7 +51,10 @@ import {
   isWithinCloudWorkspaceRoot,
 } from "../src/cloud/domain/workspacePath.js";
 import { deriveTaskActions } from "../src/cloud/domain/taskActions.js";
-import { canAdvanceDeliveryStatus } from "../src/cloud/domain/deliveryStatus.js";
+import {
+  canAdvanceDeliveryStatus,
+  INPUT_DELIVERY_TRANSITIONS,
+} from "../src/cloud/domain/deliveryStatus.js";
 import { makeRun } from "./cloudCoreFakes.js";
 
 const BASE_SHA = "b".repeat(40);
@@ -547,12 +550,28 @@ test("工作区路径越界判定（hello 上报值校验）", () => {
   assert.equal(isWithinCloudWorkspaceRoot("/workspacex/demo"), false);
 });
 
-test("投递状态机：单向推进、终态不回退、uncertain 可退回 accepted（02 §6.3）", () => {
+test("投递状态机：唯一边表钉死，单向推进、终态不回退、uncertain 可退回 accepted（02 §6.3）", () => {
+  // 钉死整张边表：app 层、测试 fake 与真实 SQLite 仓储共用这一份（修复 2026-10-07
+  // P1「同一冻结规则两套实现」），任何一侧改动都必须显式改这里并同步 02 §6.3。
+  assert.deepEqual(INPUT_DELIVERY_TRANSITIONS, {
+    accepted: ["delivering", "admitted", "rejected", "uncertain", "cancelled"],
+    delivering: ["admitted", "rejected", "uncertain"],
+    uncertain: ["accepted", "delivering", "admitted", "rejected", "cancelled"],
+    admitted: [],
+    rejected: [],
+    cancelled: [],
+  });
+
   assert.equal(canAdvanceDeliveryStatus("accepted", "delivering"), true);
   assert.equal(
     canAdvanceDeliveryStatus("accepted", "admitted"),
     true,
-    "runtime ACK 可能快于 delivering 写入",
+    "runtime ACK 可能快于 delivering 写入（recordRuntimeAck 路径）",
+  );
+  assert.equal(
+    canAdvanceDeliveryStatus("accepted", "uncertain"),
+    true,
+    "RPC timeout/断连先置 uncertain（02 §6.3）",
   );
   assert.equal(canAdvanceDeliveryStatus("delivering", "admitted"), true);
   assert.equal(
@@ -561,7 +580,23 @@ test("投递状态机：单向推进、终态不回退、uncertain 可退回 acc
     "已投递未对账不得直接撤销",
   );
   assert.equal(canAdvanceDeliveryStatus("uncertain", "accepted"), true, "对账确认后的重投");
-  assert.equal(canAdvanceDeliveryStatus("admitted", "delivering"), false, "终态不回退");
+  assert.equal(
+    canAdvanceDeliveryStatus("uncertain", "delivering"),
+    true,
+    "对账确认未到达后同 commandId 重投（02 §6.3 重发原信封）",
+  );
+  assert.equal(
+    canAdvanceDeliveryStatus("uncertain", "cancelled"),
+    true,
+    "已投递但 ACK 未知的取消先对账，对账后落 cancelled（CP-14 决定取消路径）",
+  );
+  for (const to of ["accepted", "delivering", "uncertain", "admitted", "rejected", "cancelled"]) {
+    assert.equal(
+      canAdvanceDeliveryStatus("admitted", to as InputDeliveryStatus),
+      to === "admitted",
+      `admitted 是终态，不得迁移到 ${to}（同状态幂等除外）`,
+    );
+  }
   assert.equal(canAdvanceDeliveryStatus("rejected", "admitted"), false);
   assert.equal(canAdvanceDeliveryStatus("cancelled", "accepted"), false);
 });

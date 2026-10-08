@@ -97,6 +97,31 @@ export function describeCapabilities(
   return maxLifetimeSeconds === undefined ? { ...declared } : { ...declared, maxLifetimeSeconds };
 }
 
+/** 生效上限解析的 driver 选项切片（`maxLifetimeSeconds` 静态值 + create 时点覆盖）。 */
+export interface SandboxLifetimeOptions {
+  /** env 核实的静态上限（秒）；未核实保持 undefined（不虚构上限）。 */
+  readonly maxLifetimeSeconds?: number;
+  /**
+   * create 时点的生效上限解析（01 §4.3 修订 2026-10-08）：账号设置覆盖
+   * （min(设置值, env 核实上限)）；缺省回落静态 `maxLifetimeSeconds`。能力声明仍只
+   * 上报静态 env 核实值（部署事实），账号覆盖只收敛请求。
+   */
+  readonly resolveMaxLifetimeSeconds?: () => number | undefined | Promise<number | undefined>;
+}
+
+/**
+ * 生效上限：账号设置覆盖优先（create 时点解析），回落静态 env 核实值。
+ * 三家 driver 的 create/extend clamp 共用同一收敛语义（01 §4.3）。
+ */
+export async function resolveEffectiveMaxLifetimeSeconds(
+  options: SandboxLifetimeOptions,
+): Promise<number | undefined> {
+  const resolved = options.resolveMaxLifetimeSeconds
+    ? await options.resolveMaxLifetimeSeconds()
+    : undefined;
+  return resolved ?? options.maxLifetimeSeconds;
+}
+
 // ── 可选性门控（实测解禁）──
 
 export interface SandboxProviderEvidence {

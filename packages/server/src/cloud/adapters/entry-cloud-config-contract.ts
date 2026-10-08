@@ -1,15 +1,22 @@
 /**
- * 云入口配置的**公开键登记**与值解析（specs/cloud-agent/03 §2/§8、W5 §3/§4）。
+ * 云入口配置的**公开键登记**与契约结构（specs/cloud-agent/03 §2/§8、W5 §3/§4）。
  *
- * 与 `entry-cloud-config.ts` 的分工：本文件只有「键名 + 纯解析 + 结构化启动错误」，
+ * 与 `entry-cloud-config.ts` 的分工：本文件只有「键名 + 类型/issue 结构 + 启动错误」，
  * 不含 IO 顺序与装配职责；`readCloudEntryConfig`（含跨字段校验与就绪顺序）在那里，
  * 并把本文件的键常量与错误类型原样 re-export，外部只要继续 import `entry-cloud-config.js`。
+ * 纯值解析函数已拆至 `entry-cloud-config-parse.ts`（无行为变更的纯结构拆分，
+ * 本文件被其单向 import）。
  */
 import { stat } from "node:fs/promises";
 import type { CloudErrorCode } from "@zcode/shared";
-import { isSandboxProviderId } from "./sandbox/capabilities.js";
 
 export type ZCodeServerMode = "local" | "cloud";
+
+/**
+ * 云入口鉴权模式（03 §3 修订 2026-10-07）：`token` = 既有 lite-token fail-closed（默认）；
+ * `anonymous` = 本地调试逃生门，lite-token 校验全放行（principalId 仍必填）。
+ */
+export type CloudAuthMode = "token" | "anonymous";
 
 export interface CloudStaticModelFallback {
   readonly provider: string;
@@ -29,6 +36,8 @@ export interface CloudSecretRefs {
 
 export interface CloudEntryConfig {
   readonly mode: "cloud";
+  /** lite-token 鉴权模式（03 §3 修订）；默认 `token`，由 `readCloudEntryConfig` 落定。 */
+  readonly authMode: CloudAuthMode;
   readonly publicOrigin: string;
   readonly listenHost?: string;
   readonly listenPort: number;
@@ -60,7 +69,9 @@ export interface LocalEntryConfig {
 
 export type CloudEntryConfigIssueCode =
   | "mode_invalid"
+  | "auth_mode_invalid"
   | "principal_id_required"
+  | "principal_id_invalid"
   | "auth_required"
   | "data_dir_required"
   | "public_origin_required"
@@ -108,6 +119,12 @@ export const ZCODE_CLOUD_MAX_CONCURRENT_RUNS_ENV = "ZCODE_CLOUD_MAX_CONCURRENT_R
 export const ZCODE_CLOUD_PRINCIPAL_ID_ENV = "ZCODE_CLOUD_PRINCIPAL_ID";
 /** 部署秘密的引用；值只由 `adapters/secret/deploySecrets.ts` 读取（W4 唯一 owner）。 */
 export const ZCODE_SERVER_AUTH_TOKEN_FILE_ENV = "ZCODE_SERVER_AUTH_TOKEN_FILE";
+/**
+ * lite-token 鉴权模式（03 §3 修订 2026-10-07）：`token`（默认，fail-closed 不变）或
+ * `anonymous`（本地调试逃生门：lite-token 校验全放行、authToken 引用可缺、principalId 仍必填）。
+ * 非法值报 `auth_mode_invalid`，绝不静默当 `token` 或 `anonymous`。
+ */
+export const ZCODE_CLOUD_AUTH_MODE_ENV = "ZCODE_CLOUD_AUTH_MODE";
 export const ZCODE_CLOUD_GITHUB_APP_ID_ENV = "ZCODE_CLOUD_GITHUB_APP_ID";
 export const ZCODE_CLOUD_GITHUB_APP_KEY_FILE_ENV = "ZCODE_CLOUD_GITHUB_APP_PRIVATE_KEY_FILE";
 export const ZCODE_CLOUD_GITHUB_WEBHOOK_SECRET_FILE_ENV = "ZCODE_CLOUD_GITHUB_WEBHOOK_SECRET_FILE";
@@ -154,63 +171,6 @@ export class CloudEntryStartupError extends Error {
   }
 }
 
-export function readTrimmed(
-  env: Record<string, string | undefined>,
-  key: string,
-): string | undefined {
-  const value = env[key]?.trim();
-  return value ? value : undefined;
-}
-
-export function splitList(value: string | undefined): string[] {
-  if (!value) {
-    return [];
-  }
-  return [
-    ...new Set(
-      value
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  ];
-}
-
-export function parsePositiveInt(value: string | undefined, fallback: number): number | null {
-  if (value === undefined) {
-    return fallback;
-  }
-  const parsed = Number.parseInt(value, 10);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-/** origin 只接受 scheme + authority：带 path/query/fragment 会让 attachment 地址拼错。 */
-export function parsePublicOrigin(value: string | undefined): string | null {
-  if (!value) {
-    return null;
-  }
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    return null;
-  }
-  if (url.pathname !== "/" || url.search || url.hash) {
-    return null;
-  }
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  const loopback =
-    host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".localhost");
-  if (url.protocol === "http:" && !loopback) {
-    // 明文 origin 只允许本机开发；公网部署必须 https（01 §7.2 凭据边界）。
-    return null;
-  }
-  return url.origin;
-}
-
 export async function assertWebDir(webDir: string): Promise<CloudEntryConfigIssue | null> {
   try {
     const info = await stat(webDir);
@@ -228,129 +188,5 @@ export async function assertWebDir(webDir: string): Promise<CloudEntryConfigIssu
 }
 
 /** `local`（或未设置模式）返回本地配置；解析本身无副作用（磁盘探测在 host 本体）。 */
-
-export function parseSandboxTemplateRefs(value: string | undefined): {
-  value?: Readonly<Record<string, string>>;
-  issues: CloudEntryConfigIssue[];
-} {
-  if (!value) {
-    return { issues: [] };
-  }
-  const issues: CloudEntryConfigIssue[] = [];
-  const refs: Record<string, string> = {};
-  for (const entry of value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean)) {
-    const separator = entry.indexOf(":");
-    const provider = separator > 0 ? entry.slice(0, separator).trim() : "";
-    const ref = separator > 0 ? entry.slice(separator + 1).trim() : "";
-    const invalid = (message: string): void => {
-      issues.push({
-        code: "sandbox_template_invalid",
-        field: ZCODE_CLOUD_SANDBOX_TEMPLATE_REF_ENV,
-        message: `${message}（收到: ${entry}）`,
-      });
-    };
-    if (!provider || !ref) {
-      invalid("模板引用必须是 provider:ref 形式");
-      continue;
-    }
-    if (!isSandboxProviderId(provider)) {
-      invalid(`未知的沙箱 provider`);
-      continue;
-    }
-    if (/(^|[:@])latest$/i.test(ref)) {
-      invalid("镜像引用禁止 latest（版本/digest 必须固定）");
-      continue;
-    }
-    if (refs[provider]) {
-      invalid(`provider ${provider} 重复声明模板引用`);
-      continue;
-    }
-    refs[provider] = ref;
-  }
-  if (issues.length > 0) {
-    return { issues };
-  }
-  return { value: refs, issues };
-}
-
-export function parseIdList(value: string | undefined): number[] | undefined {
-  if (!value) {
-    return undefined;
-  }
-  const ids = value
-    .split(",")
-    .map((item) => Number.parseInt(item.trim(), 10))
-    .filter((id) => Number.isInteger(id) && id > 0);
-  return ids.length > 0 ? ids : undefined;
-}
-
-/**
- * `provider:seconds` 列表。fail-closed：缺 `:`、provider 未知、seconds 非正整数、
- * 同 provider 重复声明一律报 issue（01 §4.3 的上限必须是核实过的正整数秒）。
- */
-export function parseSandboxLifetimeLimits(value: string | undefined): {
-  value?: Readonly<Record<string, number>>;
-  issues: CloudEntryConfigIssue[];
-} {
-  if (!value) {
-    return { issues: [] };
-  }
-  const issues: CloudEntryConfigIssue[] = [];
-  const limits: Record<string, number> = {};
-  for (const entry of value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean)) {
-    const separator = entry.indexOf(":");
-    const provider = separator > 0 ? entry.slice(0, separator).trim() : "";
-    const rawSeconds = separator > 0 ? entry.slice(separator + 1).trim() : "";
-    const invalid = (message: string): void => {
-      issues.push({
-        code: "sandbox_lifetime_invalid",
-        field: ZCODE_CLOUD_SANDBOX_MAX_LIFETIME_SECONDS_ENV,
-        message: `${message}（收到: ${entry}）`,
-      });
-    };
-    if (!provider || !rawSeconds) {
-      invalid("可用期上限必须是 provider:seconds 形式");
-      continue;
-    }
-    if (!isSandboxProviderId(provider)) {
-      invalid("未知的沙箱 provider");
-      continue;
-    }
-    if (!/^\d+$/.test(rawSeconds) || Number.parseInt(rawSeconds, 10) <= 0) {
-      invalid("可用期上限必须是正整数秒");
-      continue;
-    }
-    if (limits[provider] !== undefined) {
-      invalid(`provider ${provider} 重复声明可用期上限`);
-      continue;
-    }
-    limits[provider] = Number.parseInt(rawSeconds, 10);
-  }
-  if (issues.length > 0) {
-    return { issues };
-  }
-  return { value: limits, issues };
-}
-
-export function parseStaticModelFallback(
-  value: string | undefined,
-): CloudStaticModelFallback | null {
-  if (!value) {
-    return null;
-  }
-  const separator = value.indexOf(":");
-  if (separator <= 0 || separator === value.length - 1) {
-    return null;
-  }
-  const provider = value.slice(0, separator).trim();
-  const model = value.slice(separator + 1).trim();
-  return provider && model ? { provider, model } : null;
-}
 
 /** 把多条 issue 收敛成一个结构化启动错误（03 §6：不把细节伪装成成功）。 */

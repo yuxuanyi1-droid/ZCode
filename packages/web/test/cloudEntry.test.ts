@@ -1,6 +1,6 @@
 /**
- * Web 入口（W9）消费 shared cloud 契约的入口用例：能力协商、通道地址、分阶段端点
- * 不得伪装成空列表成功（03 §6、12 §5）。
+ * Web 入口（W9）消费 shared cloud 契约的入口用例：能力协商（两个模式）、通道地址、
+ * 分阶段端点不得伪装成空列表成功（03 §6、12 §5、04 §2.1）。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -8,6 +8,8 @@ import {
   CLOUD_HTTP_ENDPOINTS,
   CLOUD_SERVICE_CHANNEL_FACETS,
   capabilitiesResponseSchema,
+  createLocalCapabilitiesResponse,
+  localCapabilitiesResponseSchema,
 } from "@zcode/shared";
 
 test("web entry can fail closed on protocol/capability mismatch", () => {
@@ -24,6 +26,8 @@ test("web entry can fail closed on protocol/capability mismatch", () => {
         canConfirmTermination: true,
         deadlineSource: "provider",
         supportsOutboundWss: true,
+        // 2026-10-08 契约新增：生效 key 是否已配置（布尔投影，不含值）。
+        apiKeyConfigured: true,
       },
     ],
     features: ["durable-input", "replayable-history"],
@@ -41,6 +45,18 @@ test("web entry can fail closed on protocol/capability mismatch", () => {
     capabilitiesResponseSchema.safeParse({ ...capabilities, secret: "x" }).success,
     false,
   );
+});
+
+test("web entry accepts both prompt modes from the server probe with one schema", () => {
+  // 04 §2.1（2026-10-07）：模式判定服务端驱动——同一份 Web 产物在探测里可能收到两种答案，
+  // 都必须按同一份冻结 schema 解析；本地分支没有主体，也不得携带任何能力或秘密。
+  const local = createLocalCapabilitiesResponse();
+  assert.equal(capabilitiesResponseSchema.safeParse(local).success, true);
+  assert.equal(localCapabilitiesResponseSchema.safeParse(local).success, true);
+  assert.equal("principalId" in local, false);
+  assert.deepEqual(local.providers, []);
+  assert.deepEqual(local.features, []);
+  assert.equal(local.taskOwnedAttachments, false);
 });
 
 test("web entry connects exactly the two documented channels", () => {

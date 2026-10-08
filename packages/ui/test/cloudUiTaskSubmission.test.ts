@@ -113,6 +113,9 @@ test("202 is persisted receipt only, and never becomes a runtime admission", asy
   // `accepted` 是控制面持久接收，不带 runtimeAck —— UI 不能把它当准入。
   assert.equal(outcome.receipt.deliveryStatus, "accepted");
   assert.equal(outcome.receipt.runtimeAck, undefined);
+  // 2026-10-08 巡检修订（P2）：persisted outcome 携带本次幂等键，供 pane 的
+  // pending optimistic overlay 关联权威投影（queue/userInput 的 sourceCommandId）。
+  assert.equal(outcome.commandId, COMMAND_ID);
 
   const attempt = useCloudDraftStore.getState().attempts[SCOPE_KEY]?.[COMMAND_ID];
   assert.equal(attempt?.phase, "persisted");

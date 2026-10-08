@@ -23,6 +23,7 @@ import type {
   SandboxDriverRegistryPort,
   SandboxProviderEntry,
 } from "../app/ports/sandboxDriverRegistryPort.js";
+import type { SandboxRuntimeSettingsPort } from "../app/ports/sandboxRuntimeSettingsPort.js";
 import {
   isSandboxProviderId,
   resolveProviderGate,
@@ -53,6 +54,12 @@ export interface CreateCloudDriverRegistryOptions {
   readonly logger: CloudAdapterLogger;
   /** 部署显式勾选的未实测 provider（01 §4.2 门控输入）。 */
   readonly allowUnverified?: readonly string[];
+  /**
+   * 账号设置覆盖端口（01 §4.3/§5.1 修订 2026-10-08）：driver 的 key 与生效超时在
+   * **create 时点**经它解析（credential ?? env；min(设置值, env 核实上限)），
+   * 不在启动期固化。未接线（测试注入 bindings）时 driver 保持 env 静态值。
+   */
+  readonly runtimeSettings?: SandboxRuntimeSettingsPort;
 }
 
 /** 缺失的必需秘密名（只回名字，不回值）。 */
@@ -200,6 +207,7 @@ export async function createCloudDriverRegistry(
       provider,
       readSecret: options.readSecret,
       logger: options.logger,
+      ...(options.runtimeSettings ? { runtimeSettings: options.runtimeSettings } : {}),
     };
     const driver = binding.createDriver(context);
     drivers.set(provider, driver);

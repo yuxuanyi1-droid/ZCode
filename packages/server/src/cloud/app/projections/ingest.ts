@@ -36,12 +36,16 @@ export function createProjectionIngestService(
       const first = frame.records[0];
       if (!first) return empty;
       const session = registry.current(first.runId);
-      if (session && frame.connectionEpoch !== session.connectionEpoch) {
-        // 旧代际批次拒绝：不落库、不回 ACK，执行节点 WAL 保留记录（02 §2 不变量 3、§7.1）。
+      // 修复依据（2026-10-07 review P0-2，02 §2 不变量 3 fail-closed、02 §7.1）：
+      // 此前 `session && ...` 的写法在 registry 无该 run 的 session（如未认证 attachment、
+      // 摘除后的空窗）时把整个代际围栏旁路，批次直接落库。无 session 本身就是异常
+      // 投影来源——合法批次只能来自已完成 hello 的 attachment，其 session 必然在册。
+      // 因此无 session 即拒绝：不落库、不回 ACK（执行节点 WAL 保留记录等待恢复）。
+      if (!session || frame.connectionEpoch !== session.connectionEpoch) {
         cloudCoreLogger.warn(undefined, "stale projection batch rejected", {
           runId: first.runId,
           batchEpoch: frame.connectionEpoch,
-          currentEpoch: session.connectionEpoch,
+          currentEpoch: session?.connectionEpoch,
         });
         return empty;
       }

@@ -153,6 +153,7 @@ export {
   readCloudTaskActions,
   readCloudTaskIdFromSearch,
   resolveCloudTaskIdFromWorkspaceIdentity,
+  resolveCloudTaskRouteFailure,
   normalizeCloudControlPlaneOrigin,
   openCloudTaskRoute,
   parseCloudUiBootstrap,
@@ -210,6 +211,7 @@ export {
 } from "./hooks/cloud/index.js";
 export type {
   CloudAttachmentStatus,
+  CloudComposerSendOutcome,
   CloudComposerSubmitResult,
   CloudRepositoryBlockingReason,
   CloudWorkspaceControllerValue,
@@ -282,7 +284,10 @@ export {
 export {
   CloudProjectTaskSection,
   describeCloudProjectLabel,
-  sortCloudTasksForSidebar,
 } from "./cloud/CloudProjectTaskSection.js";
+export {
+  projectCloudTasksForSidebar,
+  sortCloudTasksForSidebar,
+} from "./cloud/cloudSidebarTaskList.js";
 export { CloudRepositoryPickerDialog } from "./cloud/CloudRepositoryPickerDialog.js";
 export { CloudDraftStartConfigControl } from "./cloud/CloudDraftStartConfigControl.js";

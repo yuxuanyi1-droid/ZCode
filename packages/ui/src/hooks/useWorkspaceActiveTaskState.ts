@@ -3,6 +3,8 @@ import type { ZCodeProvider, ZCodeTaskMeta } from "@zcode/shared";
 import { useActiveTaskSnapshotMeta } from "@/hooks/useActiveTaskSnapshotMeta.js";
 import { useTaskNativeSessionLogFile } from "@/hooks/useTaskNativeSessionLogFile.js";
 import { useTaskSessionFilePath } from "@/hooks/useTaskSessionFilePath.js";
+import { resolveCloudTaskHeaderTitle } from "@/cloud/cloudTaskPanel.js";
+import { resolveCloudTaskIdFromWorkspaceIdentity } from "@/cloud/cloudUiBootstrap.js";
 import { buildTaskEntityKey } from "@/lib/taskQueryCache.js";
 import { mergeTaskMetaCandidates } from "@/lib/zcodeTaskMetaMerge.js";
 import { resolveWorkspaceHeaderProvider } from "@/lib/workspaceHeaderProvider.js";
@@ -11,6 +13,7 @@ import {
   selectWorkspaceZCodeState,
   useZCodeSessionStore,
 } from "@/store/zcodeSessionStore.js";
+import { useCloudTasksStore } from "@/store/cloud/cloudTasksStore.js";
 import { useTaskQueryCacheStore } from "@/store/taskQueryCacheStore.js";
 
 interface UseWorkspaceActiveTaskStateParams {
@@ -135,13 +138,22 @@ export function useWorkspaceActiveTaskState({
     activeTaskProvider,
     selectedProvider,
   );
-  const activeTaskBaseTitle = resolvedActiveTaskMeta?.title?.trim()
-    ? resolvedActiveTaskMeta.title
-    : intl.formatMessage({
-        id: resolvedActiveTaskMeta?.forkedFromTaskId
-          ? "taskList.forkedUntitled"
-          : "taskList.newThread",
-      });
+  // 云任务标题兜底（04 §3 2026-10-08 巡检修订）：云任务不在本机 CLI 任务索引里，
+  // `resolvedActiveTaskMeta` 恒为空，Header（及 v4 session title 投影）此前一直显示
+  // 「新任务」占位。控制面投影（详情缓存）是云任务标题的唯一来源，本地 meta 优先。
+  const cloudTaskId = resolveCloudTaskIdFromWorkspaceIdentity(workspaceIdentity);
+  const cloudTaskTitle = useCloudTasksStore((state) =>
+    cloudTaskId ? (state.detailByTask[cloudTaskId]?.detail.task.title ?? null) : null,
+  );
+  const activeTaskBaseTitle = resolveCloudTaskHeaderTitle({
+    localTitle: resolvedActiveTaskMeta?.title,
+    cloudTitle: cloudTaskTitle ?? undefined,
+    fallbackTitle: intl.formatMessage({
+      id: resolvedActiveTaskMeta?.forkedFromTaskId
+        ? "taskList.forkedUntitled"
+        : "taskList.newThread",
+    }),
+  });
   const activeTaskTitle = activeTaskBaseTitle;
   const taskNativeSessionLogFile = useTaskNativeSessionLogFile(
     workspaceAbsPath,
