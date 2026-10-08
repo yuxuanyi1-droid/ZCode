@@ -7,6 +7,11 @@
  * checkpoint.result → 落保存事实。
  */
 import type { CloudBridgeControlFrame } from "@zcode/shared";
+import {
+  nextRuntimeDeadStreak,
+  runtimeExitConfirmed,
+  RUNTIME_EXIT_DEAD_STREAK_LIMIT,
+} from "../../domain/runtimeExit.js";
 import { bridgeLogger, sendFrame, type CloudBridgeContext, type LiveConnection } from "./types.js";
 
 export async function routeInboundFrame(
@@ -52,7 +57,7 @@ export async function routeInboundFrame(
       });
       return;
     }
-    case "bridge.heartbeat":
+    case "bridge.heartbeat": {
       registry.heartbeat({
         runId: run.runId,
         runGeneration: connection.runGeneration,
@@ -60,7 +65,32 @@ export async function routeInboundFrame(
         at: clock.now(),
         activitySummary: frame.activitySummary,
       });
+      // D4-2 中间步（02 §3/§8）：消费 runtime 进程退出事实。v1 协议不加新帧（02 定稿），
+      // 显式退出帧不存在——心跳的 `processAlive=false` 是唯一事实通道（bridgeHeartbeat
+      // 按 runtime pid 判定，02 §4）。连续两拍死亡即确认事实并告警；run 上的持久标注
+      // （lastDisconnectReason 语义，落 run.endReason）在该连接最终关闭时由 bridgeChannel
+      // 按 runtime-exit 写入，把「断网」与「runtime 死了」区分开。本步只落事实：
+      // 控制面不对 runtime-exit 自动重建 supervisor（那是第 2 批之后的恢复阶梯）。
+      // epoch 围栏（02 §2 不变量 3）：旧 epoch 的心跳不得毒化当前连接的死亡计数。
+      if (frame.connectionEpoch === connection.connectionEpoch) {
+        const streak = nextRuntimeDeadStreak({
+          processAlive: frame.processAlive,
+          currentStreak: connection.runtimeDeadStreak ?? 0,
+        });
+        connection.runtimeDeadStreak = streak;
+        if (runtimeExitConfirmed(streak) && connection.runtimeExitConfirmed !== true) {
+          connection.runtimeExitConfirmed = true;
+          logger.warn(undefined, "cloud bridge runtime exit reported", {
+            runId: run.runId,
+            runGeneration: run.runGeneration,
+            connectionEpoch: connection.connectionEpoch,
+            consecutiveDeadHeartbeats: streak,
+            streakLimit: RUNTIME_EXIT_DEAD_STREAK_LIMIT,
+          });
+        }
+      }
       return;
+    }
     case "bridge.phase":
       logger.debug(undefined, "cloud bridge phase", {
         runId: run.runId,

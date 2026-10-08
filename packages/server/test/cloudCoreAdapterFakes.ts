@@ -1,16 +1,10 @@
 /**
- * 外部依赖端口 fake：GitHub、provider driver（含能力声明与三分支结果）、attachment 传输、
- * runtime 命令查询（03 §5 三分支、01 §4.1、02 §6.1）。
+ * 外部依赖端口 fake：GitHub、provider driver 绑定注册表、attachment 传输、runtime 命令
+ * 查询（03 §5 三分支、01 §4.1、02 §6.1）。driver fake 本体在 cloudCoreDriverFake.ts
+ * （本文件转出保持既有 import 面稳定）。
  */
 import type { GitHubPort, RepositoryRef } from "../src/cloud/app/ports/gitHubPort.js";
-import type {
-  CreateReconciliation,
-  ProviderObservation,
-  ProviderSandboxHandle,
-  SandboxCreateInput,
-  SandboxDriverPort,
-  TerminationObservation,
-} from "../src/cloud/app/ports/sandboxDriverPort.js";
+import type { SandboxDriverPort } from "../src/cloud/app/ports/sandboxDriverPort.js";
 import type {
   SandboxDriverRegistryPort,
   SandboxProviderEntry,
@@ -84,132 +78,6 @@ export function createFakeGitHub(): FakeGitHub {
   };
 }
 
-export interface FakeSandboxDriver extends SandboxDriverPort {
-  createCalls: number;
-  /** 最后一次 create 的入参（断言非秘密自举要素经此下发）。 */
-  lastCreateInput?: SandboxCreateInput;
-  createOutcome: "success" | "throw-unknown" | "throw-failed" | "throw-coded";
-  /** `throw-coded` 时抛出的归一错误码（模拟 driver 的显式拒绝）。 */
-  createErrorCode: string;
-  /** findCreateResult 的结论（对账分支）。 */
-  findCreateResultOutcome: CreateReconciliation["status"];
-  /** 对账调用次数（确定失败不应触发对账）。 */
-  findCreateResultCalls: number;
-  /** startSupervisor 调用次数与最后一次入参（01 §5.1 第 3 条）。 */
-  startSupervisorCalls: number;
-  lastSupervisorStart?: {
-    sandboxId: string;
-    operationKey: string;
-    runId: string;
-    runGeneration: number;
-    taskId: string;
-    workspacePath: string;
-    publicControlPlaneUrl: string;
-    bootstrapTicket: string;
-  };
-  /** 令 startSupervisor 抛错（01 §9 补偿终止）。 */
-  startSupervisorError?: string;
-  /** terminate 调用次数（断言补偿）。 */
-  terminateCalls: number;
-  /** 能力声明：provider 上限（undefined = 未声明上限）。 */
-  maxLifetimeSeconds?: number;
-  /** 能力声明：期限来源（provider 确认 vs 只能估计）。 */
-  deadlineSource: "provider" | "estimated";
-  inspectStatus: ProviderObservation["status"];
-  /** inspect 的调用次数与失败模式（provider 不可达/超时必须保留槽位）。 */
-  inspectCalls: number;
-  inspectOutcome: "status" | "throw";
-  terminateStatus: TerminationObservation["status"];
-}
-
-export function createFakeSandboxDriver(): FakeSandboxDriver {
-  const driver: FakeSandboxDriver = {
-    createCalls: 0,
-    createOutcome: "success",
-    createErrorCode: "unsupported_template",
-    findCreateResultOutcome: "notFound",
-    findCreateResultCalls: 0,
-    startSupervisorCalls: 0,
-    terminateCalls: 0,
-    maxLifetimeSeconds: 3600,
-    deadlineSource: "provider",
-    inspectStatus: "running",
-    inspectCalls: 0,
-    inspectOutcome: "status",
-    terminateStatus: "terminated",
-    async describeCapabilities() {
-      return {
-        createOperationLookup: "native-key",
-        canInspect: true,
-        canExtendDeadline: true,
-        canConfirmTermination: true,
-        ...(driver.maxLifetimeSeconds === undefined
-          ? {}
-          : { maxLifetimeSeconds: driver.maxLifetimeSeconds }),
-        deadlineSource: driver.deadlineSource,
-        supportsOutboundWss: true,
-      };
-    },
-    async create(input): Promise<ProviderSandboxHandle> {
-      driver.createCalls += 1;
-      driver.lastCreateInput = input;
-      if (driver.createOutcome === "throw-unknown") throw new Error("network timeout");
-      if (driver.createOutcome === "throw-failed") throw new Error("create rejected");
-      if (driver.createOutcome === "throw-coded") {
-        // 与 W3 的 CloudAdapterError 同形：归一码 + 有界 message。
-        throw Object.assign(new Error(`provider rejected: ${driver.createErrorCode}`), {
-          name: "CloudAdapterError",
-          code: driver.createErrorCode,
-        });
-      }
-      return {
-        provider: "e2b",
-        sandboxId: `sandbox-${input.runId}`,
-        providerDeadline: input.requestedDeadline,
-      };
-    },
-    async findCreateResult(): Promise<CreateReconciliation> {
-      driver.findCreateResultCalls += 1;
-      if (driver.findCreateResultOutcome === "unknown") {
-        return { status: "unknown", errorCode: "provider_create_unknown" };
-      }
-      if (driver.findCreateResultOutcome === "created") {
-        return { status: "created", handle: { provider: "e2b", sandboxId: "sandbox-reconciled" } };
-      }
-      return { status: "notFound" };
-    },
-    async inspect(): Promise<ProviderObservation> {
-      driver.inspectCalls += 1;
-      if (driver.inspectOutcome === "throw") throw new Error("provider unreachable");
-      return { status: driver.inspectStatus, observedAt: 0, evidenceSource: "provider-api" };
-    },
-    async extendDeadline() {
-      return { status: "confirmed", expiresAt: 0 };
-    },
-    async startSupervisor(handle, supervisorInput): Promise<void> {
-      driver.startSupervisorCalls += 1;
-      if (driver.startSupervisorError !== undefined) {
-        throw Object.assign(new Error(driver.startSupervisorError), { code: "bootstrap_failed" });
-      }
-      driver.lastSupervisorStart = {
-        sandboxId: handle.sandboxId,
-        operationKey: supervisorInput.operationKey,
-        runId: supervisorInput.runId,
-        runGeneration: supervisorInput.runGeneration,
-        taskId: supervisorInput.taskId,
-        workspacePath: supervisorInput.workspacePath,
-        publicControlPlaneUrl: supervisorInput.publicControlPlaneUrl,
-        bootstrapTicket: supervisorInput.bootstrapTicket,
-      };
-    },
-    async terminate(): Promise<TerminationObservation> {
-      driver.terminateCalls += 1;
-      return { status: driver.terminateStatus };
-    },
-  };
-  return driver;
-}
-
 export function createFakeDriverRegistry(
   driver: SandboxDriverPort | null,
 ): SandboxDriverRegistryPort {
@@ -222,6 +90,7 @@ export function createFakeDriverRegistry(
             canInspect: true,
             canExtendDeadline: true,
             canConfirmTermination: true,
+            pauseResume: driver.pauseResume,
             maxLifetimeSeconds: 3600,
             deadlineSource: "provider",
             supportsOutboundWss: true,
@@ -382,6 +251,8 @@ export function createFakeProvisioningEnvelope(): ProvisioningEnvelopeSource & {
 }
 
 // ── 拆出的替身经本文件转出（保持测试 import 面稳定；实现分别在相邻文件）──
+export { createFakeSandboxDriver } from "./cloudCoreDriverFake.js";
+export type { FakeSandboxDriver } from "./cloudCoreDriverFake.js";
 export {
   createFakeArtifacts,
   createFakeExecutionProjections,

@@ -128,6 +128,11 @@ import type { ConversationDropTargetController } from "@/v4/composer/conversatio
 import { shouldIgnoreEscapeForStopGeneration } from "@/v4/composer/escapeStop.js";
 import { ConversationDraftEmptyState } from "@/v4/ConversationDraftEmptyState.js";
 import { useCloudComposerSubmit } from "@/hooks/cloud/useCloudComposerSubmit.js";
+import { useCloudTaskHistoryReplay } from "@/hooks/cloud/useCloudTaskHistoryReplay.js";
+import { CloudTaskHistoryTimeline } from "@/cloud/CloudTaskHistoryTimeline.js";
+import { resolveCloudTaskIdFromWorkspaceIdentity } from "@/cloud/cloudUiBootstrap.js";
+import { conversationTopic } from "@/v4/transport.js";
+import { describeCloudComposerRejection } from "@/cloud/cloudTaskErrorText.js";
 import { ConversationDraftSuggestedPromptsContainer } from "@/v4/ConversationDraftSuggestedPromptsContainer.js";
 import { ConversationHeader, type PaneWorkspaceBadge } from "@/v4/ConversationHeader.js";
 import { ConversationQueuePanel } from "@/v4/ConversationQueuePanel.js";
@@ -2289,6 +2294,26 @@ export function SessionPane({
   const cloudComposerSubmit = useCloudComposerSubmit(workspaceIdentity);
   // 云任务停止（2026-10-08 巡检修订 P1）：v4-stop 按云工作区分流到控制面 stop 端点。
   const cloudTaskStop = useCloudTaskStop(workspaceIdentity);
+  // 跨 run 只读历史（specs/cloud-agent/04 §3.3 archived 行「历史仍可查看」、2026-10-09
+  // 终验缺陷 D）：实时订阅只覆盖当前 activeRun 的会话流——归档任务无 run 不订阅、
+  // 重开后的新 run 只投递自己的流，旧 run 的已投影回合从时间线消失。这里从控制面
+  // 权威历史（GET /tasks/:id/history，族名 topic）补齐跨 run 回放；非云工作区
+  // （cloudTaskId=null）hook 不取数、零开销。hook 无条件调用（React 规则）。
+  const cloudHistoryTaskId = resolveCloudTaskIdFromWorkspaceIdentity(workspaceIdentity);
+  const cloudHistory = useCloudTaskHistoryReplay({ taskId: cloudHistoryTaskId });
+  const cloudHistoryCurrentTopic = sessionId !== null ? conversationTopic(sessionId) : null;
+  const cloudHistoryBlock =
+    cloudHistoryTaskId !== null &&
+    (cloudHistory.status === "error" ||
+      cloudHistory.replay.streams.some(
+        (stream) => cloudHistoryCurrentTopic === null || stream.topic !== cloudHistoryCurrentTopic,
+      )) ? (
+      <CloudTaskHistoryTimeline
+        history={cloudHistory}
+        {...(cloudHistoryCurrentTopic !== null ? { excludeTopic: cloudHistoryCurrentTopic } : {})}
+        locale={locale}
+      />
+    ) : null;
 
   // ── 云输入的 pending optimistic overlay（2026-10-08 巡检修订 P2）──
   //
@@ -2318,9 +2343,14 @@ export function SessionPane({
       }
     }
     // run 终态：未接管的 overlay 不再等待（输入交付事实由控制面/恢复路径呈现）。
+    // 无有效 run 且可重开（2026-10-08 终态 run 发送行为修订）：终态 run 已被服务端
+    // 收回、权威投影永远不会出现，遗留 overlay 在此收口，不让假「等待」永久挂起。
     const runStatus = cloudComposerSubmit.activeRunStatus;
     const runTerminal =
-      runStatus === "stopped" || runStatus === "failed" || runStatus === "expired";
+      cloudComposerSubmit.activeRunGone ||
+      runStatus === "stopped" ||
+      runStatus === "failed" ||
+      runStatus === "expired";
     const remaining = runTerminal
       ? []
       : pendingCloudInputs.filter((entry) => !acknowledged.has(entry.commandId));
@@ -2328,6 +2358,7 @@ export function SessionPane({
       setPendingCloudInputs(remaining);
     }
   }, [
+    cloudComposerSubmit.activeRunGone,
     cloudComposerSubmit.activeRunStatus,
     pendingCloudInputs,
     snapshot?.queue.items,
@@ -3031,24 +3062,37 @@ export function SessionPane({
             setSendSubmissionError(null);
             // 202 ≠ runtime 已准入（03 §6.2）：optimistic 呈现用户消息（pending overlay，
             // 按 commandId 关联权威投影），首发等待环境期间消息不再「不可见」。
-            appendPendingCloudInput({ commandId: outcome.commandId, text });
+            // 自动重开（2026-10-08 终态 run 发送行为修订）：新 run 不承接旧 run 的输入
+            // （04 §3.4），旧 run 的遗留 overlay 永远不会被权威投影接管，登记本次消息
+            // 的同时一并退场，不让假「等待」气泡跟着跨进新 run。
+            if (outcome.reopenedRun) {
+              setPendingCloudInputs([{ commandId: outcome.commandId, text, issuedAt: Date.now() }]);
+            } else {
+              appendPendingCloudInput({ commandId: outcome.commandId, text });
+            }
             focusTimelineToLatest();
             return "sent";
           }
+          // 错误文案就地归一（04 §6「UI 不解析异常文字」）：code+reason 命中
+          // shared 文案表即翻译（not_ready 按 reason 细分），否则回落原始码。
+          // 结果取自 send() 返回值——hook 状态在异步回调里是发送前的旧 render 值。
+          const rejectionDetail = describeCloudComposerRejection(outcome, (id) =>
+            intl.formatMessage({ id }),
+          );
           if (outcome.status === "unknown") {
             // 结果不明：保留正文并提示待对账，绝不显示成功（03 §5）。
             setSendSubmissionError({
               code: "CLOUD_INPUT_UNKNOWN",
               message: intl.formatMessage({ id: "chat.error.sendFailed" }),
-              detail: cloudComposerSubmit.errorDetail ?? "cloud input result unknown",
+              detail: rejectionDetail ?? "cloud input result unknown",
             });
             return "blocked";
           }
-          if (cloudComposerSubmit.errorDetail) {
+          if (rejectionDetail !== null || outcome.blockedHint === "reopen-unavailable") {
             setSendSubmissionError({
               code: "CLOUD_INPUT_REJECTED",
               message: intl.formatMessage({ id: "chat.error.sendFailed" }),
-              detail: cloudComposerSubmit.errorDetail,
+              detail: rejectionDetail ?? intl.formatMessage({ id: "cloud.run.reopenUnavailable" }),
             });
           }
           return "blocked";
@@ -4957,23 +5001,31 @@ export function SessionPane({
               headerSlot={
                 // unsupportedRowCount 也要开这个门：整份副本的行都被本 build 跳过时
                 // rows 为空，但只读块必须留下来显示「需要更新 ZCode」，不能整块消失。
+                // 云任务跨 run 历史（缺陷 D）同槽位：归档视图呈现全部历史；在线 run
+                // 只补旧 run（当前流由实时时间线呈现，不重复）。两者都为空时保持 null，
+                // 不抢草稿问候的 emptyState 分支。
                 importedShare &&
                 (importedShare.rows.length > 0 || importedShare.unsupportedRowCount > 0) ? (
-                  <ConversationShareImportNotice
-                    rows={importedShare.rows}
-                    unsupportedRowCount={importedShare.unsupportedRowCount}
-                    artifactNames={importedShareArtifactNames}
-                    artifactWorkspaceRelativePaths={importedShareArtifactWorkspaceRelativePaths}
-                    workspacePath={workspacePath}
-                    {...(workspaceIdentity ? { workspaceIdentity } : {})}
-                    {...(remoteSessionId ? { workspaceRemoteSessionId: remoteSessionId } : {})}
-                    locale={locale}
-                    theme={theme}
-                    codePreviewSettings={codePreviewSettings}
-                    onOpenShareUrl={onOpenBrowserUrl ? handleOpenImportedShareUrl : undefined}
-                    onOpenFileLink={onOpenFileLink}
-                    onOpenCodeViewer={onOpenCodeViewer}
-                  />
+                  <>
+                    <ConversationShareImportNotice
+                      rows={importedShare.rows}
+                      unsupportedRowCount={importedShare.unsupportedRowCount}
+                      artifactNames={importedShareArtifactNames}
+                      artifactWorkspaceRelativePaths={importedShareArtifactWorkspaceRelativePaths}
+                      workspacePath={workspacePath}
+                      {...(workspaceIdentity ? { workspaceIdentity } : {})}
+                      {...(remoteSessionId ? { workspaceRemoteSessionId: remoteSessionId } : {})}
+                      locale={locale}
+                      theme={theme}
+                      codePreviewSettings={codePreviewSettings}
+                      onOpenShareUrl={onOpenBrowserUrl ? handleOpenImportedShareUrl : undefined}
+                      onOpenFileLink={onOpenFileLink}
+                      onOpenCodeViewer={onOpenCodeViewer}
+                    />
+                    {cloudHistoryBlock}
+                  </>
+                ) : cloudHistoryBlock !== null ? (
+                  cloudHistoryBlock
                 ) : null
               }
               emptyState={

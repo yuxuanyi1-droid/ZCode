@@ -91,6 +91,7 @@ interface SandboxDriver {
     canInspect: boolean;
     canExtendDeadline: boolean;
     canConfirmTermination: boolean;
+    pauseResume: "memory" | "disk" | "none"; // 2026-10-09 生命周期 v2：分级能力位——memory=保留进程态的暂停/恢复（如 E2B）；disk=仅保留文件系统、进程态丢失的冷恢复（如 Daytona）；none=不支持（终态走 reopen）
     maxLifetimeSeconds?: number;
     deadlineSource: "provider" | "estimated";
     supportsOutboundWss: boolean;
@@ -117,22 +118,32 @@ interface SandboxDriver {
     requestedDeadlineMs: number,
   ): Promise<DeadlineResult>; // 不支持返回能力错误，不伪造成功
   terminate(handle: ProviderSandboxHandle): Promise<TerminationObservation>;
+  // 2026-10-09 生命周期 v2：以下两方法仅 pauseResume ≠ "none" 的实现可提供真实语义；未实测核实的 provider 一律按 "none" 行为（fail-closed，路径不可达，不虚构暂停状态）。
+  pause(handle: ProviderSandboxHandle): Promise<ProviderObservation>; // 返回 provider 确认的 paused 观察才算暂停成功；确认前不得写 run=paused（顺序冻结：checkpoint(如需)→provider paused 确认→detach registry→status=paused，watchdog 显式跳过 paused）
+  resume(
+    handle: ProviderSandboxHandle,
+    requestedDeadline: number, // epoch 毫秒：恢复通路同步续展 run 租期与 bridge 凭据有效期，不放大 provider 能力上限
+  ): Promise<ProviderObservation>; // 同 run 同 generation 恢复，失败不换代、不改写原 run
 }
 ```
 
-`ProviderSandboxHandle` 包含 provider、sandboxId、templateRevision、providerDeadline / deadlineEstimate，不含浏览器 attach 凭据。`ProviderObservation` 区分 running / stopped / notFound / unknown，记录 observedAt、证据来源与归一错误，并提供可选有界 `evidence`（≤160 字符，运营核对用，不得放凭据/prompt/私有代码）；network timeout、503、权限丢失不是 notFound。
+`ProviderSandboxHandle` 包含 provider、sandboxId、templateRevision、providerDeadline / deadlineEstimate，不含浏览器 attach 凭据。`ProviderObservation` 区分 running / paused / stopped / notFound / unknown（paused 为 2026-10-09 生命周期 v2 增补：暂停保留期的实例不得被 keepalive liveness 按 stopped 收口），记录 observedAt、证据来源与归一错误，并提供可选有界 `evidence`（≤160 字符，运营核对用，不得放凭据/prompt/私有代码）；network timeout、503、权限丢失不是 notFound。
 
 所有 SDK 调用异步，有限重试并支持请求取消。取消本地等待不代表 provider 创建已取消；create 结果未知进入 reconcile。没有原生 idempotency / operation lookup 时，不能声称 exactly-once 创建：唯一 worker 用持久租约串行，未知结果不自动第二次 create，先按标签 / 清单查询或让运营确认；残留资源保持计费告警与清理记录。
+
+**修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）**：`SandboxDriver` 增加分级能力位 `pauseResume: "memory" | "disk" | "none"` 与 `pause(handle)` / `resume(handle, requestedDeadline)` 方法（签名见上接口）。`memory` 表示暂停保留进程态（resume 后沙箱内运行态继续）；`disk` 表示仅保留文件系统、resume 为冷启动——进程态丢失必须如实向用户披露；`none` 表示不支持，生命周期行为与现状完全一致（终态收口 + reopen）。`resume` 恢复的是同一 run：不换代、不重开，恢复通路同时续展凭据有效期与 run 租期（`requestedDeadline` 收敛于能力上限）。`ProviderObservation` 相应增加 `paused` 观察态：keepalive liveness 对 paused 实例不得按 stopped/notFound 收口，暂停保留期的存在性核对走 paused 态。
 
 ### 4.2 Provider 差异
 
 首期同时实现 E2B、Modal、Daytona 三家 adapter（2026-10-05 拍板，见 00 §9）。各家以真实账号实测后解禁：实测覆盖能力声明、期限语义、停止语义与启动开销；验证完成前 capability 门控不显示可选。共同接口不抹平期限、资源和停止语义。
 
-| Provider | 适配与验证                                                                        | 不能假定的能力                                                                            |
-| -------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| E2B      | 模板固定runtime/资源；create、inspect、kill、`setTimeout`映射；核实账号计划的上限 | 并非所有账号可跑4h；延长timeout不是无限生命周期                                           |
-| Modal    | 固定image/资源；create、`fromId`、poll、terminate；期限估计单独标记               | create timeout不能直接等价E2B的运行中续期；不支持延期时首建到硬上限，由控制面idle提前回收 |
-| Daytona  | snapshot / image、resources、labels、get / stop / delete、自动生命周期显式配置    | stop / pause / archive / delete不同；bridge流量不保证算provider活动；首期不依赖磁盘恢复   |
+**修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）**：分级能力目标值——E2B = `memory`（SDK 原生 pause/resume；create 配置 `onTimeout=pause`，TTL 到点自动暂停而非被杀）、Daytona = `disk`（stop/start 只停不删；resume 为冷启动，文件系统保留、进程态丢失，须如实向用户披露——**解除下表 Daytona 行「首期不依赖磁盘恢复」冻结**）、Modal = `none`（终态走 reopen）。`pauseResume` 纳入「实测解禁」清单：上句实测覆盖范围扩展为「能力声明、期限语义、停止语义、暂停/恢复语义与启动开销」；实测通过前，三家一律按 `none` 行为（fail-closed：代码与契约在、路径不可达，capability 门控不显示暂停能力，不出现 paused 投影）。
+
+| Provider | 适配与验证                                                                        | 不能假定的能力                                                                                                                                                                                                   |
+| -------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| E2B      | 模板固定runtime/资源；create、inspect、kill、`setTimeout`映射；核实账号计划的上限 | 并非所有账号可跑4h；延长timeout不是无限生命周期                                                                                                                                                                  |
+| Modal    | 固定image/资源；create、`fromId`、poll、terminate；期限估计单独标记               | create timeout不能直接等价E2B的运行中续期；不支持延期时首建到硬上限，由控制面idle提前回收                                                                                                                        |
+| Daytona  | snapshot / image、resources、labels、get / stop / delete、自动生命周期显式配置    | stop / pause / archive / delete不同；bridge流量不保证算provider活动；disk 级恢复实测解禁后可用（stop/start 只停不删，文件系统保留、进程态丢失须如实披露；2026-10-09 生命周期 v2 解除「首期不依赖磁盘恢复」冻结） |
 
 E2B 的 `setTimeout` 到期会自动 kill，最长时间按计划不同；SDK 与实际账号能力在实现时锁定并真实测试。[E2B Sandbox SDK](https://e2b.dev/docs/sdk-reference/js-sdk/v2.6.2/sandbox)
 
@@ -147,10 +158,11 @@ Daytona 分别定义生命周期、自动停止与 wall-clock TTL，需核实实
 - 持久化 hardDeadline、providerDeadline?、deadlineEstimate?、deadlineConfidence 和最近续期 Operation。UI 对估计倒计时明确标注，不把控制面时间当 provider 保证。
 - 可用期取部署预算与 provider 能力较小值；Run 硬上限候选4h是待冻结的产品上限，provider更小时收敛并提示。不得无声换provider或自动新建Run。
 - **修订（2026-10-08，账号设置覆盖部署基线）**：沙箱 provider 秘密与可用期上限支持「账号设置覆盖部署基线」——部署 env（`ZCODE_CLOUD_SANDBOX_MAX_LIFETIME_SECONDS`、`E2B_API_KEY` 等）是**基线与硬上界**；账号设置（设置页，归属账号域，见 [12 §2 修订](./12-account-domain.md)）可覆盖 E2B key 与超时预算：**生效超时 = min(设置值, env 核实上限)**，**生效 key = credential 存储值 ?? env 部署值**。E2B hobby 订阅核实上限为 1 小时（3600 秒）。覆盖只影响**新 create**：进行中 Run 的 recipe（§2 第 5 条）不变，续期仍按生效上限收敛（不放大旧 Run 的已确认期限）。动机（2026-10-08 真实事故）：部署 env 键名拼错（`ZCODE_CLOUD_MAX_LIFETIME_SECONDS` 少写 `SANDBOX`）被静默忽略 → 控制面按默认预算（>1h）请求 E2B create 被 hobby 上限拒绝 → run failed 且 UI 无感知；把预算与 key 搬进设置页后，用户无需重部署即可纠正这类漂移，且 capabilities 会如实透出 env 核实上限（`maxLifetimeSeconds`）与生效 key 是否已配置（`apiKeyConfigured` 布尔，不暴露值与来源细节）。
-- 全局并发上限候选3，M0冻结。provisioning、ready、disconnected、draining，以及终止结果未知的资源都占槽；事务 reserve / release。provider确认资源释放后才释放计费槽，不能靠页面取消或删Task释放。
+- 全局并发上限候选3，M0冻结。provisioning、ready、paused（2026-10-09 生命周期 v2 增补：暂停保留期占槽，quota_released_at 保持 NULL）、disconnected、draining，以及终止结果未知的资源都占槽；事务 reserve / release。provider确认资源释放后才释放计费槽，不能靠页面取消或删Task释放。
 - 续期结果未知保持旧的已确认期限并重查。活动节流合并为一次续期，不逐stream chunk调API。
 - 分开识别用户输入、runtime执行、工具执行、有限页面presence；heartbeat、轮询、SSE、日志和协议ACK不算用户活动。Agent常驻进程不等于任务运行。
 - provider自动idle kill不能抢在checkpoint前。首期关闭其提前idle回收，或设在控制面保存预算之后；provider硬deadline保留为费用上界，不靠心跳无限续期。
+  - **修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）**：上句「provider硬deadline保留为费用上界」在 `onTimeout=pause`（pauseResume=memory）下改为**双层上界——「计算费上界 + 暂停存储预算」**：provider 硬 deadline 到点触发的是自动暂停（计算计费到暂停点为止），其后转为暂停保留的存储/保留费，由「暂停预算」约束；暂停预算到期由控制面 keepalive liveness 收口（provider 保留期已尽或实例确认不存在 → `expired`、释放占槽）。「不靠心跳无限续期」的原则不变。pause 保留期上限与暂停期计费单价需实测核实，核实前暂停预算按保守值配置并向用户展示。
 
 ## 5. 供给事务、补偿与重启恢复
 
@@ -242,6 +254,7 @@ SSH 作为 Desktop 本机/远控连接继续走现有 backend/deploy，不经 Sa
 - GitHub token原生1h有效；single-use grant不缩短兑换后token期限。操作结束/run撤销后尽力revoke，结果持久且可重试；broker删内存不等于GitHub已撤销。仅持久grantId/purpose/issuedAt/expiresAt等元数据，不持久raw token；控制面重启若已无法取回旧token执行revoke，必须等待其最晚到期或确认旧sandbox死亡，不能伪造撤销完成。[Installation token](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation)
 - contents:write是repo权限，并不天然限制taskBranch。产品流程禁止直推base，但沙箱持write token技术上有更广写能力。公开/多租户上线前必须补Git write proxy的ref白名单，或实测有效的GitHub ruleset/授权策略；未完成不得上线。workflow额外权限见09。
 - runGeneration只拒绝后续grant，无法立刻收回已发token。换Run前确认旧provider资源终止；若资源仍活，必须证明旧write token已撤销/过期且writer隔离。不确定则不发新write lease，不宣称CAS能拦旧sandbox直接push。
+- **签发时机修订（2026-10-09，终验缺陷 B）**：push/fetch 由**保存通路的唯一签发点**在发 `checkpoint.request` 之前成组签发（stop/drain 在 beginDrain 内；周期保存 sweep 同样在 requestCheckpoint 前签发）。只在 clone/provisioning 路径签发、周期保存不签，会让保存时的 push 兑换必然 403 `no-issued-grant`。draining（stop 已受理）的保存通路允许签发 **fetch**——push 后 `ls-remote` 远端 SHA 对账（01 §8）是 §8.1 依赖顺序内的规格内只读动作，与「draining 的保存写（push）」同一例外；clone 不在此例外内。
 
 ### 7.3 Commit 作者
 
@@ -300,20 +313,20 @@ sequenceDiagram
 
 cloud测试路径/入口随M0/M1添加；当前 `packages/server` 没有cloud测试脚本，不能把下表当已覆盖。
 
-| 场景          | 断点/操作                                      | 断言                                            |
-| ------------- | ---------------------------------------------- | ----------------------------------------------- |
-| 页面关闭      | Input接受后、create前关闭                      | 持久Input、只建一次、runtime自行启动            |
-| 重复供给      | 双击/并发/响应丢失                             | 单runGeneration/quota，幂等返回                 |
-| create未知    | 创建成功丢响应/存handle前崩溃                  | 关联原资源、不盲建第二个                        |
-| callback早到  | bridge早于create响应                           | 匹配预登记Run，bootstrap前不ready               |
-| bootstrap失败 | clone/模板/协议错误                            | 明确阶段、持久清理，无假ready                   |
-| 重启          | creating/ready/extending/saving/terminating    | Operation恢复、runGeneration不回退、quota不早放 |
-| 长断网        | 旧Agent/provider仍活                           | disconnected非expired，不双writer               |
-| 换provider    | 显式reopen                                     | identity不变，path/provider改变，从确认SHA恢复  |
-| 凭据          | scope回包、grant重放/过期/旧run、磁盘/日志检查 | 最小repo/permission、不扩大fallback、无持久秘密 |
-| Git保存       | 无改动、push丢响应、外部写、撤权               | remote SHA确认、commit幂等、不force、风险准确   |
-| 硬deadline    | 持续写、保存失败、provider更早超时             | drain、停新输入、真实终态，无绝不丢承诺         |
-| provider差异  | 不支持延期/期限估计/stop未delete               | 能力错误、费用计数、清理正确                    |
+| 场景          | 断点/操作                                      | 断言                                                                                                          |
+| ------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| 页面关闭      | Input接受后、create前关闭                      | 持久Input、只建一次、runtime自行启动                                                                          |
+| 重复供给      | 双击/并发/响应丢失                             | 单runGeneration/quota，幂等返回                                                                               |
+| create未知    | 创建成功丢响应/存handle前崩溃                  | 关联原资源、不盲建第二个                                                                                      |
+| callback早到  | bridge早于create响应                           | 匹配预登记Run，bootstrap前不ready                                                                             |
+| bootstrap失败 | clone/模板/协议错误                            | 明确阶段、持久清理，无假ready                                                                                 |
+| 重启          | creating/ready/extending/saving/terminating    | Operation恢复、runGeneration不回退、quota不早放                                                               |
+| 长断网        | 旧Agent/provider仍活                           | disconnected非expired，不双writer                                                                             |
+| 换provider    | 显式reopen                                     | identity不变，path/provider改变，从确认SHA恢复                                                                |
+| 凭据          | scope回包、grant重放/过期/旧run、磁盘/日志检查 | 最小repo/permission、不扩大fallback、无持久秘密                                                               |
+| Git保存       | 无改动、push丢响应、外部写、撤权               | remote SHA确认、commit幂等、不force、风险准确                                                                 |
+| 硬deadline    | 持续写、保存失败、provider更早超时             | drain、停新输入、到期强制动作按能力分叉（memory=pause、其余=terminate；2026-10-09 生命周期 v2），无绝不丢承诺 |
+| provider差异  | 不支持延期/期限估计/stop未delete               | 能力错误、费用计数、清理正确                                                                                  |
 
 M2用隔离测试repo/account完成真实create→出站bridge→私有clone→CLI ready→terminate，验证资源峰值、权限失败与秘密清理。M4完成重启/网络分区/kill/checkpoint故障注入和费用上界；不使用真实用户凭据，不提交环境数据。
 

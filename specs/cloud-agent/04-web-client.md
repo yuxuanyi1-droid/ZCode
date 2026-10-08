@@ -126,15 +126,16 @@ ready 使用 Cloud task RPC facade → 当前 attachment → 沙箱原 zcode-ser
 | `failed`    | 错误、已有产物、input 结果  | 显式重试/重开，控制面判断新 run         |
 | `archived`  | 只读                        | 按 08 恢复归档，不接受执行命令          |
 
-| Run 状态       | 视图/能力                   | 门控                                                     |
-| -------------- | --------------------------- | -------------------------------------------------------- |
-| `provisioning` | 创建/clone/启动/warm-up进度 | 只看进度/停止，下一条正文可编辑但不发送，无文件/终端调用 |
-| `ready`        | 当前工作区可用              | route tuple 校验；审批匹配 interaction revision          |
-| `disconnected` | 重连；最后快照标为旧状态    | 不凭断线变 expired，不新发 append；未经对账不执行审批    |
-| `draining`     | 保存并停止；checkpoint进度  | 不接新增执行命令/文件写入；结果真实                      |
-| `stopped`      | 安全停止，产物可读          | 重开新 run；旧 run 不复活                                |
-| `expired`      | provider确认环境已消失      | 最近保存点/可能未保存内容可见；重开新 run                |
-| `failed`       | 失败原因/保护信息           | 可用动作由 owner 给出，不由 UI 猜测                      |
+| Run 状态       | 视图/能力                                                   | 门控                                                                                                |
+| -------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `provisioning` | 创建/clone/启动/warm-up进度                                 | 只看进度/停止，下一条正文可编辑但不发送，无文件/终端调用                                            |
+| `ready`        | 当前工作区可用                                              | route tuple 校验；审批匹配 interaction revision                                                     |
+| `disconnected` | 重连；最后快照标为旧状态                                    | 不凭断线变 expired，不新发 append；未经对账不执行审批                                               |
+| `draining`     | 保存并停止；checkpoint进度                                  | 不接新增执行命令/文件写入；结果真实                                                                 |
+| `paused`       | 暂停保留中；发消息触发自驱 resume（同 run，不换代、不重开） | 仅分级能力 provider 出现（能力位 none 无此投影）；暂停期间无文件/终端调用（2026-10-09 生命周期 v2） |
+| `stopped`      | 安全停止，产物可读                                          | 重开新 run；旧 run 不复活                                                                           |
+| `expired`      | provider确认环境已消失                                      | 最近保存点/可能未保存内容可见；重开新 run                                                           |
+| `failed`       | 失败原因/保护信息                                           | 可用动作由 owner 给出，不由 UI 猜测                                                                 |
 
 有效活动为 `idle` / `running` / `awaiting-input`；缺少可靠runtime事实时为 `unknown`，保留last-known并标过期，不猜idle。与Task/Run状态独立，无 `Task.connected`、`Task.running`。浏览器打开、心跳和终端输出不等于运行活动；等待审批/问题有明确入口，不能被闲置停止静默抹掉。
 
@@ -168,6 +169,15 @@ stopRequested 是优先于 Run 状态的持久门控：收到受理后显示“�
 - **optimistic 用户消息（P2）**：发送 202 后按 commandId 登记 pending optimistic overlay（用户消息气泡 + 「等待环境」提示）；权威投影出现同 commandId 的 queue/userInput 行即退场，run 终态也收口。overlay 是 pending 呈现，不是第二份会话事实。
 - **重连保留历史（P2）**：订阅断开/重连中但已持有回放快照时不清空时间线——错误降级为时间线上方提示条（含重连入口），只有从未取得投影时才整面错误面板；composer（含模型选择器）不因重连中整体禁用（云输入走 HTTP 独立通道，目录已加载时选择器状态保持）。
 - **first-run 引导（P2）**：云模式下引导判定叠加账号域事实——账号已有任务/项目即不触发 first-run 引导（record 服务按 deviceMid 记录，浏览器「首跑」与账号事实可能脱节）；record 服务不可用时关闭引导回落 settings 的「跳过」保守默认（仅当从未作答），保证关闭持久。
+
+2026-10-08 修订（真实环境复现驱动：终态 run 的发送行为与假等待收口）：
+
+- **终态 run 发消息 → 自动重开继续（2026-10-08 用户产品决议，03 §6/08 §5/§9 同步修订）**：任务 active/failed 且无有效 run（服务端详情投影对终态 run 不再返回 `activeRun`，客户端以 `actions` 投影含 `reopen` 为准）时，composer 发送不再发出注定 409 的 append，而是把该消息作为 reopen 的工作要求自动走 `useReopenCloudTask` 既有通路（resume 按持久事实自动选择：`latestCheckpoint.state === "saved"` → checkpoint，否则 restart-from-base，UI 说明依据）；服务端 actions 投影不含 `reopen` 或 provider 不可解析时不自动重开，按归一文案说明。触发面只在「用户主动发送」：草稿恢复、unknown attempt 对账、投递重试仍不得触发重开。自动重开受理后 UI 明示进入 provisioning 等待（既有横幅语义），不静默。
+- **409 竞态兜底**：发送时详情陈旧（仍显示活 run）→ append 收到 409 `not_ready/no-active-run` → 自动改走 reopen 重试一次（复用上述事实选择），仍失败才把归一错误呈现给用户；其余 `not_ready` reason（stop-requested/run-not-ready 等）不自动重开。错误信封按 `code + details.reason` 细分映射为用户可读文案（如 `no-active-run` → 「运行已结束，重开任务后才能继续对话」，新增 i18n key，zh/en 同步），不解析 message 文本。
+- **乐观 overlay 回滚**：pending optimistic overlay（P2）的收口不再只依赖「权威投影出现 / activeRun 终态」——详情投影显示「无有效 run 且可重开」（run 已被服务端收回，权威投影永不出现）时同样退场；被 409 明确拒绝的发送不登记 overlay。禁止假「已提交，等待运行环境」状态永久挂起。
+- **ended 优先于 waiting 投影**：`projectCloudTaskRunPanel` 对「active/failed + 无 run + actions 含 `reopen`」返回「上一次运行已结束（可重开）」视图，不再呈现 `waiting-for-run`——后者只属于 202 成功后 run 尚未出现的事务窗口。run watch（04 §3.2.4）把「详情出现 reopen 能力」追加为停止条件：provisioning → 终态的迁移在投影里表现为 run 消失，不得当作「尚未出现」继续轮询到超时。
+
+2026-10-09 修订（生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）：run 状态投影如实呈现 `paused` 与恢复中的 `resuming`（暂停保留与恢复进度复用既有进行中横幅语义）；`paused` 期间用户发消息走 03 §6 的控制面自驱 resume（同一 run，UI 明示「正在恢复运行环境」，不得呈现为重开或新 run）；能力位 `none` 的 provider 不出现 `paused` 投影（fail-closed：UI 不为未声明的能力保留状态位）。
 
 ### 3.4 输入层次与多端
 

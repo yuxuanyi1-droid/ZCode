@@ -33,6 +33,12 @@ export interface UseCloudTaskResult {
    */
   readonly actions: CloudTaskActionSet;
   refresh(): Promise<void>;
+  /**
+   * 按需拉取一次详情并返回最新投影（2026-10-07 终验缺陷 E：侧栏行归档点击时的
+   * 准入预检用——`autoLoad=false` 的行只在动作发生时才值得发 `GET /tasks/:id`）。
+   * 拉不到（未接线/网络失败）返回 null，由调用方回落服务端裁决，不本地猜。
+   */
+  loadDetail(): Promise<TaskDetailResponse | null>;
   /** 仅 draft 可写，带 revision CAS；冲突时保留本地编辑由调用方处理（11 §5）。 */
   saveDraftStartConfig(
     config: CloudDraftStartConfig,
@@ -82,11 +88,11 @@ export function useCloudTask(options?: UseCloudTaskOptions): UseCloudTaskResult 
     [principalId],
   );
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<TaskDetailResponse | null> => {
     if (!controlPlane || !taskId || principalId === null) {
       setStatus("idle");
       setError(null);
-      return;
+      return null;
     }
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
@@ -95,24 +101,30 @@ export function useCloudTask(options?: UseCloudTaskOptions): UseCloudTaskResult 
     try {
       const next = await controlPlane.getTask(taskId);
       if (requestIdRef.current !== requestId) {
-        return;
+        return null;
       }
       applyDetail(next);
       setStatus("ready");
+      return next;
     } catch (loadError) {
       if (requestIdRef.current !== requestId) {
-        return;
+        return null;
       }
       setStatus("error");
       setError(describeCloudSubmissionError(loadError));
+      return null;
     }
   }, [applyDetail, controlPlane, principalId, taskId]);
 
+  const refresh = useCallback(async () => {
+    await load();
+  }, [load]);
+
   useEffect(() => {
     if (autoLoad) {
-      void load();
+      void refresh();
     }
-  }, [autoLoad, load]);
+  }, [autoLoad, refresh]);
 
   const runLifecycle = useCallback(
     async (action: (port: CloudControlPlanePort, id: string) => Promise<TaskDetailResponse>) => {
@@ -171,7 +183,8 @@ export function useCloudTask(options?: UseCloudTaskOptions): UseCloudTaskResult 
       detail,
       task,
       actions,
-      refresh: load,
+      refresh,
+      loadDetail: load,
       saveDraftStartConfig,
       renameTask,
       stopTask,
@@ -192,6 +205,7 @@ export function useCloudTask(options?: UseCloudTaskOptions): UseCloudTaskResult 
       status,
       stopTask,
       task,
+      refresh,
     ],
   );
 }

@@ -149,6 +149,7 @@ export async function createCloudStorage(options: CloudStorageOptions): Promise<
     recordArtifact: (artifact) => request("tasks.recordArtifact", { artifact }),
     setCompleteRequested: (completeRequest) =>
       request("tasks.setCompleteRequested", completeRequest),
+    listCompleteRequested: () => request("tasks.listCompleteRequested", undefined),
   };
   const runs: RunRepo = {
     get: (runId) => request("runs.get", { runId }),
@@ -173,6 +174,7 @@ export async function createCloudStorage(options: CloudStorageOptions): Promise<
     list: (taskId, page) => request("inputs.list", { taskId, page }),
     markDelivery: (deliveryRequest) => request("inputs.markDelivery", deliveryRequest),
     cancelPending: (cancelRequest) => request("inputs.cancelPending", cancelRequest),
+    settleForEndedRun: (settleRequest) => request("inputs.settleForEndedRun", settleRequest),
     listDeliverable: (taskId) => request("inputs.listDeliverable", { taskId }),
   };
   const projections: ProjectionRepo = {
@@ -191,6 +193,7 @@ export async function createCloudStorage(options: CloudStorageOptions): Promise<
     revokeRun: (revokeRequest) => request("credentials.revokeRun", revokeRequest),
     verifyActiveCredential: (verifyRequest) =>
       request("credentials.verifyActiveCredential", verifyRequest),
+    extendForRun: (extendRequest) => request("credentials.extendForRun", extendRequest),
   };
   const payloads: InputPayloadRead = {
     readInputPayload: (payloadRequest) => request("payloads.readInputPayload", payloadRequest),
@@ -256,6 +259,7 @@ export async function createCloudStorage(options: CloudStorageOptions): Promise<
     findByKey: (idempotencyKey) => request("operations.findByKey", { idempotencyKey }),
     get: (operationId) => request("operations.get", { operationId }),
     leaseNext: (leaseRequest) => request("operations.leaseNext", leaseRequest),
+    renewLease: (renewRequest) => request("operations.renewLease", renewRequest),
     settle: (settleRequest) => request("operations.settle", settleRequest),
     listUnsettled: () => request("operations.listUnsettled", undefined),
   };

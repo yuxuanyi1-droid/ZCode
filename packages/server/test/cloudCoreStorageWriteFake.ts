@@ -63,7 +63,9 @@ export function createWritePathFake(context: {
         }
         if (run.stopRequested)
           return { status: "conflict", code: "not_ready", reason: "stop-requested" };
-        if (run.status !== "ready")
+        // paused 例外（03 §6 修订 2026-10-09）：append 按同一 202 持久接收语义接受，
+        // 由控制面自驱 resume 后投递（与真实 acceptInput 同一语义，fake 对齐）。
+        if (run.status !== "ready" && run.status !== "paused")
           return { status: "conflict", code: "not_ready", reason: "not-ready" };
       } else {
         if (
@@ -84,6 +86,8 @@ export function createWritePathFake(context: {
           (item) =>
             item.status === "provisioning" ||
             item.status === "ready" ||
+            // paused 占槽（D-1，2026-10-09 生命周期 v2）：quota_released_at 保持 NULL。
+            item.status === "paused" ||
             item.status === "disconnected" ||
             item.status === "draining",
         ).length;
@@ -106,6 +110,20 @@ export function createWritePathFake(context: {
         });
         runId = reservation.run.runId;
         runGeneration = reservation.runGeneration;
+        // 与真实 acceptInput 同一语义（D4-7）：lease 与 run 预约同一「事务」落库，
+        // create worker 领取操作时硬期限已可见（gateway 不再有事务后补写路径）。
+        if (request.lease) {
+          const reserved = runsById.get(reservation.run.runId);
+          if (reserved) {
+            runsById.set(reserved.runId, {
+              ...reserved,
+              hardDeadlineAt: request.lease.hardDeadlineAt,
+              deadlineEstimate: request.lease.deadlineEstimate ?? reserved.deadlineEstimate,
+              deadlineConfidence: request.lease.deadlineConfidence ?? reserved.deadlineConfidence,
+              updatedAt: request.now,
+            });
+          }
+        }
         if (request.taskBranch) {
           const draft = tasksById.get(request.taskId);
           await tasks.freezeBaseline({

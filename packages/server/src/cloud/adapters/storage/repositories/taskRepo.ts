@@ -300,6 +300,17 @@ export const taskRepoHandlers = {
       return mapTaskRow(requireTaskRow(context, params.taskId));
     });
   },
+  /**
+   * 验收意图扫尾（08 §9、审计 N-P3）：complete_requested=1 且仍为 active 的 Task，
+   * 供后台 sweep 在 run 终态与输入收口后自动 complete。幂等只读，按创建序返回。
+   */
+  "tasks.listCompleteRequested": (context): CloudTaskRecord[] =>
+    context.db
+      .prepare(
+        "SELECT * FROM tasks WHERE complete_requested = 1 AND status = 'active' ORDER BY created_at, task_id",
+      )
+      .all()
+      .map(mapTaskRow),
 } satisfies Pick<
   StorageHandlerTable,
   | "tasks.get"
@@ -312,8 +323,60 @@ export const taskRepoHandlers = {
   | "tasks.recordCheckpointSha"
   | "tasks.recordArtifact"
   | "tasks.setCompleteRequested"
+  | "tasks.listCompleteRequested"
 >;
 
 function invalidTask(message: string): CloudStorageError {
   return new CloudStorageError({ code: "validation_failed", reason: "invalid-record", message });
+}
+
+/**
+ * 草稿启动选择的逐字段比较（`CloudDraftStartConfig` 的完整字段集）。
+ * 供接纳事务（acceptInput）校验 start 选择与已持久草稿一致（03 §6、W1 CR-1）。
+ */
+export function draftStartConfigEquals(
+  left: { baseBranch: string; provider: string; templateRef?: string },
+  right: { baseBranch: string; provider: string; templateRef?: string },
+): boolean {
+  return (
+    left.baseBranch === right.baseBranch &&
+    left.provider === right.provider &&
+    (left.templateRef ?? undefined) === (right.templateRef ?? undefined)
+  );
+}
+
+/** 读取已持久 draftStartConfig；缺失或损坏返回 undefined（不猜内容）。 */
+export function readPersistedDraftStartConfig(
+  task: SqlRow,
+): { baseBranch: string; provider: string; templateRef?: string } | undefined {
+  const raw = task["draft_start_config_json"];
+  if (typeof raw !== "string") return undefined;
+  try {
+    const parsed = cloudDraftStartConfigSchema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * draft 从未持久 draftStartConfig 时，以调用方在 `start` 里给出的选择作为唯一
+ * 冻结事实写入（11 §5「Task 保存唯一 draftStartConfig」）：之后 PATCH 只在 draft 生效，
+ * 而接纳后 Task 已是 active，因此不会出现第二份可变选择。调用方处于接纳写事务内。
+ */
+export function adoptDraftStartConfigIfAbsent(
+  context: StorageContext,
+  request: {
+    taskId: string;
+    start?: { baseBranch: string; provider: string; templateRef?: string };
+    now: number;
+  },
+): void {
+  if (!request.start) return;
+  const task = selectTask(context, request.taskId);
+  if (!task) return;
+  if (readPersistedDraftStartConfig(task)) return;
+  context.db
+    .prepare("UPDATE tasks SET draft_start_config_json = ?, updated_at = ? WHERE task_id = ?")
+    .run(JSON.stringify(request.start), request.now, request.taskId);
 }

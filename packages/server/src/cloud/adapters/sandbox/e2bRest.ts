@@ -4,7 +4,10 @@
  * 端点按 E2B 官方 API 参考与历史真实账号实测校准：create / inspect / setTimeout /
  * delete / list。运行中执行命令走官方 SDK（e2bBootstrap.ts），不在这里手写 envd 协议。
  */
+import type { ProviderObservation } from "../../app/ports/sandboxDriverPort.js";
 import type { CloudAdapterLogger } from "./adapterError.js";
+import { boundEvidence } from "./reconcile.js";
+import { asRecord, asString, isAbortLike } from "./sandboxRest.js";
 import {
   createSandboxRestClient,
   type SandboxFetch,
@@ -18,6 +21,14 @@ export const E2B_PATH_SANDBOX = (id: string) => `/sandboxes/${encodeURIComponent
 /** setTimeout 的 REST 形态：POST /sandboxes/{id}/timeout body {timeout: 秒}。 */
 export const E2B_PATH_TIMEOUT = (id: string) => `/sandboxes/${encodeURIComponent(id)}/timeout`;
 export const E2B_TIMEOUT_BODY_FIELD = "timeout";
+/**
+ * 暂停/恢复（2026-10-09 生命周期 v2；端点定义见 node_modules/e2b/dist 的 REST 契约，
+ * SDK 2.52.1）：POST /sandboxes/{id}/pause（204 = 已暂停、可恢复）；POST
+ * /sandboxes/{id}/resume（200 = 已在运行 / 201 = 恢复成功，body {timeout: 秒} 设新 TTL，
+ * 缺省只有 15 秒，必须显式传收敛后的请求寿命）。
+ */
+export const E2B_PATH_PAUSE = (id: string) => `/sandboxes/${encodeURIComponent(id)}/pause`;
+export const E2B_PATH_RESUME = (id: string) => `/sandboxes/${encodeURIComponent(id)}/resume`;
 
 export const E2B_DEFAULT_BASE_URL = "https://api.e2b.dev";
 export const E2B_DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -34,14 +45,19 @@ export {
 } from "./sandboxRest.js";
 
 /**
- * E2B 状态 → 归一观测状态（01 §4.1）：running 类含创建/启动中（资源已在提供方存在并计费）；
- * stopped 类含暂停/归档；其余不猜测，返回 undefined 由调用方判 unknown。
+ * E2B 状态 → 归一观测状态（01 §4.1，含 2026-10-09 修订）：running 类含创建/启动中
+ * （资源已在提供方存在并计费）；**paused 是独立的观测态**——暂停保留期的实例被
+ * provider 保留（仍计存储/保留费），不得归入 stopped，否则 keepalive liveness 会把
+ * 暂停中的 run 误收口为 expired；stopped 类含其余停态；其余不猜测，返回 undefined
+ * 由调用方判 unknown。E2B 的 SandboxState 枚举只有 "running" | "paused"。
  */
 const E2B_RUNNING_STATES = new Set(["running", "creating", "started", "active", "provisioning"]);
-const E2B_STOPPED_STATES = new Set(["paused", "stopped", "archived", "suspending"]);
+const E2B_PAUSED_STATES = new Set(["paused"]);
+const E2B_STOPPED_STATES = new Set(["stopped", "archived", "suspending"]);
 
-export function mapE2bSandboxState(state: string): "running" | "stopped" | undefined {
+export function mapE2bSandboxState(state: string): "running" | "paused" | "stopped" | undefined {
   if (E2B_RUNNING_STATES.has(state)) return "running";
+  if (E2B_PAUSED_STATES.has(state)) return "paused";
   if (E2B_STOPPED_STATES.has(state)) return "stopped";
   return undefined;
 }
@@ -81,5 +97,85 @@ export function createE2bTerminateProbe(
   return async (sandboxId) => {
     const response = await rest.request(E2B_PATH_SANDBOX(sandboxId), { method: "DELETE" });
     return { ok: response.ok, status: response.status };
+  };
+}
+
+export async function inspectE2bSandbox(input: {
+  rest: E2bRestClient;
+  logger: CloudAdapterLogger;
+  now: () => number;
+  sandboxId: string;
+}): Promise<ProviderObservation> {
+  const { rest, logger, now, sandboxId } = input;
+  const path = E2B_PATH_SANDBOX(sandboxId);
+  // 证据串只含端点/状态/状态原文要点（≤160 字符），不含凭据、labels 或响应体。
+  const evidenceOf = (outcome: string) => boundEvidence(`e2b GET ${path} -> ${outcome}`);
+  let response;
+  try {
+    response = await rest.request(path, { method: "GET", attempts: E2B_GET_RETRY_ATTEMPTS });
+  } catch (error) {
+    // 网络超时/权限丢失一律 unknown，不是 notFound（01 §4.1）。
+    const cause = isAbortLike(error) ? "aborted" : "network-error";
+    logger.warn(undefined, "e2b inspect unavailable", {
+      sandboxId,
+      error: cause,
+    });
+    return {
+      status: "unknown",
+      observedAt: now(),
+      evidenceSource: "none",
+      evidence: evidenceOf(cause),
+      errorCode: "provider_unreachable",
+    };
+  }
+  if (response.status === 404) {
+    // provider 明确确认资源不存在 → notFound（可释放计费槽）。
+    return {
+      status: "notFound",
+      observedAt: now(),
+      evidenceSource: "provider-api",
+      evidence: evidenceOf("404 not-found"),
+    };
+  }
+  if (response.status === 401 || response.status === 403) {
+    return {
+      status: "unknown",
+      observedAt: now(),
+      evidenceSource: "provider-api",
+      evidence: evidenceOf(`${response.status} auth-lost`),
+      errorCode: "permission_revoked",
+    };
+  }
+  if (!response.ok) {
+    return {
+      status: "unknown",
+      observedAt: now(),
+      evidenceSource: "provider-api",
+      evidence: evidenceOf(`${response.status} provider-error`),
+      errorCode: "provider_unreachable",
+    };
+  }
+  const body = asRecord(await response.json().catch(() => null));
+  const state = asString(body?.["state"]) ?? asString(body?.["status"]) ?? "";
+  const mapped = mapE2bSandboxState(state);
+  if (mapped !== undefined) {
+    return {
+      status: mapped,
+      observedAt: now(),
+      evidenceSource: "provider-api",
+      evidence: evidenceOf(`200 state=${state}`),
+    };
+  }
+  // 未映射的 provider 状态不猜测：unknown + 证据留给运营核对。
+  logger.warn(undefined, "e2b inspect returned unmapped state", {
+    sandboxId,
+    state: state.slice(0, 32),
+  });
+  return {
+    status: "unknown",
+    observedAt: now(),
+    evidenceSource: "provider-api",
+    evidence: evidenceOf(`200 unmapped-state=${state.slice(0, 32)}`),
+    errorCode: "provider_unreachable",
   };
 }

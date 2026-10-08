@@ -60,6 +60,12 @@ export interface CloudEntryConfig {
    * driver 不上报上限；可用期由控制面按部署预算与之取较小值（01 §4.3）。
    */
   readonly sandboxMaxLifetimeSeconds?: Readonly<Record<string, number>>;
+  /**
+   * 空闲 pause 阈值（秒；08 §7 修订 2026-10-09、决策 D3）：分级能力 provider 闲置且
+   * 无客户端连接持续达到该阈值 → pause。缺省 600（10 分钟）；**0 = 显式禁用**。
+   * 负数/非整数报 `sandbox_idle_pause_invalid`（fail-closed，不静默取缺省）。
+   */
+  readonly sandboxIdlePauseSeconds?: number;
   readonly secrets: CloudSecretRefs;
 }
 
@@ -82,7 +88,8 @@ export type CloudEntryConfigIssueCode =
   | "model_invalid"
   | "max_concurrent_runs_invalid"
   | "sandbox_template_invalid"
-  | "sandbox_lifetime_invalid";
+  | "sandbox_lifetime_invalid"
+  | "sandbox_idle_pause_invalid";
 
 export interface CloudEntryConfigIssue {
   readonly code: CloudEntryConfigIssueCode;
@@ -150,6 +157,12 @@ export const ZCODE_CLOUD_SANDBOX_TEMPLATE_REF_ENV = "ZCODE_CLOUD_SANDBOX_TEMPLAT
  */
 export const ZCODE_CLOUD_SANDBOX_MAX_LIFETIME_SECONDS_ENV =
   "ZCODE_CLOUD_SANDBOX_MAX_LIFETIME_SECONDS";
+/**
+ * 空闲 pause 阈值（秒；08 §7 修订 2026-10-09、决策 D3）。缺省 600（10 分钟）；
+ * **0 = 显式禁用**空闲 pause（整条路径休眠，idle drain 按既有规则照常）。
+ * 仅分级能力（pauseResume≠none，A-7 实测解禁）provider 实际参与。
+ */
+export const ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS_ENV = "ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS";
 
 export const CLOUD_DEFAULT_LISTEN_PORT = 3030;
 export const CLOUD_DEFAULT_MAX_CONCURRENT_RUNS = 2;

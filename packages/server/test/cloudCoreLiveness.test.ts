@@ -16,8 +16,11 @@ import {
 
 const PRINCIPAL = "00000000-0000-4000-8000-0000000000aa";
 
-/** 走完 start → create → ready，返回 ready run（断连用例的起点）。 */
-async function readyRun(context: ReturnType<typeof buildTestPlane>) {
+/**
+ * 走完 start（可选 create → ready），返回 task/run（断连、sweep 隔离用例的起点）。
+ * `index` 区分同一 context 内的多个 run（sweep per-run 隔回归：三个 run 中毒一个）。
+ */
+async function readyRun(context: ReturnType<typeof buildTestPlane>, index = 1) {
   const project = await context.plane.tasks.createProject({
     principalId: PRINCIPAL,
     repositoryId: 101,
@@ -27,7 +30,7 @@ async function readyRun(context: ReturnType<typeof buildTestPlane>) {
     principalId: PRINCIPAL,
     projectId: project.value.projectId,
     title: "Fix login flow",
-    creationKey: "ck-liveness",
+    creationKey: `ck-liveness-${index}`,
     draftStartConfig: { baseBranch: "main", provider: "e2b", templateRef: "zcode-node24" },
   });
   assert.ok(task.ok);
@@ -37,7 +40,7 @@ async function readyRun(context: ReturnType<typeof buildTestPlane>) {
     source: "http",
     request: {
       intent: "start",
-      commandId: "00000000-0000-4000-8000-0000000000c1",
+      commandId: `00000000-0000-4000-8000-0000000000c${index}`,
       prompt: "do the thing",
       expectedTaskRevision: task.value.revision,
       start: { baseBranch: "main", provider: "e2b", templateRef: "zcode-node24" },
@@ -179,4 +182,112 @@ test("drain 停摆且实例已消失 → 收口为 stopped 并释放槽位；未
   assert.equal(run?.endReason, PROVIDER_INSTANCE_LOST_END_REASON);
   assert.equal(run?.dataAtRisk, true, "保存未经确认：如实暴露风险（08 §8.2）");
   assert.equal(context.storage.quotaReleases.includes(session.runId), true);
+});
+
+/** start → create（不 ready）：run 停在 provisioning 且已落 provider handle。 */
+async function provisioningRun(context: ReturnType<typeof buildTestPlane>, index: number) {
+  const project = await context.plane.tasks.createProject({
+    principalId: PRINCIPAL,
+    repositoryId: 101,
+  });
+  assert.ok(project.ok);
+  const task = await context.plane.tasks.createTask({
+    principalId: PRINCIPAL,
+    projectId: project.value.projectId,
+    title: "Provision hang",
+    creationKey: `ck-liveness-provisioning-${index}`,
+    draftStartConfig: { baseBranch: "main", provider: "e2b", templateRef: "zcode-node24" },
+  });
+  assert.ok(task.ok);
+  const submit = await context.plane.inputs.submit({
+    principalId: PRINCIPAL,
+    taskId: task.value.taskId,
+    source: "http",
+    request: {
+      intent: "start",
+      commandId: `00000000-0000-4000-8000-0000000000d${index}`,
+      prompt: "do the thing",
+      expectedTaskRevision: task.value.revision,
+      start: { baseBranch: "main", provider: "e2b", templateRef: "zcode-node24" },
+    },
+  });
+  assert.ok(submit.ok);
+  const runId = submit.value.runId ?? "";
+  const created = await context.plane.provisioning.create.runCreateOnce();
+  assert.equal(created?.outcome, "created");
+  const run = await context.storage.runs.get(runId);
+  assert.ok(run?.providerHandle);
+  return { taskId: task.value.taskId, runId: run.runId, sandboxId: run.providerHandle ?? "" };
+}
+
+test("D4-9：readiness sweep 单 run 抛错不拖垮其余 run（第二个 run 抛错，一/三仍被收口）", async () => {
+  const context = buildTestPlane();
+  const first = await provisioningRun(context, 1);
+  const second = await provisioningRun(context, 2);
+  const third = await provisioningRun(context, 3);
+  // 只让第二个 run 的 provider 核验抛错（模拟毒 run）。
+  context.driver.inspectThrowSandboxIds = new Set([second.sandboxId]);
+
+  context.clock.advance(CLOUD_CORE_DEFAULTS.readinessSoftTimeoutMs + 1);
+  const report = await context.plane.provisioning.readiness.sweep();
+
+  assert.equal(report.inspected, 3, "三个 run 都被检视，毒 run 只损失自己");
+  const isTerminal = (status?: string) =>
+    status === "stopped" || status === "expired" || status === "failed";
+  assert.equal(
+    isTerminal((await context.storage.runs.get(first.runId))?.status),
+    true,
+    "第一个 run 仍被收口（running 无 bridge → 终止）",
+  );
+  assert.equal(
+    ["provisioning"].includes((await context.storage.runs.get(second.runId))?.status ?? ""),
+    true,
+    "抛错 run 保留待下一轮（不猜、不建替代沙箱）",
+  );
+  assert.equal(
+    isTerminal((await context.storage.runs.get(third.runId))?.status),
+    true,
+    "第三个 run 仍被收口",
+  );
+});
+
+test("D4-9：startup 对账单 run 抛错不拖垮其余 run（ examined 全量、存活核验继续）", async () => {
+  const context = buildTestPlane();
+  const first = await provisioningRun(context, 1);
+  const second = await provisioningRun(context, 2);
+  const third = await provisioningRun(context, 3);
+  context.driver.inspectThrowSandboxIds = new Set([second.sandboxId]);
+
+  const summary = await context.plane.reconciler.reconcileOnStartup();
+
+  assert.equal(summary.examined, 3, "毒 run 不减少其后 run 的对账");
+  assert.equal(summary.alive, 2, "第一与第三个 run 仍完成存活核验");
+  assert.equal(summary.settled, 0);
+  assert.equal((await context.storage.runs.get(first.runId))?.status, "provisioning");
+  assert.equal((await context.storage.runs.get(third.runId))?.status, "provisioning");
+});
+
+test("D4-9：keepalive 续期 extendDeadline 抛错不穿透 sweep（其余 run 仍续期）", async () => {
+  const context = buildTestPlane();
+  const first = await readyRun(context, 1);
+  const second = await readyRun(context, 2);
+  const third = await readyRun(context, 3);
+  context.driver.extendDeadlineThrowSandboxIds = new Set([`sandbox-${second.runId}`]);
+
+  // 进入续期 lead 窗口（硬期限 = 接纳时刻 + 1h，lead = 5 分钟）；start 输入未投递
+  // → pendingInputCount=1 → 有业务需要续期（08 §7）。
+  context.clock.advance(3_600_000 - 60_000);
+  const report = await context.plane.lifecycle.keepalive.sweep();
+
+  assert.equal(report.renewed, 2, "第一与第三个 run 续期成功");
+  assert.equal(report.skipped, 1, "抛错 run 记 skipped（保持旧的已确认期限，08 §7）");
+  const renewedAt = (await context.storage.runs.get(first.runId))?.expiresAt;
+  assert.equal(renewedAt, 0, "fake driver 确认值被落库");
+  const poisoned = await context.storage.runs.get(second.runId);
+  assert.equal(
+    poisoned?.expiresAt,
+    context.clock.now() - (3_600_000 - 60_000) + 3_600_000,
+    "抛错 run 的期限事实未被伪造推进",
+  );
+  assert.equal((await context.storage.runs.get(third.runId))?.expiresAt, 0);
 });

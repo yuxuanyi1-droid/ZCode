@@ -15,7 +15,9 @@ import { drainRetryAllowed, resolveEffectiveDeadline } from "../../domain/savePo
 import type { CloudCoreDeps } from "../deps.js";
 import { cloudCoreLogger } from "../logger.js";
 import { fail, type CloudAppResult } from "../result.js";
+import type { ExternalOperationRecord } from "../ports/operationOutboxPort.js";
 import type { DrainLoop } from "../lifecycle/drain.js";
+import type { PauseResumeControl } from "../lifecycle/pauseResume.js";
 import type { RunCompensation } from "../provisioning/compensation.js";
 import type { RunOrchestrator } from "../runOrchestrator.js";
 import type { TaskDetailService } from "../taskDetail.js";
@@ -41,12 +43,36 @@ export interface StopOperations {
   sweep(now?: number): Promise<StopSweepReport>;
 }
 
+/** 已保存的 checkpoint 记录（C-1/D4-4 最新状态判定用）。 */
+interface SavedCheckpointFact {
+  confirmedRemoteSha: string;
+}
+
+/**
+ * D4-4/C-1：读屏障指向 op 的**最新**保存状态。
+ * op 行一旦结算 failed/ambiguous 不会再被租约领取结算；而重试（C-1 复用同一 operationId
+ * 重发 checkpoint.request）可能在沙箱侧保存成功并回写同一 operationId 的 checkpoint 记录。
+ * 因此失败/未知的 op 以记录的最新事实修正结论——重试成功不得再假 dataAtRisk（08 §8.2）。
+ */
+async function resolveLatestStopOperation(
+  stopOperation: ExternalOperationRecord,
+  readSavedFact: () => Promise<SavedCheckpointFact | null>,
+): Promise<ExternalOperationRecord> {
+  if (stopOperation.state !== "failed" && stopOperation.state !== "ambiguous") {
+    return stopOperation;
+  }
+  const saved = await readSavedFact();
+  if (!saved) return stopOperation;
+  return { ...stopOperation, state: "settled", resultRef: saved.confirmedRemoteSha };
+}
+
 export function createStopOperations(
   deps: CloudCoreDeps,
   orchestrator: RunOrchestrator,
   compensation: RunCompensation,
   drain: DrainLoop,
   taskDetail: TaskDetailService,
+  pauseResume: Pick<PauseResumeControl, "advancePausedStop">,
 ): StopOperations {
   const { storage, operations, clock } = deps;
 
@@ -58,6 +84,22 @@ export function createStopOperations(
       if (!run || run.status === "stopped" || run.status === "expired" || run.status === "failed") {
         // 无有效 run：stop 不制造状态（Task active 不表示 Agent 正在 running，08 §3.1）。
         return detail;
+      }
+      if (run.status === "paused") {
+        // 暂停中停止（03 §6 修订行为表；第 2 批遗留 1 改即时）：beginDrain 写持久屏障并
+        // 推进 paused→draining（不启动保存通路），随后与 pauseResume 拍共用同一推进实现
+        // 直接 terminate + 收口——HTTP 响应即反映 draining/stopped，不再等 ≤30s tick。
+        const started = await drain.beginDrain({
+          taskId: input.taskId,
+          runId: run.runId,
+          reason: "user-stop",
+        });
+        if (!started.ok) return started;
+        const fresh = await storage.runs.get(run.runId);
+        if (fresh && (fresh.status === "paused" || fresh.status === "draining")) {
+          await pauseResume.advancePausedStop(fresh, clock.now());
+        }
+        return await taskDetail.getDetail(input);
       }
       const started = await drain.beginDrain({
         taskId: input.taskId,
@@ -83,12 +125,15 @@ export function createStopOperations(
         operationId: input.operationId,
         now: clock.now(),
       });
-      if (run.status === "ready" || run.status === "disconnected") {
+      if (run.status === "ready" || run.status === "disconnected" || run.status === "paused") {
         // stopped 只能从 draining/provisioning 到达（08 §3.2 状态图）；force-stop 直接进入 draining。
+        // paused 同样先推进 draining（行为表：force-stop=屏障+直接 terminate；paused→draining
+        // 边 2026-10-09 修订）——否则暂停态直接 terminate 后 settleTerminal(stopped) 会被
+        // 迁移表拒绝（无 paused→stopped 边），run 卡死在 paused。
         await storage.runs.transitionStatus({
           runId: run.runId,
           runGeneration: run.runGeneration,
-          from: ["ready", "disconnected"],
+          from: ["ready", "disconnected", "paused"],
           to: "draining",
           endReason: FORCE_STOP_END_REASON,
           now: clock.now(),
@@ -131,11 +176,22 @@ export function createStopOperations(
           ? await operations.get(run.stopOperationId)
           : null;
         if (!stopOperation) {
-          await drain.beginDrain({ taskId: run.taskId, runId: run.runId, reason: "user-stop" });
+          // 定稿附录 C-1/D4-4：屏障存在但查不到 op——force-stop 的 operationId 由客户端
+          // 提供且从不入队（跳过保存前置是它的语义）。这里**不得**对 stopRequested 的 run
+          // 重启保存通路（beginDrain 会给 force-stop 硬塞一次保存）；直接跳过，等待
+          // terminate op 由 compensation 循环收口。
           report.waitingSave += 1;
           continue;
         }
-        if (stopOperation.state === "pending" || stopOperation.state === "leased") {
+        // 最新保存状态（重试成功不再假 dataAtRisk，见 resolveLatestStopOperation）。
+        const latestStopOperation = await resolveLatestStopOperation(stopOperation, async () => {
+          const checkpoints = await storage.projections.listCheckpoints(run.taskId);
+          const record = checkpoints.find((item) => item.operationId === stopOperation.operationId);
+          return record?.state === "saved" && record.confirmedRemoteSha
+            ? { confirmedRemoteSha: record.confirmedRemoteSha }
+            : null;
+        });
+        if (latestStopOperation.state === "pending" || latestStopOperation.state === "leased") {
           report.waitingSave += 1;
           continue;
         }
@@ -145,20 +201,20 @@ export function createStopOperations(
           hardDeadlineAt: run.hardDeadlineAt,
         });
         const forced = deadline !== null && now >= deadline.at;
-        if (stopOperation.state === "ambiguous" && !forced) {
+        if (latestStopOperation.state === "ambiguous" && !forced) {
           // 保存结果未知：不谎称 saved，也不在预算内停机（08 §8.1）。
           report.waitingSave += 1;
           continue;
         }
-        if (stopOperation.state === "failed") {
+        if (latestStopOperation.state === "failed") {
           const retry = drainRetryAllowed({
             now,
             deadline,
-            retries: stopOperation.attempt,
+            retries: latestStopOperation.attempt,
           });
           if (retry) {
-            // 保存失败允许剩余预算内重试：重发 drain/checkpoint 意图（新 operationId），
-            // 屏障保持，不自动解除（08 §8.1）。
+            // 保存失败允许剩余预算内重试：C-1 复用同一 op 重发 drain/checkpoint 通知，
+            // 屏障与指针不变（08 §8.1）；沙箱成功回写同一 operationId 后按最新状态放行。
             await drain.beginDrain({ taskId: run.taskId, runId: run.runId, reason: "user-stop" });
             report.waitingSave += 1;
             continue;
@@ -181,8 +237,9 @@ export function createStopOperations(
           to: "stopped",
           endReason: forced ? "hard-deadline" : "stop",
           termination: "terminated",
-          // 保存失败/结果未知时如实暴露风险，不宣称工作全部保住（08 §8.2）。
-          dataAtRisk: stopOperation.state !== "settled",
+          // 保存失败/结果未知时如实暴露风险，不宣称工作全部保住（08 §8.2）；
+          // 按**最新**状态判定：重试成功（记录已 saved）不再假 dataAtRisk。
+          dataAtRisk: latestStopOperation.state !== "settled",
         });
         report.advanced += 1;
       }

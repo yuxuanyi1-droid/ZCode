@@ -24,6 +24,9 @@ test("web entry can fail closed on protocol/capability mismatch", () => {
         canInspect: true,
         canExtendDeadline: true,
         canConfirmTermination: true,
+        // 2026-10-09 契约新增：分级暂停/恢复能力；fixture 与 sandboxProviderCapabilitiesSchema
+        // 对齐（本用例的非法注入点在 protocolVersion，providers 必须是合法形状）。
+        pauseResume: "none",
         deadlineSource: "provider",
         supportsOutboundWss: true,
         // 2026-10-08 契约新增：生效 key 是否已配置（布尔投影，不含值）。

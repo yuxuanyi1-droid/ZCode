@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { InputReceipt, SubmitTaskInput } from "@zcode/shared";
 import {
+  isCloudNoActiveRunRejection,
   reconcileCloudTaskInput,
   submitCloudTaskInput,
   type CloudTaskSubmissionDeps,
@@ -218,6 +219,83 @@ test("a definitive server rejection is recorded as rejected, not as unknown", as
   // UI 不解析异常文案，只按 code 归类（04 §6）。
   assert.equal(outcome.message, "idempotency_conflict");
   assert.equal(useCloudDraftStore.getState().attempts[SCOPE_KEY]?.[COMMAND_ID]?.phase, "rejected");
+});
+
+// 2026-10-08 终态 run 发送行为修订：rejected/unknown outcome 透出结构化 code 与
+// 服务端稳定 reason（details.reason），供 UI 按 not_ready reason 细分归一文案；
+// 409 no-active-run 是「自动改走 reopen 重试一次」的唯一触发组合。
+test("the 409 no-active-run rejection carries the structured code and reason", async () => {
+  useCloudDraftStore.getState().reset();
+  const conflict = Object.assign(new Error("no-active-run"), {
+    code: "not_ready",
+    retryable: false,
+    details: { reason: "no-active-run" },
+  });
+  const { port } = createPort({
+    submit: async () => {
+      throw conflict;
+    },
+  });
+  const deps = createDeps(port);
+
+  const outcome = await submitCloudTaskInput({
+    commandId: COMMAND_ID,
+    request: { kind: "input", body: createInputBody() },
+    bodyVersion: 2,
+    deps,
+  });
+
+  assert.equal(outcome.kind, "rejected");
+  if (outcome.kind !== "rejected") {
+    return;
+  }
+  assert.equal(outcome.code, "not_ready");
+  assert.equal(outcome.reason, "no-active-run");
+  assert.equal(isCloudNoActiveRunRejection(outcome), true);
+
+  // 其他 not_ready reason（停止受理中 / run 未 ready）不构成自动重开依据。
+  const stopping = Object.assign(new Error("stop-requested"), {
+    code: "not_ready",
+    retryable: false,
+    details: { reason: "stop-requested" },
+  });
+  const { port: port2 } = createPort({
+    submit: async () => {
+      throw stopping;
+    },
+  });
+  const outcome2 = await submitCloudTaskInput({
+    commandId: COMMAND_ID,
+    request: { kind: "input", body: createInputBody() },
+    bodyVersion: 2,
+    deps: createDeps(port2),
+  });
+  assert.equal(outcome2.kind, "rejected");
+  if (outcome2.kind !== "rejected") {
+    return;
+  }
+  assert.equal(outcome2.reason, "stop-requested");
+  assert.equal(isCloudNoActiveRunRejection(outcome2), false);
+
+  // 非结构化错误（传输层）：code/reason 为 null，不猜语义。
+  const { port: port3 } = createPort({
+    submit: async () => {
+      throw new Error("socket hang up");
+    },
+  });
+  const outcome3 = await submitCloudTaskInput({
+    commandId: COMMAND_ID,
+    request: { kind: "input", body: createInputBody() },
+    bodyVersion: 2,
+    deps: createDeps(port3),
+  });
+  assert.equal(outcome3.kind, "unknown");
+  if (outcome3.kind !== "unknown") {
+    return;
+  }
+  assert.equal(outcome3.code, null);
+  assert.equal(outcome3.reason, null);
+  assert.equal(isCloudNoActiveRunRejection(outcome3), false);
 });
 
 test("retrying an unknown attempt replays the same key instead of minting a new one", async () => {

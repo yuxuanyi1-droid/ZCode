@@ -85,13 +85,32 @@ export interface OperationOutboxPort {
    * 2) **租约到期且 `state=ambiguous`** 的记录：这是 03 §5/§8 的对账入口（结果未知的
    *    create/terminate/push/PR 不能永远搁置，必须被恢复扫描重新领取并对账）。
    * 同一 operation 不会有两个有效租约；结算必须带 leaseToken。
+   *
+   * 分相领取过滤（C-4，定稿附录 6：checkpoint 僵尸治理用分相领取，不加优先级列）：
+   * - `operationIds`：只在这些 id 里领取（停止 sweep 只领 run.stopOperationId 关联 op）；
+   * - `excludeOperationIds`：排除这些 id（周期保存 sweep 排除被停止关联的 op，防饿死）。
+   * 两者都省略时不过滤；`operationIds` 为空数组时直接返回 null（无候选）。
    */
   leaseNext(request: {
     kinds: readonly ExternalOperationKind[];
     workerId: string;
     leaseMs: number;
     now: number;
+    operationIds?: readonly string[];
+    excludeOperationIds?: readonly string[];
   }): Promise<LeasedOperation | null>;
+  /**
+   * 租约续期（C-3）：**持有人 token 校验的 CAS 续租**——只有当前持有人能把租约往后延，
+   * 迟到 worker/旧 token 一律 false。create 全程可能超过默认租期（provider create 60s+），
+   * 持有方在执行期间续期，避免租约到期后第二个 worker 再领同一 create（03 §5）。
+   * 已结算（settled/failed/ambiguous）的 operation 不可续期。
+   */
+  renewLease(request: {
+    operationId: string;
+    leaseToken: string;
+    leaseMs: number;
+    now: number;
+  }): Promise<boolean>;
   /** 结算 CAS：租约令牌不匹配返回 false（迟到结果只用于对账）。 */
   settle(request: {
     operationId: string;

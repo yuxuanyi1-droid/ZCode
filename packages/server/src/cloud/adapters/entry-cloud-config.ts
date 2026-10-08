@@ -22,6 +22,7 @@ import {
   ZCODE_CLOUD_PRINCIPAL_ID_ENV,
   ZCODE_CLOUD_PROVIDERS_ENV,
   ZCODE_CLOUD_PUBLIC_ORIGIN_ENV,
+  ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS_ENV,
   ZCODE_CLOUD_SANDBOX_MAX_LIFETIME_SECONDS_ENV,
   ZCODE_CLOUD_SANDBOX_TEMPLATE_REF_ENV,
   ZCODE_CLOUD_STORAGE_WORKER_ENTRY_ENV,
@@ -42,6 +43,7 @@ import {
 import {
   parseCloudAuthMode,
   parseIdList,
+  parseOptionalNonNegativeInt,
   parsePositiveInt,
   parsePrincipalId,
   parsePublicOrigin,
@@ -71,6 +73,7 @@ export {
   ZCODE_CLOUD_PRINCIPAL_ID_ENV,
   ZCODE_CLOUD_PROVIDERS_ENV,
   ZCODE_CLOUD_PUBLIC_ORIGIN_ENV,
+  ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS_ENV,
   ZCODE_CLOUD_SANDBOX_MAX_LIFETIME_SECONDS_ENV,
   ZCODE_CLOUD_SANDBOX_TEMPLATE_REF_ENV,
   ZCODE_CLOUD_STORAGE_WORKER_ENTRY_ENV,
@@ -212,6 +215,18 @@ export async function readCloudEntryConfig(
     readTrimmed(env, ZCODE_CLOUD_SANDBOX_MAX_LIFETIME_SECONDS_ENV),
   );
   issues.push(...lifetimeLimits.issues);
+  // 空闲 pause 阈值（秒；0 = 显式禁用）：非负整数校验 fail-closed，负数/非整数报 issue，
+  // 不静默回落缺省（吞掉部署方的禁用意图比启动失败更难排查，W5 §5）。
+  const idlePauseSeconds = parseOptionalNonNegativeInt(
+    readTrimmed(env, ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS_ENV),
+  );
+  if (idlePauseSeconds === null) {
+    issues.push({
+      code: "sandbox_idle_pause_invalid",
+      field: ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS_ENV,
+      message: "空闲 pause 阈值必须是非负整数秒（0 = 显式禁用）",
+    });
+  }
 
   const webDir = readTrimmed(env, ZCODE_CLOUD_WEB_DIR_ENV);
   if (webDir) {
@@ -268,6 +283,9 @@ export async function readCloudEntryConfig(
         : {}),
       ...(templateRefs.value ? { sandboxTemplateRefs: templateRefs.value } : {}),
       ...(lifetimeLimits.value ? { sandboxMaxLifetimeSeconds: lifetimeLimits.value } : {}),
+      ...(idlePauseSeconds !== undefined && idlePauseSeconds !== null
+        ? { sandboxIdlePauseSeconds: idlePauseSeconds }
+        : {}),
       secrets: {
         ...(principalId ? { principalId } : {}),
         ...(authTokenFile ? { authTokenFile } : {}),

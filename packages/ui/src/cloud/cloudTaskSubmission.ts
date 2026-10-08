@@ -21,6 +21,7 @@ import {
   isCloudApiErrorRetryable,
   isCloudResyncRequiredError,
   readCloudErrorCode,
+  readCloudErrorReason,
 } from "./cloudApiErrorLike.js";
 import type { CloudControlPlanePort } from "./cloudPorts.js";
 import type {
@@ -55,10 +56,26 @@ export type CloudSubmissionOutcome =
     }
   /** 本地冻结失败：本轮不得发出 HTTP（04 §3.4.1）。 */
   | { readonly kind: "not-frozen"; readonly message: string }
-  /** 结果未知：保留原 commandId，先对账再决定（03 §5）。 */
-  | { readonly kind: "unknown"; readonly commandId: string; readonly message: string }
+  /**
+   * 结果未知：保留原 commandId，先对账再决定（03 §5）。
+   * `code`/`reason`（2026-10-08 终态 run 发送行为修订）：结构化错误目录与稳定 reason，
+   * 供 UI 按 shared 文案表细分归一；非结构化错误为 null，不猜语义。
+   */
+  | {
+      readonly kind: "unknown";
+      readonly commandId: string;
+      readonly message: string;
+      readonly code: string | null;
+      readonly reason: string | null;
+    }
   /** 明确失败：保留正文，理由可见（04 §3.4 表「rejected / failed delivery」行）。 */
-  | { readonly kind: "rejected"; readonly commandId: string; readonly message: string };
+  | {
+      readonly kind: "rejected";
+      readonly commandId: string;
+      readonly message: string;
+      readonly code: string | null;
+      readonly reason: string | null;
+    };
 
 /**
  * 归一错误文案：UI 不解析异常文字（04 §6），只按 code 归类后给出可行动提示；
@@ -122,13 +139,15 @@ export async function submitCloudTaskInput(
     };
   } catch (error) {
     const message = describeCloudSubmissionError(error);
+    const code = readCloudErrorCode(error);
+    const reason = readCloudErrorReason(error);
     if (isDefinitiveCloudFailure(error)) {
       deps.settleAttempt(commandId, { phase: "rejected", message });
-      return { kind: "rejected", commandId, message };
+      return { kind: "rejected", commandId, message, code, reason };
     }
     // 结果未知（超时/断网/网关错误）：不能当成没发，也不能自动换 key。
     deps.settleAttempt(commandId, { phase: "unknown", message });
-    return { kind: "unknown", commandId, message };
+    return { kind: "unknown", commandId, message, code, reason };
   }
 }
 
@@ -188,4 +207,18 @@ function isDefinitiveCloudFailure(error: unknown): boolean {
   }
   const code = error.code;
   return code !== "network_unknown" && code !== "protocol_incompatible";
+}
+
+/**
+ * 终态 run 竞态判定（2026-10-08 终态 run 发送行为修订，04 §3.3）：
+ * append 命中服务端「无有效 run」拒绝（409 `not_ready/no-active-run`，precheckAppend）。
+ * 仅该 reason 允许客户端把用户显式发送自动改走 reopen 重试一次；其他 `not_ready`
+ * reason（stop-requested/run-not-ready 等）与未知语义一律不自动重开，按归一文案呈现。
+ */
+export function isCloudNoActiveRunRejection(outcome: CloudSubmissionOutcome): boolean {
+  return (
+    outcome.kind === "rejected" &&
+    outcome.code === "not_ready" &&
+    outcome.reason === "no-active-run"
+  );
 }

@@ -5,6 +5,7 @@
  * 不含任何实现：SQLite、provider SDK、GitHub、Hono 都不在此层出现（W1 §5）。
  */
 import type { AttachmentPort } from "./ports/attachmentPort.js";
+import type { BrowserWatchPort } from "./ports/browserWatchPort.js";
 import type { ArtifactRead, ExecutionProjectionRead } from "./ports/projectionPort.js";
 import type { InteractionDecisionRepo } from "./ports/inputPort.js";
 import type { GitGrantBrokerPort } from "./ports/gitGrantBrokerPort.js";
@@ -39,6 +40,12 @@ export interface CloudCoreDeps {
   sandboxRuntimeSettings?: SandboxRuntimeSettingsPort;
   /** 控制面 → attachment（02 §6.1 唯一投递出口）。 */
   attachments: AttachmentPort;
+  /**
+   * 浏览器观看事实（08 §7 空闲 pause 的连接条件）：该 run 是否有打开的
+   * `/ws/cloud/tasks/:taskId` 观看流。未接线（测试/嵌入装配）视为无人观看，
+   * 不阻塞空闲 pause——事实缺失不虚构「有人看着」。
+   */
+  browserWatch?: BrowserWatchPort;
   /** runtime 命令事实查询（03 §7.2 对账；ACK 丢失不重复副作用）。 */
   runtimeCommands: RuntimeCommandQueryPort;
   clock: ClockPort;

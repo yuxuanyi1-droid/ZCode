@@ -21,7 +21,10 @@ import { toast } from "@/components/ui/toast.js";
 import { useConfirmDialog } from "@/hooks/useConfirmDialog.js";
 import { useCloudTask } from "@/hooks/cloud/useCloudTask.js";
 import { describeCloudTaskActionError } from "@/cloud/cloudTaskErrorText.js";
-import { isCloudTaskArchiveActionAvailable } from "@/cloud/cloudTaskPanel.js";
+import {
+  isCloudTaskArchiveActionAvailable,
+  resolveCloudTaskArchiveAdmission,
+} from "@/cloud/cloudTaskPanel.js";
 
 interface CloudTaskRowProps {
   readonly task: CloudTaskRecord;
@@ -35,11 +38,16 @@ export function CloudTaskRow({ task, selected, onOpen }: CloudTaskRowProps) {
   const isDraft = task.status === "draft";
   // 行内只要生命周期动作（归档）：autoLoad=false 避免整列行各自触发 GET /tasks/:id；
   // 动作走与详情面板同一条 useCloudTask → port.archiveTask 路径（04 §6 独立端点）。
-  const { archiveTask, detail } = useCloudTask({ taskId: task.taskId, autoLoad: false });
+  const { archiveTask, detail, loadDetail } = useCloudTask({
+    taskId: task.taskId,
+    autoLoad: false,
+  });
   // 服务端规则（03 §6）：draft/completed/failed 与「active + 终态 run」可归档；已归档
   // 不重复归档。归档入口可用性与 Header 更多菜单对齐——按 actions 投影门控：
   // 该行有缓存详情（打开过/归档过）而投影不含 archive 时预禁用并说明原因；没有缓存
-  // 详情的行保持入口（不为预禁用整列发 GET），由服务端裁决并回显归一后的错误。
+  // 详情的行保持入口（不为预禁用整列发 GET），点击时先按投影预检
+  // （resolveCloudTaskArchiveAdmission），活动 run 未终态时不再发出必被 409 拒绝的
+  // 归档请求，而是直接给出「先停止再归档」引导（2026-10-07 终验缺陷 E）。
   const archiveVisible = task.status !== "archived";
   const archiveUnavailable =
     archiveVisible && detail !== null && !isCloudTaskArchiveActionAvailable(detail);
@@ -55,6 +63,17 @@ export function CloudTaskRow({ task, selected, onOpen }: CloudTaskRowProps) {
         confirmLabel: intl.formatMessage({ id: "cloud.tasks.archive" }),
       });
       if (!confirmed) {
+        return;
+      }
+      // 无缓存详情时先拉一次详情做准入预检：投影不含 archive（存在未终态 run 的
+      // 唯一非归档情形）就直接引导「先停止」，不发必被服务端 409 拒绝的请求；
+      // 详情拉不到（unknown）回落服务端裁决，错误经归一文案呈现。
+      const admission = await resolveCloudTaskArchiveAdmission({
+        cachedDetail: detail,
+        loadDetail,
+      });
+      if (admission.kind === "blocked-active-run") {
+        toast(intl.formatMessage({ id: "cloud.errors.not_ready.task_has_active_run" }));
         return;
       }
       try {
@@ -74,7 +93,7 @@ export function CloudTaskRow({ task, selected, onOpen }: CloudTaskRowProps) {
         );
       }
     })();
-  }, [archiveTask, confirmDialog, intl, task.title]);
+  }, [archiveTask, confirmDialog, detail, intl, loadDetail, task.title]);
 
   return (
     <div className="group/task flex h-6 min-w-0 items-center rounded-md">

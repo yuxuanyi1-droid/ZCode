@@ -108,6 +108,41 @@ export function reserveRunInTransaction(
   return { run: mapRunRow(requireRun(context, request.runId)), runGeneration };
 }
 
+/**
+ * 请求寿命落库（01 §4.3、08 §7、审计 D4-7）：接纳事务内与 run 预约同一事务写
+ * hardDeadlineAt 及可选的保守估计（估计必须带置信度）。CAS 按 run_generation 匹配；
+ * 调用方（acceptInput）必须已处于同一写事务内——create worker 领取操作时硬期限已可见，
+ * 不存在「事务提交后补写」的崩溃窗口。写入未命中（run/generation 不匹配）返回 false。
+ */
+export function applyRunLifetimeInTransaction(
+  context: StorageContext,
+  input: {
+    runId: string;
+    runGeneration: number;
+    lease: { hardDeadlineAt: number; deadlineEstimate?: number; deadlineConfidence?: string };
+    now: number;
+  },
+): boolean {
+  const changes = context.db
+    .prepare(
+      `UPDATE runs SET
+         hard_deadline_at = ?,
+         deadline_estimate = COALESCE(?, deadline_estimate),
+         deadline_confidence = COALESCE(?, deadline_confidence),
+         updated_at = ?
+       WHERE run_id = ? AND run_generation = ?`,
+    )
+    .run(
+      input.lease.hardDeadlineAt,
+      input.lease.deadlineEstimate ?? null,
+      input.lease.deadlineConfidence ?? null,
+      input.now,
+      input.runId,
+      input.runGeneration,
+    );
+  return Number(changes.changes) > 0;
+}
+
 export const runRepoHandlers = {
   "runs.get": (context, params): CloudRunRecord | null => {
     const row = selectRun(context, params.runId);

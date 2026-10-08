@@ -16,6 +16,7 @@ import { buildCloudTaskWorkspacePath } from "../../domain/workspacePath.js";
 import { resolveHardDeadline } from "../../domain/savePolicy.js";
 import type { CloudCoreDeps } from "../deps.js";
 import { cloudCoreLogger } from "../logger.js";
+import { startOperationLeaseKeepalive } from "./leaseKeepalive.js";
 import type { LeasedOperation } from "../ports/operationOutboxPort.js";
 import type { CreateReconciliation, ProviderSandboxHandle } from "../ports/sandboxDriverPort.js";
 import type { RunCompensation } from "./compensation.js";
@@ -236,7 +237,11 @@ export function createCreateOperationRunner(
       // 抛错不等于失败：网络超时/结果未知必须走 provider 对账，不自动第二次 create（03 §5）。
       let reconciliation: CreateReconciliation;
       try {
-        reconciliation = await driver.findCreateResult(createOperationKey(run.runId));
+        reconciliation = await driver.findCreateResult(createOperationKey(run.runId), {
+          // C-3（定稿附录 6）：对账必须带持久锚点——operation 行的 createdAt 是跨重启
+          // 可用的 create 尝试时间；没有它，「查不到」无法安全判 notFound（01 §4.1）。
+          operationAttemptedAtMs: leased.operation.createdAt,
+        });
       } catch (reconcileError) {
         // 对账本身失败（网络/权限）：保留 unknown 语义等下一次租约重试，不猜也不丢文本。
         const reconcileDetail = describeCreateError(reconcileError);
@@ -325,40 +330,61 @@ export function createCreateOperationRunner(
         });
         return null;
       }
+      const leaseMs = input.leaseMs ?? 60_000;
       const leased = await operations.leaseNext({
         kinds: ["create"],
         workerId: input.workerId ?? "cloud-provisioning",
-        leaseMs: input.leaseMs ?? 60_000,
+        leaseMs,
         now: clock.now(),
       });
       if (!leased) return null;
       const run = leased.operation.runId ? await storage.runs.get(leased.operation.runId) : null;
-      if (!run) {
-        await settle(leased, "failed", "validation_failed");
-        return {
-          operationId: leased.operation.operationId,
-          outcome: "failed",
-          reason: "run-missing",
-        };
+      // C-3：create 全程持有租约（provider create 可能 60s+）。执行期间周期续租，
+      // 租约不再到期 → 第二个 worker 无法领取同一 create（迟到分配的根源被闭合，
+      // lifecycleLoops 的双 scope 并发因此无害）。结算后/令牌丢失时续租自然失败退出。
+      const keepalive = startOperationLeaseKeepalive({
+        operations,
+        clock,
+        operationId: leased.operation.operationId,
+        leaseToken: leased.leaseToken,
+        leaseMs,
+        onLost: () => {
+          cloudCoreLogger.warn(undefined, "cloud create lease lost during execution", {
+            runId: run?.runId,
+            operationId: leased.operation.operationId,
+          });
+        },
+      });
+      try {
+        if (!run) {
+          await settle(leased, "failed", "validation_failed");
+          return {
+            operationId: leased.operation.operationId,
+            outcome: "failed",
+            reason: "run-missing",
+          };
+        }
+        if (run.runGeneration !== leased.operation.runGeneration) {
+          await settle(leased, "failed", "stale");
+          return {
+            operationId: leased.operation.operationId,
+            outcome: "skipped",
+            reason: "stale-generation",
+          };
+        }
+        if (run.status !== "provisioning") {
+          // 已是终态/已 ready：迟到 create 不复活 run（08 §3.2）。
+          await settle(leased, "failed", "stale");
+          return {
+            operationId: leased.operation.operationId,
+            outcome: "skipped",
+            reason: "run-not-provisioning",
+          };
+        }
+        return await executeCreate(leased, run, input.signal);
+      } finally {
+        await keepalive.stop();
       }
-      if (run.runGeneration !== leased.operation.runGeneration) {
-        await settle(leased, "failed", "stale");
-        return {
-          operationId: leased.operation.operationId,
-          outcome: "skipped",
-          reason: "stale-generation",
-        };
-      }
-      if (run.status !== "provisioning") {
-        // 已是终态/已 ready：迟到 create 不复活 run（08 §3.2）。
-        await settle(leased, "failed", "stale");
-        return {
-          operationId: leased.operation.operationId,
-          outcome: "skipped",
-          reason: "run-not-provisioning",
-        };
-      }
-      return executeCreate(leased, run, input.signal);
     },
   };
 }

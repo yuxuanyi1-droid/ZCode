@@ -78,4 +78,9 @@ export interface TaskRepo {
     requested: boolean;
     now: number;
   }): Promise<CloudTaskRecord | null>;
+  /**
+   * 验收意图扫尾（08 §9、审计 N-P3）：列出 `complete_requested=1` 且仍为 active 的
+   * Task，供后台 sweep 在 run 终态 + 输入收口后自动收口为 completed。幂等只读。
+   */
+  listCompleteRequested(): Promise<CloudTaskRecord[]>;
 }

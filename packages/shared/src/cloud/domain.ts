@@ -53,10 +53,15 @@ export const CLOUD_TASK_ACTIONS = [
 export const cloudTaskActionSchema = z.enum(CLOUD_TASK_ACTIONS);
 export type CloudTaskAction = z.infer<typeof cloudTaskActionSchema>;
 
-/** Run：执行载体/连接状态（08 §3.2 状态机；迁移表在控制面 domain 层）。 */
+/**
+ * Run：执行载体/连接状态（08 §3.2 状态机；迁移表在控制面 domain 层）。
+ * `paused` 为 2026-10-09 生命周期 v2 增补（08 §3.2 修订）：暂停保留期占槽、不是终态；
+ * 仅 `pauseResume ≠ none` 的分级能力 provider 出现，能力位 none 的 provider 不进入该状态。
+ */
 export const cloudRunStatusSchema = z.enum([
   "provisioning",
   "ready",
+  "paused",
   "disconnected",
   "draining",
   "stopped",
@@ -283,6 +288,12 @@ export const cloudRunRecordSchema = z
     lastBusinessActivityAt: epochMs.optional(),
     endReason: nonEmptyString.max(256).optional(),
     lastError: nonEmptyString.max(512).optional(),
+    /**
+     * provider 终止已确认、计费槽已释放的时间（01 §4.3「只有确认释放才释放槽」）。
+     * 为空表示终止结果未确认（仍占槽，runOrchestrator 允许该状态存在）：reopen 前置
+     * 核验据此拒绝自动重开，防止与旧沙箱并存的双计费槽（08 §9、审计 D4-12）。
+     */
+    quotaReleasedAt: epochMs.optional(),
     /** 保存风险可见：true 时不得宣称工作全部保住（08 §8.2）。 */
     dataAtRisk: z.boolean(),
     createdAt: epochMs,

@@ -460,3 +460,182 @@ test("append 不得携带 create 意图（占位 id 会产生永不结算的假�
     );
   });
 });
+
+test("请求寿命与 run 预约同一事务落库（D4-7、审计 #10）", async () => {
+  await withStorage(async (handle) => {
+    const seeded = await seedDraftTask(handle.storage);
+    const accepted = await startFirstRun(handle, seeded, {
+      lease: {
+        hardDeadlineAt: nextNow(1) + 3_600_000,
+        deadlineEstimate: nextNow(1) + 3_600_000,
+        deadlineConfidence: "low",
+      },
+    });
+    const runId = accepted.runId as string;
+
+    // 事务提交即见期限事实：create worker 领取操作时不再依赖 gateway 的事务后补写
+    //（补写曾在崩溃窗口丢失 → create 走本地重算、租期无上界）。
+    const run = await handle.storage.storage.runs.get(runId);
+    assert.equal(run?.hardDeadlineAt, nextNow(1) + 3_600_000);
+    assert.equal(run?.deadlineEstimate, nextNow(1) + 3_600_000);
+    assert.equal(run?.deadlineConfidence, "low");
+
+    // append 不得改写已冻结租期（D4-7）。
+    await handle.storage.storage.runs.transitionStatus({
+      runId,
+      runGeneration: 1,
+      from: ["provisioning"],
+      to: "ready",
+      now: nextNow(2),
+    });
+    await assert.rejects(
+      handle.storage.storage.acceptInput({
+        taskId: seeded.taskId,
+        commandId: newUuid(),
+        intent: "append",
+        payloadHash: fakeSha256("ap2"),
+        prompt: "继续",
+        expectedRunGeneration: 1,
+        lease: { hardDeadlineAt: nextNow(2) + 9_999_999 },
+        quota: { maxConcurrentRuns: 3 },
+        now: nextNow(2),
+      }),
+      (error: unknown) => isCloudStorageError(error) && error.code === "validation_failed",
+    );
+
+    // 估计期限必须携带置信度（08 §7），fail closed。
+    const second = await seedDraftTask(handle.storage, { repositoryId: 9 });
+    await assert.rejects(
+      handle.storage.storage.acceptInput(
+        startRequest(second.taskId, {
+          lease: { hardDeadlineAt: nextNow(3) + 1_000, deadlineEstimate: nextNow(3) + 1_000 },
+        }),
+      ),
+      (error: unknown) => isCloudStorageError(error) && error.code === "validation_failed",
+    );
+  });
+});
+
+test("settleForEndedRun 只收口本 run 的残留输入（08 §8.1、审计 D4-3）", async () => {
+  await withStorage(async (handle) => {
+    const seeded = await seedDraftTask(handle.storage);
+    const accepted = await startFirstRun(handle, seeded);
+    const runId = accepted.runId as string;
+    await handle.storage.storage.runs.transitionStatus({
+      runId,
+      runGeneration: 1,
+      from: ["provisioning"],
+      to: "ready",
+      now: nextNow(2),
+    });
+    const commandIdOf = async (seq: number) =>
+      (await handle.storage.storage.inputs.list(seeded.taskId, { limit: 10 })).items[seq - 1]
+        ?.commandId as string;
+
+    // i2 保持 accepted；i3 投递结论不明（delivering）；i1（首命令）已在对账 uncertain。
+    const append = (commandId: string, payload: string) =>
+      handle.storage.storage.acceptInput({
+        taskId: seeded.taskId,
+        commandId,
+        intent: "append",
+        payloadHash: fakeSha256(payload),
+        prompt: payload,
+        expectedRunGeneration: 1,
+        quota: { maxConcurrentRuns: 3 },
+        now: nextNow(10),
+      });
+    const i2 = newUuid();
+    const i3 = newUuid();
+    assert.equal((await append(i2, "p2")).status, "accepted");
+    assert.equal((await append(i3, "p3")).status, "accepted");
+    // accepted → delivering 是状态机内合法推进（模拟已发送、ACK 未落）。
+    await handle.storage.storage.inputs.markDelivery({
+      taskId: seeded.taskId,
+      commandId: i3,
+      to: "delivering",
+      runId,
+      now: nextNow(11),
+    });
+    const i1 = await commandIdOf(1);
+    // accepted → uncertain 是状态机内合法边（02 §6.3）。
+    await handle.storage.storage.inputs.markDelivery({
+      taskId: seeded.taskId,
+      commandId: i1,
+      to: "uncertain",
+      lastError: "ack-lost",
+      now: nextNow(11),
+    });
+
+    const outcome = await handle.storage.storage.inputs.settleForEndedRun({
+      taskId: seeded.taskId,
+      runId,
+      now: nextNow(12),
+    });
+    assert.deepEqual(outcome, { cancelled: 1, unknown: 1 });
+
+    const inputs = (await handle.storage.storage.inputs.list(seeded.taskId, { limit: 10 })).items;
+    const byId = new Map(inputs.map((item) => [item.commandId, item]));
+    assert.equal(byId.get(i1)?.deliveryStatus, "uncertain", "uncertain 保留为结果不明事实");
+    assert.equal(byId.get(i1)?.lastError, "ack-lost", "既有对账痕迹不被覆盖");
+    assert.equal(byId.get(i2)?.deliveryStatus, "cancelled", "accepted 确定未执行 → cancelled");
+    assert.equal(byId.get(i2)?.lastError, "run-ended");
+    assert.equal(byId.get(i3)?.deliveryStatus, "uncertain", "delivering 结果不明 → uncertain");
+    assert.equal(byId.get(i3)?.lastError, "run-ended");
+
+    // 幂等：重复收口不再产生变化。
+    assert.deepEqual(
+      await handle.storage.storage.inputs.settleForEndedRun({
+        taskId: seeded.taskId,
+        runId,
+        now: nextNow(13),
+      }),
+      { cancelled: 0, unknown: 0 },
+    );
+
+    // 绑定新一代 run 的输入不受影响（reopen 后旧 run 收口不触碰新输入）。
+    await handle.storage.storage.runs.transitionStatus({
+      runId,
+      runGeneration: 1,
+      from: ["ready"],
+      to: "stopped",
+      endReason: "user-stop",
+      now: nextNow(14),
+    });
+    await handle.storage.storage.runs.releaseQuota({
+      runId,
+      reason: "provider-terminated",
+      now: nextNow(14),
+    });
+    const reopened = await handle.storage.storage.acceptInput({
+      taskId: seeded.taskId,
+      commandId: newUuid(),
+      intent: "reopen",
+      payloadHash: fakeSha256("r"),
+      prompt: "重开",
+      runRecipe: {
+        provider: "daytona",
+        resources: { cpu: 2, memoryMiB: 4096, diskGiB: 10 },
+        firstCommandConfig: {},
+        baseSha: fakeGitSha("base1"),
+      },
+      createOperationId: newUuid(),
+      quota: { maxConcurrentRuns: 3 },
+      now: nextNow(15),
+    });
+    assert.equal(reopened.status, "accepted");
+    const settledAgain = await handle.storage.storage.inputs.settleForEndedRun({
+      taskId: seeded.taskId,
+      runId,
+      now: nextNow(16),
+    });
+    assert.deepEqual(
+      settledAgain,
+      { cancelled: 0, unknown: 0 },
+      "新一代 run 的 reopen 输入不得被旧 run 收口",
+    );
+    const reopenedInput = (
+      await handle.storage.storage.inputs.list(seeded.taskId, { limit: 10 })
+    ).items.at(-1);
+    assert.equal(reopenedInput?.deliveryStatus, "accepted");
+  });
+});

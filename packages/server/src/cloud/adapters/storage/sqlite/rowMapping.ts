@@ -180,6 +180,7 @@ export function mapRunRow(row: SqlRow): CloudRunRecord {
         lastBusinessActivityAt: readOptionalInt(row, "last_business_activity_at"),
         endReason: readOptionalText(row, "end_reason"),
         lastError: readOptionalText(row, "last_error"),
+        quotaReleasedAt: readOptionalInt(row, "quota_released_at"),
         dataAtRisk: readBool(row, "data_at_risk"),
         createdAt: readInt(row, "created_at"),
         updatedAt: readInt(row, "updated_at"),

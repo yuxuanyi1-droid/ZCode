@@ -39,6 +39,11 @@ export interface BrowserRpcMultiplexer {
   open(input: OpenBrowserRpcStreamInput): BrowserRpcStream | null;
   /** 沙箱入站的 `rpc.*` 帧：只处理本流请求与 close，且必须与流的代际一致。 */
   handleInbound(frame: CloudRpcFrame): void;
+  /**
+   * 该 run 是否有打开的浏览器流（08 §7 空闲 pause 的观看事实源：浏览器经任务通道
+   * 打开的每条连接恰对应一条流，连接关闭即删，不持久、可重建）。
+   */
+  hasOpenStreams(runId: string): boolean;
   /** 连接释放/run 终止：终止该 run 的全部浏览器流（不重放、不缓存字节）。 */
   closeRun(runId: string, reason: string): void;
   closeAll(reason: string): void;
@@ -170,6 +175,13 @@ export function createBrowserRpcMultiplexer(input: {
           closeStream(state, "unexpected-frame-direction", true);
           return;
       }
+    },
+
+    hasOpenStreams(runId) {
+      for (const state of streams.values()) {
+        if (state.runId === runId) return true;
+      }
+      return false;
     },
 
     closeRun(runId, reason) {

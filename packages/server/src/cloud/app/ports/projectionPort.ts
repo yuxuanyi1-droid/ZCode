@@ -16,6 +16,11 @@ export interface ProjectionAppendResult {
   /** 同键不同 contentHash：一致性 fault，必须告警而不是覆盖（02 §7.1）。 */
   conflicts: { topic: string; logEpoch: string; sourceSeq: number }[];
   appended: number;
+  /**
+   * 本批次**实际新增**记录所属的 runId（去重后）。08 §7 业务活动事实源收窄：
+   * WAL 重投/补发（0 新增）不得推进 lastBusinessActivityAt，调用方据此分流。
+   */
+  appendedRunIds: string[];
 }
 
 export interface ProjectionRepo {

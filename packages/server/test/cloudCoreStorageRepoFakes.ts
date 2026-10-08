@@ -22,6 +22,10 @@ import type {
 } from "../src/cloud/app/ports/storagePort.js";
 
 import { canAdvanceDeliveryStatus } from "../src/cloud/domain/deliveryStatus.js";
+import {
+  advanceContiguousWatermark,
+  projectionCoveredInterval,
+} from "../src/cloud/domain/projectionSequence.js";
 
 export interface StorageFakeState {
   projectsById: Map<string, CloudProjectRecord>;
@@ -34,7 +38,7 @@ export interface StorageFakeState {
   revokedRuns: string[];
   quotaReleases: string[];
   payloadText: Map<string, string>;
-  credentials: Map<string, { credentialHash: string; rotationId: string }>;
+  credentials: Map<string, { credentialHash: string; rotationId: string; expiresAt?: number }>;
   cursors: Map<string, CloudStreamCursor>;
   snapshots: Map<string, { logEpoch: string; coveredSourceSeq: number; snapshot: unknown }>;
   taskRevisionBumps: { value: number };
@@ -97,6 +101,35 @@ export function createInputsRepo(state: StorageFakeState): InputRepo {
       inputsByKey.set(`${request.taskId}:${request.commandId}`, updated);
       return updated;
     },
+    /**
+     * 终态扫尾（D4-3）：与真实 repo 同一裁决——accepted→cancelled（确定未执行），
+     * delivering→uncertain（结果不明，不伪称 cancelled），uncertain 保持；
+     * 只作用于绑定本 run 或未绑定的输入。
+     */
+    async settleForEndedRun(request) {
+      let cancelled = 0;
+      let unknown = 0;
+      for (const [key, input] of inputsByKey) {
+        if (input.taskId !== request.taskId) continue;
+        if (input.targetRunId !== undefined && input.targetRunId !== request.runId) continue;
+        if (input.deliveryStatus === "accepted") {
+          inputsByKey.set(key, {
+            ...input,
+            deliveryStatus: "cancelled",
+            lastError: "run-ended",
+          });
+          cancelled += 1;
+        } else if (input.deliveryStatus === "delivering") {
+          inputsByKey.set(key, {
+            ...input,
+            deliveryStatus: "uncertain",
+            lastError: "run-ended",
+          });
+          unknown += 1;
+        }
+      }
+      return { cancelled, unknown };
+    },
     async listDeliverable(taskId) {
       return [...inputsByKey.values()]
         .filter(
@@ -117,6 +150,7 @@ export function createProjectionsRepo(state: StorageFakeState): ProjectionRepo {
     async appendBatch(records) {
       const conflicts: { topic: string; logEpoch: string; sourceSeq: number }[] = [];
       let appended = 0;
+      const appendedRunIds = new Set<string>();
       for (const record of records) {
         const key = [
           record.runId,
@@ -143,13 +177,27 @@ export function createProjectionsRepo(state: StorageFakeState): ProjectionRepo {
         }
         projectionRecords.push(record);
         appended += 1;
+        appendedRunIds.add(record.runId);
+        // 与真实 SQLite 仓库同一水位口径（domain/projectionSequence.ts 的区间链）：
+        // 导出记录的 sourceSeq 取交付帧 toSeq，snapshot 领头流的第一条记录 sourceSeq=N，
+        // 「逐条 +1」的旧算法会把水位错成 -1（2026-10-07 复核缺陷 2 的 4001 根因）。
         const cursorKey = `${record.runId}|${record.topic}|${record.logEpoch}`;
-        const cursor = cursors.get(cursorKey);
-        if (!cursor || record.sourceSeq === cursor.sourceSeq + 1) {
+        const stored = cursors.get(cursorKey)?.sourceSeq ?? -1;
+        const intervals = projectionRecords
+          .filter(
+            (item) =>
+              item.runId === record.runId &&
+              item.topic === record.topic &&
+              item.logEpoch === record.logEpoch,
+          )
+          .map((item) => projectionCoveredInterval(item.payload, item.sourceSeq))
+          .sort((left, right) => left.from - right.from);
+        const next = Math.max(advanceContiguousWatermark(intervals, stored), stored);
+        if (next > stored) {
           cursors.set(cursorKey, {
             topic: record.topic,
             logEpoch: record.logEpoch,
-            sourceSeq: record.sourceSeq,
+            sourceSeq: next,
           });
         }
       }
@@ -159,6 +207,7 @@ export function createProjectionsRepo(state: StorageFakeState): ProjectionRepo {
           .map(([, value]) => value),
         conflicts,
         appended,
+        appendedRunIds: [...appendedRunIds],
       };
     },
     async readHistory(request) {
@@ -186,7 +235,11 @@ export function createProjectionsRepo(state: StorageFakeState): ProjectionRepo {
       return checkpoints.filter((item) => item.taskId === taskId);
     },
     async recordCheckpoint(checkpoint) {
-      checkpoints.push(checkpoint);
+      // 与真实 repo 同一语义（projections.recordCheckpoint 按 operation_id UPSERT）：
+      // 同一 operationId 的重试结果覆盖旧记录（C-1/D4-4 重试成功读最新状态的前提）。
+      const index = checkpoints.findIndex((item) => item.operationId === checkpoint.operationId);
+      if (index >= 0) checkpoints[index] = checkpoint;
+      else checkpoints.push(checkpoint);
     },
   };
 }
@@ -211,6 +264,14 @@ export function createCredentialsRepo(state: StorageFakeState): RunCredentialRep
     async revokeRun(request) {
       revokedRuns.push(request.runId);
       return credentials.delete(request.runId) ? 1 : 0;
+    },
+    async extendForRun(request) {
+      // 与真实 repo 同一语义：只外推不内缩（B-6 续展口径）；无凭据/已撤销返回 false。
+      const record = credentials.get(request.runId);
+      if (!record) return false;
+      const current = record.expiresAt ?? 0;
+      record.expiresAt = Math.max(current, request.expiresAt);
+      return true;
     },
   };
 }

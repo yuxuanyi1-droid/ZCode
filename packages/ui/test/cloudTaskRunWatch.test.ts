@@ -32,7 +32,10 @@ function runWithStatus(status: string) {
   };
 }
 
-function detailWithRun(status: string | undefined): TaskDetailResponse {
+function detailWithRun(
+  status: string | undefined,
+  actions: readonly string[] = [],
+): TaskDetailResponse {
   return {
     task: {
       taskId: "8f14e45f-ceea-467a-9a1e-1f0d3b2a4c51",
@@ -45,7 +48,7 @@ function detailWithRun(status: string | undefined): TaskDetailResponse {
       updatedAt: 0,
     },
     ...(status === undefined ? {} : { activeRun: runWithStatus(status) }),
-    actions: [],
+    actions: [...actions],
   };
 }
 
@@ -65,6 +68,43 @@ test("watch stops at ready and terminal run states", () => {
       `${status} should stop the watch`,
     );
   }
+});
+
+// 2026-10-08 终态 run 发送行为修订：服务端详情投影只携带非终态 run，run 从
+// provisioning → 终态的迁移在投影里表现为 activeRun 消失；此时 actions 给出
+// `reopen`（无有效写 run 的裁决事实）。停止条件必须包含它——否则该迁移会被
+// 误判成「run 尚未出现」而轮询到 60s 超时，假「等待」横幅永久挂起。
+test("watch stops when the detail shows no run but the reopen action", () => {
+  assert.equal(
+    shouldContinueCloudTaskRunWatch(detailWithRun(undefined, ["reopen", "archive"])),
+    false,
+  );
+  // 非 reopen 的 actions 不构成停止依据（genuine 202 事务窗口仍继续）。
+  assert.equal(shouldContinueCloudTaskRunWatch(detailWithRun(undefined, ["archive"])), true);
+});
+
+test("provisioning-to-terminal transition stops the watch via the reopen action", async () => {
+  const clock = createManualClock();
+  const responses: TaskDetailResponse[] = [
+    detailWithRun("provisioning"), // 第一轮：环境准备中，继续
+    // 第二轮：run 已终态并被服务端收回（activeRun 消失），reopen 能力到达。
+    detailWithRun(undefined, ["reopen", "archive"]),
+  ];
+  let refreshCount = 0;
+  const handle = startCloudTaskRunWatch({
+    refresh: async () => responses[Math.min(refreshCount++, responses.length - 1)],
+    now: clock.now,
+    schedule: clock.schedule,
+    cancelScheduled: clock.cancelScheduled,
+  });
+  await flushMicrotasks();
+  assert.equal(refreshCount, 1);
+  await clock.advance(CLOUD_TASK_RUN_WATCH_INTERVAL_MS);
+  assert.equal(refreshCount, 2);
+  // reopen 事实已到达：不再有第三轮（不会拖到 60s 超时）。
+  await clock.advance(CLOUD_TASK_RUN_WATCH_INTERVAL_MS * 3);
+  assert.equal(refreshCount, 2);
+  handle.cancel();
 });
 
 /**

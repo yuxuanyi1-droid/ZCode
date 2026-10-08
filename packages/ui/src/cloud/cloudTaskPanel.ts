@@ -38,8 +38,22 @@ export type CloudTaskRunPanelView =
   | { readonly kind: "hidden" }
   /** task active 但 run 还没出现在投影里（202 后的事务窗口）。 */
   | { readonly kind: "waiting-for-run" }
+  /**
+   * task active/failed 且投影里没有 run、服务端 actions 给出 `reopen`
+   * （2026-10-08 终态 run 发送行为修订）：上一个 run 已终态并被服务端收回
+   * （详情投影只携带非终态 run，终态 run 事实以 reopen 能力到达）。
+   * 优先于 waiting 呈现——后者只属于 202 后 run 尚未出现的窗口。
+   */
+  | { readonly kind: "reopenable" }
   /** run 正在创建沙箱/clone/warm-up（04 §3.3 provisioning 行）。 */
   | { readonly kind: "provisioning" }
+  /**
+   * run 暂停保留中（2026-10-09 生命周期 v2，04 §3.3 修订行）：分级能力 provider 的
+   * 暂停保留期；呈现「已暂停——发送消息即可恢复」（composer 可用，append 由服务端
+   * 按 03 §6 修订语义接受并由控制面自驱 resume）。能力位 none 的 provider 不出现
+   * paused 投影（fail-closed：服务端本就不会报 paused）。
+   */
+  | { readonly kind: "paused" }
   /**
    * run 正在受控停止（2026-10-08 巡检修订 P1：stop 端点受理后 run 进入 draining，
    * 此前面板对 draining 一律 hidden，用户只看到永远「Working for Ns」）。
@@ -66,11 +80,21 @@ export function projectCloudTaskRunPanel(
   }
   const run = detail.activeRun;
   if (!run) {
+    // 2026-10-08 终态 run 发送行为修订：服务端详情投影只返回非终态 run，终态后
+    // `activeRun` 消失。此时「reopen 能力已由服务端 actions 给出」= 上一个 run 已
+    // 终态的事实到达 UI，呈现重开视图而不是永久假等待；仅当 reopen 不可用
+    // （真正的 202 事务窗口 / recovery 等）才保留等待呈现。
+    if (detail.actions?.includes("reopen")) {
+      return { kind: "reopenable" };
+    }
     // active 但投影里还没有 run：首发 202 后的窗口，呈现等待而不是空白。
     return { kind: "waiting-for-run" };
   }
   if (run.status === "provisioning") {
     return { kind: "provisioning" };
+  }
+  if (run.status === "paused") {
+    return { kind: "paused" };
   }
   if (run.status === "draining") {
     return { kind: "draining" };
@@ -118,11 +142,171 @@ export function resolveCloudReopenPlan(detail: CloudTaskPanelDetail | null): Clo
   };
 }
 
+// ── composer 发送路由（2026-10-08 终态 run 发送行为修订，04 §3.3、03 §6、08 §5）──
+//
+// 规则抽成纯函数（node:test 直接覆盖），hook 只做绑定：用户显式发送的路由决定
+// 与执行（HTTP 调用）分离，草稿恢复/对账/重试等自动路径不消费这里的 reopen 分支。
+
+/** reopen 请求的恢复选择（shared `cloudReopenResumeChoiceSchema` 的判别联合形状）。 */
+export type CloudComposerReopenResume =
+  | { readonly mode: "checkpoint" }
+  | { readonly mode: "restart-from-base" };
+
+/** composer 无法提交的本地前置原因（无结构化错误，供调用方决定是否给占位提示）。 */
+export type CloudComposerBlockedHint = "no-task" | "no-start-config" | "reopen-unavailable";
+
+export type CloudComposerSendPlan =
+  /** 没有任务投影：不猜状态，blocked（blockedHint=no-task）。 */
+  | { readonly kind: "missing-task"; readonly blockedHint: "no-task" }
+  /** draft 未保存完整启动配置：不允许首发（03 §6 start 行）。 */
+  | { readonly kind: "missing-start-config"; readonly blockedHint: "no-start-config" }
+  /** draft 首发。 */
+  | { readonly kind: "start"; readonly expectedTaskRevision: number }
+  /** run 在投影里（ready/disconnected/...）：普通 append（原语义）。 */
+  | { readonly kind: "append"; readonly expectedRunGeneration: number }
+  /**
+   * 无有效 run 且用户显式发送：自动重开（消息即新工作要求，resume 按持久事实自动选，
+   * 服务端按 08 §9 独立核验）。
+   */
+  | {
+      readonly kind: "reopen";
+      readonly provider: string;
+      readonly resume: CloudComposerReopenResume;
+      readonly expectedTaskRevision: number;
+    }
+  /** 无有效 run 但重开不可用（actions 无 reopen / provider 未知）：blocked + 提示。 */
+  | { readonly kind: "reopen-unavailable"; readonly blockedHint: "reopen-unavailable" }
+  /** 非选中工作区且无 run：保持原行为（提交 scope 属于选中任务，不能借道建 run）。 */
+  | { readonly kind: "out-of-scope-blocked" };
+
+export interface CloudComposerSendFacts {
+  readonly task: {
+    readonly status: string;
+    readonly revision: number;
+    readonly draftStartConfig?: { readonly provider?: string | undefined } | undefined;
+  } | null;
+  readonly activeRun?:
+    | { readonly runGeneration: number; readonly provider?: string | undefined }
+    | undefined;
+  readonly latestCheckpoint?: { readonly state: string } | undefined;
+  readonly actions?: readonly string[] | undefined;
+  /** 提交 scope（draft store / reopen hook）绑定选中任务；非选中工作区不自动重开。 */
+  readonly isSelectedTask: boolean;
+}
+
+/** composer 发送路由：hook 把每个分支翻译成一次 durable port 调用或本地 blocked。 */
+export function resolveCloudComposerSendPlan(facts: CloudComposerSendFacts): CloudComposerSendPlan {
+  const { task } = facts;
+  if (!task) {
+    return { kind: "missing-task", blockedHint: "no-task" };
+  }
+  if (task.status === "draft") {
+    if (!task.draftStartConfig) {
+      return { kind: "missing-start-config", blockedHint: "no-start-config" };
+    }
+    return { kind: "start", expectedTaskRevision: task.revision };
+  }
+  if (facts.activeRun) {
+    return { kind: "append", expectedRunGeneration: facts.activeRun.runGeneration };
+  }
+  if (!facts.isSelectedTask) {
+    return { kind: "out-of-scope-blocked" };
+  }
+  // 无有效 run（服务端详情投影只携带非终态 run）：actions 给出 `reopen` 才自动重开；
+  // provider 是重开请求的必填事实，run 已被收回时回落已保存的 draftStartConfig。
+  if (!(facts.actions ?? []).includes("reopen")) {
+    return { kind: "reopen-unavailable", blockedHint: "reopen-unavailable" };
+  }
+  const provider = task.draftStartConfig?.provider?.trim() || null;
+  if (provider === null) {
+    return { kind: "reopen-unavailable", blockedHint: "reopen-unavailable" };
+  }
+  return {
+    kind: "reopen",
+    provider,
+    resume: reopenResumeByFact(facts.latestCheckpoint),
+    expectedTaskRevision: task.revision,
+  };
+}
+
+/** 409 no-active-run 竞态重试的 reopen 参数：详情陈旧（仍显示活 run）时的持久事实。 */
+export interface CloudReopenRetryPlan {
+  readonly provider: string;
+  readonly resume: CloudComposerReopenResume;
+  readonly expectedTaskRevision: number;
+}
+
+/**
+ * 409 `not_ready/no-active-run` 竞态重试计划（04 §3.3 修订）：此刻 actions 里不会有
+ * `reopen`（详情仍显示活 run），不能走 `resolveCloudComposerSendPlan` 的 plan 门控；
+ * 直接用详情里的持久事实组装，revision CAS 交由服务端裁决（stale 就报错，不二次重试）。
+ * provider 无事实（run 无 provider 且未保存 draftStartConfig）时返回 null，回落归一错误。
+ */
+export function resolveCloudReopenRetryPlan(
+  detail: CloudTaskPanelDetail | null,
+): CloudReopenRetryPlan | null {
+  if (!detail) {
+    return null;
+  }
+  const provider =
+    detail.activeRun?.provider?.trim() || detail.task.draftStartConfig?.provider?.trim() || null;
+  if (provider === null) {
+    return null;
+  }
+  return {
+    provider,
+    resume: reopenResumeByFact(detail.latestCheckpoint),
+    expectedTaskRevision: detail.task.revision,
+  };
+}
+
+/** resume 按持久事实自动选择（08 §9 修订：显式声明，依据是确认 checkpoint）。 */
+function reopenResumeByFact(
+  latestCheckpoint: { readonly state: string } | undefined,
+): CloudComposerReopenResume {
+  return latestCheckpoint?.state === "saved"
+    ? { mode: "checkpoint" }
+    : { mode: "restart-from-base" };
+}
+
 /** 归档入口可用性：服务端 actions 投影说了算（04 §3.3，UI 不按状态猜）。 */
 export function isCloudTaskArchiveActionAvailable(
   detail: Pick<CloudTaskPanelDetail, "actions"> | null,
 ): boolean {
   return (detail?.actions ?? []).includes("archive");
+}
+
+/**
+ * 归档点击的准入裁决（2026-10-07 终验缺陷 E）。
+ *
+ * 背景：侧栏行不拉详情（autoLoad=false，避免整列 GET /tasks/:id），无缓存详情时
+ * 归档入口保持可点、由服务端裁决；但活动 run 未终态时服务端必然 409
+ * `not_ready/task-has-active-run`，旧文案还误导用户「稍后再试」。规则：
+ *
+ * - 有缓存详情 → 直接按投影裁决（不发请求）；
+ * - 无缓存详情 → 点击时拉一次详情，再按投影裁决（投影不含 archive = 存在活动
+ *   run，先停止再归档）；这是唯一能在不发整列请求的前提下对齐服务端裁决的时机；
+ * - 详情拉不到（网络/未接线）→ `unknown`：回落服务端裁决（旧行为），错误由
+ *   `describeCloudTaskActionError` 归一呈现，不用本地猜测替代服务端事实。
+ */
+export type CloudArchiveAdmission =
+  | { readonly kind: "allowed" }
+  | { readonly kind: "blocked-active-run" }
+  | { readonly kind: "unknown" };
+
+export async function resolveCloudTaskArchiveAdmission(params: {
+  /** 缓存详情（可为 null：该行从未打开过）。 */
+  readonly cachedDetail: Pick<CloudTaskPanelDetail, "actions"> | null;
+  /** 无缓存详情时按需拉取；拉不到返回 null（不得抛出）。 */
+  readonly loadDetail: () => Promise<Pick<CloudTaskPanelDetail, "actions"> | null>;
+}): Promise<CloudArchiveAdmission> {
+  const detail = params.cachedDetail ?? (await params.loadDetail());
+  if (detail === null) {
+    return { kind: "unknown" };
+  }
+  return isCloudTaskArchiveActionAvailable(detail)
+    ? { kind: "allowed" }
+    : { kind: "blocked-active-run" };
 }
 
 /**

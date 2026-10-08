@@ -18,6 +18,7 @@ import { cloudCoreLogger } from "../logger.js";
 import type { AttachmentRegistry } from "../attachments/registry.js";
 import type { InputDeliveryControl } from "../inputDelivery/deliveryControl.js";
 import type { CloudGitGrantService } from "../gitGrants.js";
+import { projectionCoveredInterval } from "../../domain/projectionSequence.js";
 
 /** 控制面侧实现 W0 的 attachment ingest 端口（投影批次 / run fault / runtime ACK）。 */
 export type ProjectionIngestService = AttachmentIngestPort;
@@ -59,9 +60,12 @@ export function createProjectionIngestService(
         });
       }
 
-      // 只有事务提交成功才有 ACK；此处 touch 业务活动（runtime/工具执行属业务活动，08 §7）。
-      const runIds = [...new Set(frame.records.map((record) => record.runId))];
-      for (const runId of runIds) {
+      // 修复依据（2026-10-09 终验缺陷 B，08 §7 业务活动事实源收窄）：此前对每个批次的
+      // 全部 runId 无条件 touch——执行节点 WAL 因源流缺口每 30s 重投同批记录（同键去重、
+      // appended=0），checkpoint 失败循环期间 lastBusinessActivityAt 被持续刷新，空闲
+      // pause 永不触发。业务活动 = 新的 runtime/工具执行事实（新增投影），WAL 重投/补发
+      // 是恢复面流量；因此只 touch 本批次实际新增记录所属的 run。
+      for (const runId of appended.appendedRunIds) {
         await storage.runs.touchBusinessActivity({ runId, at: clock.now() });
       }
 
@@ -148,21 +152,32 @@ export function createProjectionIngestService(
   };
 }
 
-/** 批次内最大 sourceSeq 超过「已连续持久水位」即存在缺口。 */
+/**
+ * 批次内出现「持久水位之前的断层」即存在缺口（02 §7.1 缺口不跳跃确认）。
+ *
+ * 修复依据（2026-10-07 复核缺陷 2）：导出记录的 sourceSeq 取交付帧 toSeq，区间覆盖
+ * 记在 payload 的 fromSeq/toSeq（snapshot 合并 0..N 时第一条记录 sourceSeq=N）——按
+ * 「sourceSeq 必须逐条 +1」判定会把 snapshot 领头的正常批次误报成缺口。连续性按
+ * domain/projectionSequence.ts 的区间链口径判定（与 ingest 水位同一算法定义）。
+ */
 function findGap(
   frame: ProjectionBatchFrame,
   cursors: readonly CloudStreamCursor[],
 ): ProjectionIngestResult["expectedSourceSeq"] {
-  const watermarks = new Map(
-    cursors.map((cursor) => [`${cursor.topic}\u0000${cursor.logEpoch}`, cursor]),
+  const watermarks = new Map<string, CloudStreamCursor>(
+    cursors.map((cursor) => [`${cursor.topic}\u0000${cursor.logEpoch}`, cursor] as const),
   );
+  // 同一流多条记录按到达序推进期望位（cursors 是本批次提交后的水位，作为各流起点）。
+  const advanced = new Map<string, number>();
   for (const record of frame.records) {
     const key = `${record.topic}\u0000${record.logEpoch}`;
-    const watermark = watermarks.get(key);
-    const expected = (watermark?.sourceSeq ?? -1) + 1;
-    if (record.sourceSeq > expected) {
+    const through = advanced.get(key) ?? watermarks.get(key)?.sourceSeq ?? -1;
+    const expected = through + 1;
+    const { from, to } = projectionCoveredInterval(record.payload, record.sourceSeq);
+    if (from > expected) {
       return { topic: record.topic, logEpoch: record.logEpoch, expectedSourceSeq: expected };
     }
+    advanced.set(key, Math.max(through, to));
   }
   return undefined;
 }

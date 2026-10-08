@@ -45,33 +45,91 @@ export function createStartupReconciler(
       };
       const runs = await storage.runs.listNonTerminal();
       for (const run of runs) {
-        summary.examined += 1;
-        // 重启后连接注册表为空：仍在途的投递结论不可知，先收口为 uncertain 再对账（02 §6.3）。
-        const inputs = await storage.inputs.listDeliverable(run.taskId);
-        for (const input of inputs) {
-          if (input.deliveryStatus !== "delivering") continue;
-          const marked = await storage.inputs.markDelivery({
-            taskId: run.taskId,
-            commandId: input.commandId,
-            to: "uncertain",
-            lastError: "control-plane-restart",
-            now,
-          });
-          if (marked) summary.inputsUncertain += 1;
-        }
+        // D4-9（审计 #5）：单 run 的恢复核验异常不得拖垮其后全部 run 的启动对账
+        // （此前按排序第一个毒 run 会让其余 run 停在未对账状态）。记 warn 后继续。
+        try {
+          summary.examined += 1;
+          // 重启后连接注册表为空：仍在途的投递结论不可知，先收口为 uncertain 再对账（02 §6.3）。
+          const inputs = await storage.inputs.listDeliverable(run.taskId);
+          for (const input of inputs) {
+            if (input.deliveryStatus !== "delivering") continue;
+            const marked = await storage.inputs.markDelivery({
+              taskId: run.taskId,
+              commandId: input.commandId,
+              to: "uncertain",
+              lastError: "control-plane-restart",
+              now,
+            });
+            if (marked) summary.inputsUncertain += 1;
+          }
 
-        const driver = run.provider ? await drivers.resolve(run.provider) : null;
-        if (!driver) {
-          summary.unknown += 1;
-          continue;
-        }
-        let handle: ProviderSandboxHandle | null = run.providerHandle
-          ? { provider: run.provider ?? "", sandboxId: run.providerHandle }
-          : null;
-        if (!handle) {
-          const reconciliation = await driver.findCreateResult(createOperationKey(run.runId));
-          if (reconciliation.status === "unknown") {
-            // 内存表清空不是 Run 消失；不建替代沙箱（01 §5.3）。
+          const driver = run.provider ? await drivers.resolve(run.provider) : null;
+          if (!driver) {
+            summary.unknown += 1;
+            continue;
+          }
+          let handle: ProviderSandboxHandle | null = run.providerHandle
+            ? { provider: run.provider ?? "", sandboxId: run.providerHandle }
+            : null;
+          if (!handle) {
+            // C-3（定稿附录 6）：对账必须带持久锚点——create op 的 createdAt 是跨重启
+            // 可用的 create 尝试时间；没有它，「查不到」无法安全判 notFound（01 §4.1）。
+            // op 缺失时不传锚点：findCreateResult 保守回 unknown（不猜「未创建」）。
+            const createOperation = await operations.findByKey(createOperationKey(run.runId));
+            // op 缺失时不传锚点：findCreateResult 保守回 unknown（不猜「未创建」）。
+            const anchor = createOperation
+              ? { operationAttemptedAtMs: createOperation.createdAt }
+              : undefined;
+            const reconciliation = await driver.findCreateResult(
+              createOperationKey(run.runId),
+              anchor,
+            );
+            if (reconciliation.status === "unknown") {
+              // 内存表清空不是 Run 消失；不建替代沙箱（01 §5.3）。
+              summary.unknown += 1;
+              await orchestrator.markDisconnected({
+                runId: run.runId,
+                runGeneration: run.runGeneration,
+                reason: "provider-unqueryable",
+              });
+              continue;
+            }
+            if (reconciliation.status === "notFound") {
+              await orchestrator.failProvisioning({
+                runId: run.runId,
+                runGeneration: run.runGeneration,
+                reason: "restart-create-not-found",
+                instanceDispositioned: true,
+                termination: "terminated",
+              });
+              summary.settled += 1;
+              continue;
+            }
+            handle = reconciliation.handle;
+            await storage.runs.recordProviderHandle({
+              runId: run.runId,
+              runGeneration: run.runGeneration,
+              provider: handle.provider,
+              providerHandle: handle.sandboxId,
+              providerDeadline: handle.providerDeadline,
+              deadlineEstimate: handle.deadlineEstimate,
+              now,
+            });
+          }
+
+          const observation = await driver.inspect(handle);
+          if (observation.status === "paused") {
+            // 暂停保留期（01 §4.1 修订 2026-10-09）：实例被 provider 保留，run 保持
+            // paused——不按 stopped/notFound 收口、不标 disconnected；恢复由控制面
+            // 自驱 resume（有 deliverable 输入时）或暂停预算终局负责。
+            summary.alive += 1;
+            cloudCoreLogger.info(undefined, "cloud run paused after restart", {
+              taskId: run.taskId,
+              runId: run.runId,
+            });
+            continue;
+          }
+          if (observation.status === "unknown") {
             summary.unknown += 1;
             await orchestrator.markDisconnected({
               runId: run.runId,
@@ -80,58 +138,31 @@ export function createStartupReconciler(
             });
             continue;
           }
-          if (reconciliation.status === "notFound") {
-            await orchestrator.failProvisioning({
+          if (observation.status === "stopped" || observation.status === "notFound") {
+            // provider 确认终止：写终态、释放配额，并记录保存风险不可知（01 §5.3）。
+            const settled = await orchestrator.settleTerminal({
               runId: run.runId,
               runGeneration: run.runGeneration,
-              reason: "restart-create-not-found",
-              instanceDispositioned: true,
+              to: run.status === "provisioning" ? "stopped" : "expired",
+              endReason: "restart-provider-terminated",
               termination: "terminated",
+              dataAtRisk: run.status !== "provisioning",
             });
-            summary.settled += 1;
+            if (settled.ok) summary.settled += 1;
             continue;
           }
-          handle = reconciliation.handle;
-          await storage.runs.recordProviderHandle({
+          // provider 存活：等待合法 bridge 恢复，不创建重复沙箱。
+          summary.alive += 1;
+          cloudCoreLogger.info(undefined, "cloud run alive after restart", {
+            taskId: run.taskId,
             runId: run.runId,
-            runGeneration: run.runGeneration,
-            provider: handle.provider,
-            providerHandle: handle.sandboxId,
-            providerDeadline: handle.providerDeadline,
-            deadlineEstimate: handle.deadlineEstimate,
-            now,
+          });
+        } catch (error) {
+          cloudCoreLogger.warn(undefined, "cloud startup reconciliation run failed", {
+            runId: run.runId,
+            message: error instanceof Error ? error.message : String(error),
           });
         }
-
-        const observation = await driver.inspect(handle);
-        if (observation.status === "unknown") {
-          summary.unknown += 1;
-          await orchestrator.markDisconnected({
-            runId: run.runId,
-            runGeneration: run.runGeneration,
-            reason: "provider-unqueryable",
-          });
-          continue;
-        }
-        if (observation.status === "stopped" || observation.status === "notFound") {
-          // provider 确认终止：写终态、释放配额，并记录保存风险不可知（01 §5.3）。
-          const settled = await orchestrator.settleTerminal({
-            runId: run.runId,
-            runGeneration: run.runGeneration,
-            to: run.status === "provisioning" ? "stopped" : "expired",
-            endReason: "restart-provider-terminated",
-            termination: "terminated",
-            dataAtRisk: run.status !== "provisioning",
-          });
-          if (settled.ok) summary.settled += 1;
-          continue;
-        }
-        // provider 存活：等待合法 bridge 恢复，不创建重复沙箱。
-        summary.alive += 1;
-        cloudCoreLogger.info(undefined, "cloud run alive after restart", {
-          taskId: run.taskId,
-          runId: run.runId,
-        });
       }
 
       const unsettled = await operations.listUnsettled();

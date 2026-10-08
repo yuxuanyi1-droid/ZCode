@@ -124,6 +124,38 @@ export const inputRepoHandlers = {
       .all(params.taskId)
       .map(mapInputRow),
 
+  /**
+   * 终态扫尾（08 §8.1「生命周期对确定未执行输入收口，unknown 保留对账」、审计 D4-3）：
+   * run 收口为终态后，`accepted` 是「确定未执行」（投递被 ready 门控/停止屏障/终态挡住），
+   * 收口为 cancelled（reason=run-ended 落 last_error）；`delivering/uncertain` 结果不明
+   * ——delivering 统一收口为 uncertain（与启动对账同口径），uncertain 保持不动，
+   * 不伪称 cancelled。范围限定本 run（target_run_id 绑定）或未绑定行，新一代 run 的
+   * 输入不受影响。幂等：重复调用只补齐尚未收口的行。
+   */
+  "inputs.settleForEndedRun": (context, params): { cancelled: number; unknown: number } => {
+    return withWriteTransaction(context, () => {
+      const runScope = "(target_run_id IS NULL OR target_run_id = ?)";
+      const cancelled = context.db
+        .prepare(
+          `UPDATE task_inputs SET delivery_status = 'cancelled', last_error = 'run-ended', updated_at = ?
+           WHERE task_id = ? AND delivery_status = 'accepted' AND ${runScope}`,
+        )
+        .run(params.now, params.taskId, params.runId);
+      // delivering → uncertain 是状态机内的合法推进（domain/deliveryStatus.ts）；
+      // ACK 已随运行终止不可得，与启动对账「delivering 收口为 uncertain」同口径。
+      const delivered = context.db
+        .prepare(
+          `UPDATE task_inputs SET delivery_status = 'uncertain', last_error = 'run-ended', updated_at = ?
+           WHERE task_id = ? AND delivery_status = 'delivering' AND ${runScope}`,
+        )
+        .run(params.now, params.taskId, params.runId);
+      return {
+        cancelled: Number(cancelled.changes),
+        unknown: Number(delivered.changes),
+      };
+    });
+  },
+
   /** 投递只读持久正文（02 §6.1）：正文不进 receipt 投影，也不进日志。 */
   "payloads.readInputPayload": (
     context,
@@ -144,6 +176,7 @@ export const inputRepoHandlers = {
   | "inputs.list"
   | "inputs.markDelivery"
   | "inputs.cancelPending"
+  | "inputs.settleForEndedRun"
   | "inputs.listDeliverable"
   | "payloads.readInputPayload"
 >;

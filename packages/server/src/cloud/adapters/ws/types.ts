@@ -63,6 +63,13 @@ export interface LiveConnection {
    * 关闭也不触发 registry/run 状态副作用。
    */
   authenticated: boolean;
+  /**
+   * D4-2 中间步：bridge.heartbeat 的连续 `processAlive=false` 计数（连接级、可重建的
+   * 事实，不是元数据事实源）。达到 RUNTIME_EXIT_DEAD_STREAK_LIMIT 即确认 runtime 退出。
+   */
+  runtimeDeadStreak?: number;
+  /** 连接生命周期内确认过 runtime 退出：关闭时按 runtime-exit 语义标注 run。 */
+  runtimeExitConfirmed?: boolean;
 }
 
 export interface CloudBridgeChannel {
@@ -73,6 +80,11 @@ export interface CloudBridgeChannel {
    * 无当前连接/代际不符返回 null，调用方按 4503 结构化关闭（03 §7.1、CP-11）。
    */
   openBrowserRpcStream(input: OpenBrowserRpcStreamInput): BrowserRpcStream | null;
+  /**
+   * 该 run 是否有打开的浏览器观看流（08 §7 空闲 pause 的连接事实源；注入 app 的
+   * `BrowserWatchPort` 由本方法承载）。关闭即清，不持久。
+   */
+  hasOpenBrowserStreams(runId: string): boolean;
   /** `/ws/cloud/bridge/:runId` 建连后调用（await 完成 run 绑定后再收帧）。 */
   acceptConnection(input: { runId: string; socket: BridgeSocket }): Promise<void>;
   /** 关闭所有连接（进程关停）。 */

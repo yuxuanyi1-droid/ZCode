@@ -174,6 +174,13 @@ export const sandboxProviderCapabilitiesSchema = z
     canInspect: z.boolean(),
     canExtendDeadline: z.boolean(),
     canConfirmTermination: z.boolean(),
+    /**
+     * 分级暂停/恢复能力（01 §4.1/§4.2 修订 2026-10-09，additive）：memory=保留进程态
+     * 的暂停/恢复（如 E2B）；disk=仅保留文件系统、进程态丢失的冷恢复（如 Daytona）；
+     * none=不支持。**实测解禁门禁（A-7）**：真实账号实测通过前一律上报 "none"
+     * （fail-closed：代码与契约在、路径不可达），UI 不为未声明的能力保留 paused 投影。
+     */
+    pauseResume: z.enum(["memory", "disk", "none"]),
     maxLifetimeSeconds: z.number().int().positive().optional(),
     deadlineSource: z.enum(["provider", "estimated"]),
     supportsOutboundWss: z.boolean(),

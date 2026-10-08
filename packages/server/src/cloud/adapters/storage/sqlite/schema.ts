@@ -25,7 +25,7 @@
 import type { ExternalOperationKind } from "../../../app/ports/operationOutboxPort.js";
 import type { GitHubEffectKind } from "../../../app/ports/gitHubEffectPort.js";
 import { coreTables } from "./tables/core.js";
-import { runTables } from "./tables/runs.js";
+import { runTables, runPausedRebuildTables } from "./tables/runs.js";
 import { inputTables } from "./tables/inputs.js";
 import { operationTables } from "./tables/operations.js";
 import { projectionTables } from "./tables/projections.js";
@@ -39,6 +39,14 @@ export interface CloudMigration {
   readonly id: string;
   /** 已应用的 id 只能追加：这里的语句一旦发布就是冻结常量。 */
   readonly statements: readonly string[];
+  /**
+   * 表重建迁移的事务外前置语句（如 `PRAGMA foreign_keys = OFF`）。该 pragma 在事务内
+   * 是 no-op，必须由专用执行器在 BEGIN 前执行；非空时该迁移走 migrations.ts 的
+   * rebuild 通道，普通迁移不声明此字段、路径不变。
+   */
+  readonly preStatements?: readonly string[];
+  /** rebuild 通道的收尾语句（恢复 `foreign_keys=ON`）：事务结束后无论成败都执行。 */
+  readonly postStatements?: readonly string[];
 }
 
 export { ACTIVE_RUN_STATUSES } from "./tables/constants.js";
@@ -66,6 +74,16 @@ export const CLOUD_MIGRATIONS: readonly CloudMigration[] = [
     statements: splitStatements(interactionTables),
   },
   { id: "0006_attachment_objects", statements: splitStatements(attachmentTables) },
+  {
+    id: "0007_run_status_paused",
+    statements: splitStatements(runPausedRebuildTables),
+    // 表重建迁移（runs 被 run_credentials/projections 等表 REFERENCES）：FK 开启时
+    // DROP TABLE 对子表残留行即失败（2026-10-09 生产事故）。按 SQLite 官方表重建
+    // recipe，由 migrations.ts 的 rebuild 通道在事务外关 FK、提交前 foreign_key_check
+    // 必须为空、结束后恢复 FK=ON。不进 checksum（statements 未变，已应用库校验不受影响）。
+    preStatements: ["PRAGMA foreign_keys = OFF"],
+    postStatements: ["PRAGMA foreign_keys = ON"],
+  },
 ];
 
 /**
@@ -78,7 +96,7 @@ export const RETIRED_MIGRATIONS: readonly { id: string; reason: string }[] = [
 ];
 
 /** schema 版本：当前链的最大编号（降级启动检查用，10 §7）。 */
-export const CLOUD_SCHEMA_VERSION = 6;
+export const CLOUD_SCHEMA_VERSION = 7;
 
 export const OPERATION_KIND_VALUES: readonly ExternalOperationKind[] = [
   "create",

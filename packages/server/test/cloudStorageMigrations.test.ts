@@ -3,7 +3,8 @@
  *
  * 断言：全新库一次性迁移 与 「旧库账本 + 当前二进制补齐」得到同一 schema 与同一账本；
  * 已应用迁移被改写（checksum 不匹配）或账本出现更高版本编号时启动失败；退役的 0004
- * 只留墓碑、不复用编号。
+ * 只留墓碑、不复用编号；表重建迁移（0007）必须在**带子行数据**的增量库上成功
+ * （2026-10-09 生产事故回归：FK 开启时 DROP TABLE runs 被子表行卡死，空库用例测不出）。
  */
 import assert from "node:assert/strict";
 import path from "node:path";
@@ -88,7 +89,10 @@ test("fresh-DB 迁移与增量迁移得到同一 schema 与账本", async () => 
       applyPrefix(incremental, "0005_task_input_interaction_decisions");
       const factsBefore = readCloudMigrationFacts(incremental);
       assert.equal(factsBefore.schemaVersion, 5);
-      assert.deepEqual(factsBefore.pendingMigrationIds, ["0006_attachment_objects"]);
+      assert.deepEqual(factsBefore.pendingMigrationIds, [
+        "0006_attachment_objects",
+        "0007_run_status_paused",
+      ]);
       runCloudMigrations(incremental, { now: MIGRATION_NOW });
     } finally {
       closeStorageDatabase(incremental);
@@ -107,7 +111,7 @@ test("fresh-DB 迁移与增量迁移得到同一 schema 与账本", async () => 
       assert.equal(schemaDump(reopenedIncremental), schemaDump(reopenedFresh));
       assert.equal(appliedLedger(reopenedIncremental), appliedLedger(reopenedFresh));
       const facts = readCloudMigrationFacts(reopenedFresh);
-      assert.equal(facts.schemaVersion, 6);
+      assert.equal(facts.schemaVersion, 7);
       assert.deepEqual(facts.pendingMigrationIds, []);
     } finally {
       closeStorageDatabase(reopenedIncremental);
@@ -134,6 +138,7 @@ test("全新库账本包含退役 0004 墓碑且重复迁移幂等", async () =>
     }
     assert.match(ledgerAfterFirst, /0004_external_operations_ssh_attach retired 1/);
     assert.match(ledgerAfterFirst, /0006_attachment_objects/);
+    assert.match(ledgerAfterFirst, /0007_run_status_paused/);
     assert.ok(!ledgerAfterFirst.includes("0004_external_operations_ssh_attach retired 0"));
   } finally {
     await handle.close();
@@ -203,7 +208,11 @@ test("迁移未就绪时启动门拒绝服务", async () => {
     } finally {
       closeStorageDatabase(context);
     }
-    assert.deepEqual(pending, ["0005_task_input_interaction_decisions", "0006_attachment_objects"]);
+    assert.deepEqual(pending, [
+      "0005_task_input_interaction_decisions",
+      "0006_attachment_objects",
+      "0007_run_status_paused",
+    ]);
     const report = {
       db: {
         lastAppliedMigrationId: "0003_git_grants",
@@ -231,6 +240,110 @@ test("迁移未就绪时启动门拒绝服务", async () => {
         error.code === "not_ready" &&
         error.message.includes("0006_attachment_objects"),
     );
+  } finally {
+    await handle.close();
+    await removeTestRoot(handle.root);
+  }
+});
+
+/**
+ * 在 v6 前缀库上裸 SQL 造「有数据的真实库」形态：runs + 子表各一行
+ * （2026-10-09 生产事故形态——0007 曾只在空库上测过，DROP TABLE runs 在 FK 开启时
+ * 被子行卡死，启动即失败）。列集按 0001/0002/0005 的 NOT NULL 与 CHECK 约束取最小集。
+ */
+function seedRunChildRows(context: StorageContext): void {
+  const now = MIGRATION_NOW;
+  context.db
+    .prepare("INSERT INTO principals (principal_id, created_at, updated_at) VALUES (?, ?, ?)")
+    .run("principal-rebuild", now, now);
+  context.db
+    .prepare(
+      "INSERT INTO projects (project_id, owner_principal_id, kind, repository_id, installation_id, repo_owner, repo_name, default_branch, revision, created_at, updated_at) VALUES (?, ?, 'github-repo', 42, 7, 'zcode', 'cloud-fixture', 'main', 0, ?, ?)",
+    )
+    .run("project-rebuild", "principal-rebuild", now, now);
+  context.db
+    .prepare(
+      "INSERT INTO tasks (task_id, owner_principal_id, project_id, title, status, creation_key, workspace_identity, next_run_generation, revision, created_at, updated_at) VALUES (?, ?, ?, 'rebuild fixture', 'active', 'ck-rebuild', 'cloud-task:rebuild', 2, 0, ?, ?)",
+    )
+    .run("task-rebuild", "principal-rebuild", "project-rebuild", now, now);
+  context.db
+    .prepare(
+      "INSERT INTO runs (run_id, task_id, run_generation, execution_kind, provider, status, connection_epoch, created_at, updated_at) VALUES ('run-rebuild-1', 'task-rebuild', 1, 'sandbox', 'e2b', 'ready', 1, ?, ?)",
+    )
+    .run(now, now);
+  context.db
+    .prepare(
+      "INSERT INTO run_credentials (run_id, run_generation, credential_hash, expires_at, created_at, updated_at) VALUES ('run-rebuild-1', 1, 'hash-rebuild', ?, ?, ?)",
+    )
+    .run(now + 60_000, now, now);
+  context.db
+    .prepare(
+      "INSERT INTO projection_events (schema_version, task_id, run_id, run_generation, runtime_incarnation, topic, log_epoch, source_seq, kind, payload_json, content_hash, ingested_at) VALUES (1, 'task-rebuild', 'run-rebuild-1', 1, 'inc-rebuild', 'lifecycle', 'epoch-rebuild', 0, 'lifecycle', '{}', 'hash', ?)",
+    )
+    .run(now);
+}
+
+test("0007 表重建在有子行数据的增量库上成功且 FK 恢复（2026-10-09 生产事故回归）", async () => {
+  const handle = await openTestStorage();
+  try {
+    const databasePath = path.join(handle.dataDir, "rebuild-with-children.db");
+    const context = openStorageDatabase({ path: databasePath });
+    try {
+      applyPrefix(context, "0006_attachment_objects");
+      seedRunChildRows(context);
+
+      runCloudMigrations(context, { now: MIGRATION_NOW });
+
+      // 账本推进到 0007，三张带子行的表行数无损。
+      assert.equal(readCloudMigrationFacts(context).schemaVersion, 7);
+      for (const table of ["runs", "run_credentials", "projection_events"]) {
+        assert.equal(
+          context.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n,
+          1,
+          `${table} 行数在重建后必须无损`,
+        );
+      }
+      // node:sqlite 行对象是 null-prototype，先展开成普通对象再比较。
+      const run = context.db
+        .prepare(
+          "SELECT status, provider, connection_epoch FROM runs WHERE run_id = 'run-rebuild-1'",
+        )
+        .get();
+      assert.deepEqual({ ...run }, { status: "ready", provider: "e2b", connection_epoch: 1 });
+      // FK 关闭只允许发生在 0007 的事务窗口内：迁移后 foreign_key_check 必须为空，
+      // 且 foreign_keys 已恢复 ON（违规写入重新被拒绝，不得泄漏到普通写路径）。
+      assert.equal(context.db.prepare("PRAGMA foreign_key_check").all().length, 0);
+      assert.equal(Number(context.db.prepare("PRAGMA foreign_keys").get()?.foreign_keys), 1);
+      assert.throws(() => {
+        context.db
+          .prepare(
+            "INSERT INTO run_credentials (run_id, run_generation, credential_hash, expires_at, created_at, updated_at) VALUES ('missing-run', 1, 'hash', 1, 1, 1)",
+          )
+          .run();
+      }, /FOREIGN KEY constraint failed/);
+
+      // 重建的 CHECK 与部分索引含 paused：paused 可落库（第二个 task），并占
+      // 「唯一有效写 run」名额——同 task 再插活动 run 仍被 runs_single_active_writer 拒绝。
+      context.db
+        .prepare(
+          "INSERT INTO tasks (task_id, owner_principal_id, project_id, title, status, creation_key, workspace_identity, next_run_generation, revision, created_at, updated_at) VALUES ('task-rebuild-2', 'principal-rebuild', 'project-rebuild', 'rebuild fixture 2', 'active', 'ck-rebuild-2', 'cloud-task:rebuild-2', 1, 0, ?, ?)",
+        )
+        .run(MIGRATION_NOW + 1, MIGRATION_NOW + 1);
+      context.db
+        .prepare(
+          "INSERT INTO runs (run_id, task_id, run_generation, execution_kind, provider, status, connection_epoch, created_at, updated_at) VALUES ('run-rebuild-paused', 'task-rebuild-2', 1, 'sandbox', 'e2b', 'paused', 1, ?, ?)",
+        )
+        .run(MIGRATION_NOW + 1, MIGRATION_NOW + 1);
+      assert.throws(() => {
+        context.db
+          .prepare(
+            "INSERT INTO runs (run_id, task_id, run_generation, execution_kind, provider, status, connection_epoch, created_at, updated_at) VALUES ('run-rebuild-second', 'task-rebuild-2', 2, 'sandbox', 'e2b', 'ready', 1, ?, ?)",
+          )
+          .run(MIGRATION_NOW + 2, MIGRATION_NOW + 2);
+      }, /UNIQUE constraint failed/);
+    } finally {
+      closeStorageDatabase(context);
+    }
   } finally {
     await handle.close();
     await removeTestRoot(handle.root);

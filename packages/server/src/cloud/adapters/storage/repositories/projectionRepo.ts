@@ -15,6 +15,10 @@ import { decodeCursor, encodeCursor, normalizeLimit } from "../sqlite/cursor.js"
 import { mapCheckpointRow, mapProjectionRow, readText } from "../sqlite/rowMapping.js";
 import type { SqlRow } from "../sqlite/rowMapping.js";
 import type { ProjectionAppendResult } from "../../../app/ports/storagePort.js";
+import {
+  advanceContiguousWatermark,
+  projectionCoveredInterval,
+} from "../../../domain/projectionSequence.js";
 import { CloudStorageError } from "../cloudStorageError.js";
 import type { StorageHandlerTable } from "../storageMethodTypes.js";
 
@@ -25,28 +29,41 @@ function streamKey(runId: string, topic: string, logEpoch: string): string {
 }
 
 /**
- * 连续水位：从 0 起逐条前进，遇到缺口即停。只有连续前缀才算「已 durable ingest」，
- * 缺口不跳跃确认（02 §7.1）——否则 control plane 会丢弃中间事件。
+ * 连续水位：按**交付区间链**推进（02 §7.1「连续持久水位」）。
+ *
+ * 修复依据（2026-10-07 复核缺陷 2）：导出记录的 sourceSeq 取交付帧 toSeq——首帧
+ * snapshot 合并 0..N 时第一条记录的 sourceSeq 就是 N。旧的「从 0 起数字前缀」算法把
+ * 这种流的水位算成 -1，回出的 `projection.ack.lastContiguousSourceSeq: -1` 违反
+ * shared schema 非负约束，执行节点按 invalid-frame 整连接作废（4001，每 run 首次
+ * WAL 排空固定触发）。区间语义见 domain/projectionSequence.ts。
  */
 function contiguousSeq(
   context: StorageContext,
   runId: string,
   topic: string,
   logEpoch: string,
+  persistedThrough: number,
 ): number {
   const rows = context.db
     .prepare(
-      `SELECT source_seq FROM projection_events
+      `SELECT source_seq, payload_json FROM projection_events
        WHERE run_id = ? AND topic = ? AND log_epoch = ? ORDER BY source_seq`,
     )
     .all(runId, topic, logEpoch);
-  let watermark = -1;
-  for (const row of rows) {
+  const intervals = rows.map((row) => {
     const seq = Number(row["source_seq"]);
-    if (seq === watermark + 1) watermark = seq;
-    else if (seq > watermark + 1) break;
+    return projectionCoveredInterval(parsePayloadJson(row["payload_json"]), seq);
+  });
+  return advanceContiguousWatermark(intervals, persistedThrough);
+}
+
+function parsePayloadJson(raw: unknown): unknown {
+  if (typeof raw !== "string") return raw;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return undefined;
   }
-  return watermark;
 }
 
 function readCursor(
@@ -77,6 +94,7 @@ export const projectionRepoHandlers = {
       const conflicts: { topic: string; logEpoch: string; sourceSeq: number }[] = [];
       let appended = 0;
       const touched = new Map<string, { runId: string; topic: string; logEpoch: string }>();
+      const appendedRunIds = new Set<string>();
       const runTaskIds = new Map<string, string>();
 
       for (const record of records) {
@@ -133,6 +151,7 @@ export const projectionRepoHandlers = {
             ingestedAt,
           );
         appended += 1;
+        appendedRunIds.add(record.runId);
         touched.set(streamKey(record.runId, record.topic, record.logEpoch), {
           runId: record.runId,
           topic: record.topic,
@@ -142,8 +161,14 @@ export const projectionRepoHandlers = {
 
       const cursors: CloudStreamCursor[] = [];
       for (const stream of touched.values()) {
-        const watermark = contiguousSeq(context, stream.runId, stream.topic, stream.logEpoch);
         const stored = readCursor(context, stream.runId, stream.topic, stream.logEpoch);
+        const watermark = contiguousSeq(
+          context,
+          stream.runId,
+          stream.topic,
+          stream.logEpoch,
+          stored,
+        );
         const next = Math.max(watermark, stored);
         if (next > stored) {
           context.db
@@ -156,17 +181,38 @@ export const projectionRepoHandlers = {
             )
             .run(stream.runId, stream.topic, stream.logEpoch, next, ingestedAt);
         }
-        cursors.push({ topic: stream.topic, logEpoch: stream.logEpoch, sourceSeq: next });
+        // 修复依据（2026-10-07 复核缺陷 2）：链头缺失（真缺口）时 next=-1，回 ack 会
+        // 违反 shared schema 的非负水位并在执行节点侧作废整条连接——此时**不回 ack**，
+        // 让执行节点重投缺口之前的记录（WAL 未清，下一拍自然补齐链头）。
+        if (next >= 0) {
+          cursors.push({ topic: stream.topic, logEpoch: stream.logEpoch, sourceSeq: next });
+        }
       }
-      return { cursors, conflicts, appended };
+      return { cursors, conflicts, appended, appendedRunIds: [...appendedRunIds] };
     });
   },
 
   /** 只读控制面副本分页；cursor 低于保留下限或超出已存范围时要求 resync（03 §9）。 */
   "projections.readHistory": (context, params) => {
     const limit = normalizeLimit(params.limit, PAGE_LIMIT_MAX);
-    const filter = params.topic === undefined ? "task_id = ?" : "task_id = ? AND topic = ?";
-    const filterArgs = params.topic === undefined ? [params.taskId] : [params.taskId, params.topic];
+    // 族名匹配（2026-10-09 终验缺陷 D 修订）：导出记录的 topic 是 `conversation/<sessionId>`
+    // （projectionExporter 按 sessions-index 发现的具体话题），而 history 端点的缺省 topic
+    // 是族名 `conversation`（CANONICAL_TOPIC，02 §7.4「v1 canonical 流」）。精确等值过滤
+    // 会把跨 run 的全部会话记录滤成空页，归档/重开视图因此拿不到任何历史。
+    // 族名（不含 "/"）按前缀匹配该族全部话题；完整话题仍精确匹配。
+    // `instr(topic, ? || '/') = 1` 是前缀判定，不引入 LIKE 通配符转义问题。
+    const filter =
+      params.topic === undefined
+        ? "task_id = ?"
+        : params.topic.includes("/")
+          ? "task_id = ? AND topic = ?"
+          : "task_id = ? AND (topic = ? OR instr(topic, ? || '/') = 1)";
+    const filterArgs: (string | number)[] =
+      params.topic === undefined
+        ? [params.taskId]
+        : params.topic.includes("/")
+          ? [params.taskId, params.topic]
+          : [params.taskId, params.topic, params.topic];
     const after = params.cursor ? decodeCursor(params.cursor)[0] : 0;
     const afterSeq = typeof after === "number" ? after : 0;
     const rows = context.db
@@ -187,7 +233,10 @@ export const projectionRepoHandlers = {
     const gapBelow = params.cursor !== undefined && afterSeq > 0 && low > afterSeq + 1;
     const aheadOfData = params.cursor !== undefined && high < afterSeq;
     const items = rows.slice(0, limit).map(mapProjectionRow);
-    const last = rows.length > limit ? rows[limit - 1] : undefined;
+    // 复核缺陷 4：nextCursor 的语义是「下一页必有数据」（hasMore=true 当且仅当本次
+    // 探测到了 limit+1 行）。空页（游标越界/越过保留范围）绝不携带 cursor，否则客户端
+    // 会拿一个永远取不到数据的 hasMore 反复空翻页。
+    const last = rows.length > limit && items.length > 0 ? rows[limit - 1] : undefined;
     return {
       items,
       ...(last ? { nextCursor: encodeCursor([Number(last["event_seq"])]) } : {}),

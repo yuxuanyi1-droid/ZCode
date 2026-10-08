@@ -7,6 +7,9 @@
  * - 账本里出现本二进制不认识的 id ⇒ 更高版本写过的库，阻止降级启动（10 §7）。
  * - `0004` 永久退役：只写墓碑，不执行 DDL，不做 checksum 校验，保证全新库与旧库
  *   增量的账本 id 集合一致（W2 §8）。
+ * - 表重建迁移（`preStatements`/`postStatements` 非空）走 rebuild 专用通道：事务外
+ *   关 FK、提交前 `foreign_key_check` 必须为空、结束后恢复 FK=ON，见 `applyMigration`
+ *   与 CONTRACT.md「表重建迁移专用通道」。
  * - 迁移失败不开始 provider 操作（03 §8）：错误向上抛出，调用方 fail closed。
  */
 import { createHash } from "node:crypto";
@@ -116,22 +119,82 @@ export function runCloudMigrations(
 
   for (const entry of timeline) {
     if (applied.has(entry.id)) continue;
-    withWriteTransaction(context, () => {
-      if (entry.migration) {
-        for (const statement of entry.migration.statements) context.db.exec(statement);
+    if (entry.migration === null) {
+      withWriteTransaction(context, () => {
         insertLedgerRow(context, {
           id: entry.id,
-          checksum: migrationChecksum(entry.migration),
-          retired: 0,
+          checksum: "retired",
+          retired: 1,
           now: options.now,
         });
-        return;
-      }
-      insertLedgerRow(context, { id: entry.id, checksum: "retired", retired: 1, now: options.now });
-    });
+      });
+      continue;
+    }
+    applyMigration(context, entry.migration, options.now);
   }
 
   return readCloudMigrationFacts(context);
+}
+
+/**
+ * 应用单个真实迁移。
+ *
+ * - 普通迁移（无事务外钩子）：保持历史路径——单事务内「语句 + 账本」原子提交。
+ * - 表重建迁移（`preStatements`/`postStatements` 非空，如 0007 重建被
+ *   `run_credentials`/`projection_*` 等表 REFERENCES 的 `runs`）：走 SQLite 官方表
+ *   重建 recipe（lang_altertable）。FK 开启时 `DROP TABLE` 对子表残留行立即失败
+ *   （2026-10-09 生产事故），而 `PRAGMA foreign_keys` 在事务内是 no-op，只能先在
+ *   事务外关闭。事件顺序（所有者：迁移执行器，同步单连接）：
+ *
+ *   事务外 preStatements（FK=OFF）
+ *     → BEGIN IMMEDIATE
+ *     → 重建语句（create-new/copy/drop/rename/索引）
+ *     → PRAGMA foreign_key_check：非空 ⇒ 抛错回滚（FK 关闭期间无即时约束检查，
+ *       这是唯一的完整性闸门；该 pragma 在 FK OFF 时仍扫描全部外键）
+ *     → 账本入账（与 DDL 同事务，applied 原子）
+ *     → COMMIT
+ *   finally postStatements（FK=ON）：失败路径也必须恢复，不得把 FK 关闭泄漏给
+ *   后续普通写事务。
+ */
+function applyMigration(context: StorageContext, migration: CloudMigration, now: number): void {
+  const rebuild =
+    (migration.preStatements?.length ?? 0) > 0 || (migration.postStatements?.length ?? 0) > 0;
+  if (!rebuild) {
+    withWriteTransaction(context, () => {
+      for (const statement of migration.statements) context.db.exec(statement);
+      insertLedgerRow(context, {
+        id: migration.id,
+        checksum: migrationChecksum(migration),
+        retired: 0,
+        now,
+      });
+    });
+    return;
+  }
+  for (const statement of migration.preStatements ?? []) context.db.exec(statement);
+  try {
+    withWriteTransaction(context, () => {
+      for (const statement of migration.statements) context.db.exec(statement);
+      const violations = context.db.prepare("PRAGMA foreign_key_check").all();
+      if (violations.length > 0) {
+        throw new CloudStorageError({
+          code: "recovery_required",
+          // 复用既有 reason：checksum/降级单独成 reason 是调用方需要分支区分，
+          // FK 违规与普通迁移失败同样只需 fail closed，细节在 message 里。
+          reason: "migration-failed",
+          message: `迁移 ${migration.id} 重建表后 foreign_key_check 发现 ${violations.length} 行违规`,
+        });
+      }
+      insertLedgerRow(context, {
+        id: migration.id,
+        checksum: migrationChecksum(migration),
+        retired: 0,
+        now,
+      });
+    });
+  } finally {
+    for (const statement of migration.postStatements ?? []) context.db.exec(statement);
+  }
 }
 
 function managedChecksumMismatch(

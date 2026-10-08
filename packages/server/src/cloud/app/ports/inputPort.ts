@@ -28,6 +28,22 @@ export interface InputRepo {
     commandId: string;
     now: number;
   }): Promise<CloudTaskInputRecord | null>;
+  /**
+   * 终态扫尾（08 §8.1「生命周期对确定未执行输入收口，unknown 保留对账」、审计 D4-3）：
+   * run 收口为终态时对该 run 残留的 deliverable 输入做确定性收口——
+   * - `accepted`（确定未投递：ready 门控/停止屏障/终态都挡住投递）→ `cancelled`
+   *   （lastError=run-ended）；
+   * - `delivering`（已发送但 ACK 随运行终止不可得，结果不明）→ `uncertain`
+   *   （与启动对账「delivering 收口为 uncertain」同口径），**不**伪称 cancelled；
+   * - 已是 `uncertain` 的行保持不动（结果不明的诚实事实由 receipt 呈现「运行已结束」）。
+   * 只作用于绑定本 run（或未绑定）的输入，不触碰绑定到新一代 run 的输入。
+   * 幂等：可重复调用（覆盖终态转换与收口之间崩溃的窗口）。
+   */
+  settleForEndedRun(request: {
+    taskId: string;
+    runId: string;
+    now: number;
+  }): Promise<{ cancelled: number; unknown: number }>;
   /** 投递顺序：Task 内 acceptanceSeq 递增（03 §6.2），不是 runtime admission 顺序。 */
   listDeliverable(taskId: string): Promise<CloudTaskInputRecord[]>;
 }

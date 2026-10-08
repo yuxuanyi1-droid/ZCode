@@ -17,6 +17,12 @@ import { cloudGitObjectIdSchema, type CloudDeadlineConfidence } from "@zcode/sha
 export const SAVE_POLICY_DEFAULTS = {
   /** 闲置归档阈值：execution idle、无 pending input/interaction、无 checkpoint、无业务写入。 */
   idleArchiveThresholdMs: 15 * 60 * 1000,
+  /**
+   * 空闲 pause 阈值（08 §7 修订 2026-10-09）：分级能力（pauseResume≠none）provider
+   * 闲置且无客户端连接持续达到该阈值 → pause（单轨替换 idle drain，F-3）；0 = 禁用。
+   * 部署键 `ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS`（秒）可覆盖，缺省 600（10 分钟）。
+   */
+  idlePauseMs: 10 * 60 * 1000,
   /** 被动观看续期默认关：attach、heartbeat、侧栏轮询本身不算业务活动。 */
   passiveViewRenewalEnabled: false,
   /** 硬 run 时长候选：取部署预算与 provider 上限较小值。 */
@@ -333,4 +339,19 @@ export function drainRetryAllowed(input: {
   if (input.retries >= max) return false;
   if (!input.deadline) return true;
   return input.now < input.deadline.at;
+}
+
+/**
+ * 僵尸 checkpoint 治理的领取上限（C-4，定稿附录 6）：结果一直未到的 pending op 按
+ * 领取次数封顶——每次租约到期重领都会 attempt+1，达到上限后结算 failed 并告警，
+ * 不再无限重租占住 FIFO 头部。上限与保存失败重试（08 §8.1 的 3 次）同数量级。
+ * 2026-10-09 起退避阶梯/在途窗口/失败连击拆至 `domain/checkpointPolicy.ts`（单一职责）。
+ */
+export const CHECKPOINT_PENDING_MAX_ATTEMPTS = 3 as const;
+
+export function checkpointPendingExhausted(input: {
+  attempt: number;
+  maxAttempts?: number;
+}): boolean {
+  return input.attempt >= (input.maxAttempts ?? CHECKPOINT_PENDING_MAX_ATTEMPTS);
 }

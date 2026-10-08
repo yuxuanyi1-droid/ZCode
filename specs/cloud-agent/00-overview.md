@@ -104,7 +104,7 @@ sequenceDiagram
 远端写入携带 `taskId/runId/runGeneration/connectionEpoch`：identity 隔离任务，runGeneration 隔离执行代际，connectionEpoch 防旧连接复活。
 
 - Task：`draft/active/completed/failed/archived`。
-- Run：`provisioning/ready/disconnected/draining/stopped/expired/failed`。
+- Run：`provisioning/ready/paused/disconnected/draining/stopped/expired/failed`（paused 为 2026-10-09 生命周期 v2 增补，仅分级能力 provider 出现；状态全集以 08 §3.2 为准）。
 - Execution：`unknown/idle/running/awaiting-input`，来自 runtime；产物保存和 PR 另有状态。
 
 断网只进入 disconnected。新 run 必须在 provider 终止证据与旧写权限处置完成后获得写入权，不能心跳超时即“过期重开”。

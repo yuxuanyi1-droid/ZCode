@@ -15,6 +15,7 @@ import type { CloudAdapterLogger } from "../src/cloud/adapters/sandbox/adapterEr
 import { CloudAdapterError } from "../src/cloud/adapters/sandbox/adapterError.js";
 import {
   listSelectableProviders,
+  resolvePauseResumeCapability,
   resolveProviderGate,
   SANDBOX_PROVIDER_GATES,
 } from "../src/cloud/adapters/sandbox/capabilities.js";
@@ -764,7 +765,9 @@ test("daytona: 状态映射区分运行/停止/destroyed/未映射", async () =>
 
   for (const [state, expected] of [
     ["started", "running"],
-    ["paused", "stopped"],
+    // 2026-10-09 生命周期 v2：paused 是独立观测态（暂停保留期实例被 provider 保留，
+    // 不得按 stopped 收口——keepalive liveness 据此区分「保留中」与「已终止」）。
+    ["paused", "paused"],
     ["destroying", "stopped"],
     ["destroyed", "notFound"],
     ["error", "unknown"],
@@ -1110,6 +1113,9 @@ test("driver 绑定表：配置齐全各产出一条，缺秘密不产出，门�
     canInspect: true,
     canExtendDeadline: true,
     canConfirmTermination: true,
+    // A-7 实测解禁门禁：声明随 SANDBOX_PAUSE_RESUME_GATES 常量收敛（不硬编码分级；
+    // 未实测时为 none，已实测后为声明分级）。
+    pauseResume: resolvePauseResumeCapability("e2b"),
     deadlineSource: "provider",
     supportsOutboundWss: true,
     maxLifetimeSeconds: 3600,

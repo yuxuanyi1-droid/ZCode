@@ -5,6 +5,10 @@
  * 失败呈现，用户只觉得「没反应」。该横幅放在工作区主区（header 之下、聊天区之上），
  * 只按**详情投影**呈现：
  * - `waiting-for-run` / `provisioning`：进行中提示（04 §3.2.4「202 后等待环境」）；
+ * - `reopenable`（2026-10-08 终态 run 发送行为修订）：终态 run 已被服务端收回、
+ *   详情投影不再携带 run 事实（服务端只投影非终态 run），以 actions 投影的
+ *   `reopen` 能力呈现「上一次运行已结束」+ 重开入口，优先于 waiting——
+ *   后者只属于 202 成功后 run 尚未出现的事务窗口；
  * - `draining`（2026-10-08 巡检修订 P1）：stop 端点受理后的受控停止窗口，呈现
  *   「正在停止」而不是永远 Working；提供 force-stop 入口（丢失确认对话框，
  *   `lossAcknowledgement:true + expectedRevision + operationId`，08 §8.2）；
@@ -18,7 +22,7 @@
  *   restart-from-base）并向用户说明依据（08 §9：分支两侧必须显式声明）。
  */
 import { useCallback, useMemo, useState } from "react";
-import { AlertTriangle, Loader2, OctagonX, RotateCcw } from "lucide-react";
+import { AlertTriangle, Loader2, OctagonX, PauseCircle, RotateCcw } from "lucide-react";
 import type { TaskDetailResponse } from "@zcode/shared";
 import { cn } from "@/components/lib/utils.js";
 import { Button } from "@/components/ui/button.js";
@@ -176,6 +180,31 @@ export function CloudTaskRunStatusBanner({
     );
   }
 
+  if (view.kind === "paused") {
+    // 暂停保留中（2026-10-09 生命周期 v2，04 §3.3 修订行）：运行环境被 provider 暂停
+    // 保留（同 run 同 generation），composer 保持可用——用户发送消息即触发控制面自驱
+    // resume（03 §6 修订语义）。这不是终态也不呈现重开入口；不渲染为错误。
+    return (
+      <div
+        role="status"
+        data-testid="cloud-task-run-status"
+        data-run-state="paused"
+        className={cn(
+          "flex w-full shrink-0 items-center gap-2 border-b border-border bg-surface px-4 py-2 text-ui-base text-foreground",
+          className,
+        )}
+      >
+        <PauseCircle aria-hidden="true" className="size-4 shrink-0 text-foreground-subtle" />
+        <span className="min-w-0 truncate font-medium">
+          {intl.formatMessage({ id: "cloud.run.statusPaused" })}
+        </span>
+        <span className="min-w-0 truncate text-foreground-subtle">
+          {intl.formatMessage({ id: "cloud.run.statusPausedHint" })}
+        </span>
+      </div>
+    );
+  }
+
   if (view.kind === "draining") {
     // 受控停止窗口（2026-10-08 巡检修订 P1）：stop 已受理，run 正在保存/收尾。
     // 呈现「正在停止」而不是让 composer 永远显示 Working；force-stop 是显式
@@ -276,23 +305,30 @@ export function CloudTaskRunStatusBanner({
     );
   }
 
-  // view.kind === "ended"（failed/stopped/expired）：呈现原因 + 重开入口。
-  const endedTitleId =
-    view.runStatus === "failed"
+  // view.kind === "ended"（failed/stopped/expired）或 "reopenable"（2026-10-08 终态
+  // run 发送行为修订：终态 run 已被服务端收回、详情投影不再携带 run 事实，以 actions
+  // 投影的 reopen 能力呈现「上一次运行已结束」+ 重开入口——优先于 waiting，不让
+  // 假「等待」横幅永久挂起）。ended 携带 lastError/endReason；reopenable 无 run 事实，
+  // 呈现「发送新消息会自动重开继续」的提示（自动重开语义见 useCloudComposerSubmit）。
+  const isReopenable = view.kind === "reopenable";
+  const endedTitleId = isReopenable
+    ? "cloud.run.statusReopenable"
+    : view.runStatus === "failed"
       ? "cloud.run.statusFailedTitle"
       : view.runStatus === "stopped"
         ? "cloud.run.statusStoppedTitle"
         : "cloud.run.statusExpiredTitle";
-  const reason = view.lastError ?? view.endReason;
+  const reason = view.kind === "ended" ? (view.lastError ?? view.endReason) : null;
+  const isFailed = view.kind === "ended" && view.runStatus === "failed";
 
   return (
     <div
       role="status"
       data-testid="cloud-task-run-status"
-      data-run-state={view.runStatus}
+      data-run-state={isReopenable ? "reopenable" : view.runStatus}
       className={cn(
         "flex w-full shrink-0 flex-col gap-2 border-b px-4 py-2 text-ui-base",
-        view.runStatus === "failed"
+        isFailed
           ? "border-destructive/30 bg-destructive/5 text-foreground"
           : "border-border bg-surface text-foreground",
         className,
@@ -303,13 +339,13 @@ export function CloudTaskRunStatusBanner({
           aria-hidden="true"
           className={cn(
             "size-4 shrink-0",
-            view.runStatus === "failed" ? "text-destructive" : "text-foreground-subtle",
+            isFailed ? "text-destructive" : "text-foreground-subtle",
           )}
         />
         <span
           className={cn(
             "min-w-0 flex-1 font-medium",
-            view.runStatus === "failed" ? "text-destructive" : "text-foreground",
+            isFailed ? "text-destructive" : "text-foreground",
           )}
         >
           {intl.formatMessage({ id: endedTitleId })}
@@ -336,6 +372,14 @@ export function CloudTaskRunStatusBanner({
           className="min-w-0 break-words [overflow-wrap:anywhere] text-ui-base text-foreground-subtle"
         >
           {reason}
+        </p>
+      ) : null}
+      {isReopenable ? (
+        <p
+          data-testid="cloud-task-run-reopenable-hint"
+          className="min-w-0 break-words [overflow-wrap:anywhere] text-ui-base text-foreground-subtle"
+        >
+          {intl.formatMessage({ id: "cloud.run.reopenableHint" })}
         </p>
       ) : null}
       {canReopen && reopenFormOpen ? (

@@ -10,9 +10,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  cloudInputRejectionMessageKey,
   cloudTaskErrorCodeMessageKey,
+  describeCloudComposerRejection,
+  describeCloudInputRejection,
   describeCloudTaskActionError,
 } from "../src/cloud/cloudTaskErrorText.js";
+import { readCloudErrorReason } from "../src/cloud/cloudApiErrorLike.js";
 
 function structuredError(code: string): unknown {
   return { code, retryable: false, source: "server" };
@@ -52,8 +56,8 @@ test("describeCloudTaskActionError translates mapped codes and keeps raw codes o
 // `cloud.tasks.archiveFailed` + describeCloudTaskActionError 这条接线（04 §6）。
 // 这里锁定「结构化拒绝 → 可读 reason → toast 文案非空且不含原始码」的完整链路。
 test("draining archive rejection composes a readable archiveFailed toast reason", () => {
-  // 形状对齐 SDK CloudApiError.fromEnvelope（服务端 taskLifecycle.ts 的
-  // fail("validation_failed", "task-has-active-run") 信封）。
+  // 形状对齐 SDK CloudApiError.fromEnvelope（2026-10-09 生命周期 v2 后 taskLifecycle.ts
+  // 对活动 run 的归档返回 fail("not_ready", "task-has-active-run") 信封）。
   const drainingRejection = Object.assign(new Error("task has an active run"), {
     code: "validation_failed",
     retryable: false,
@@ -70,6 +74,38 @@ test("draining archive rejection composes a readable archiveFailed toast reason"
   assert.ok(toastMessage.trim().length > "归档任务失败：".length);
 });
 
+// 2026-10-07 终验缺陷 E：活动 run 未终态时归档被拒（409 not_ready/task-has-active-run），
+// 旧文案是通用「运行环境尚未就绪，稍后再试」——与真实条件（需先停止）不符且误导重试。
+// 修订：任务动作的 not_ready 与输入同表按 details.reason 细分，
+// task-has-active-run → 「存在进行中的运行，先停止任务后再归档」。
+test("archive not_ready rejection with an active run guides to stop first", () => {
+  const translate = (id: string) => `#${id}`;
+  const activeRunRejection = Object.assign(new Error("task-has-active-run"), {
+    code: "not_ready",
+    retryable: false,
+    source: "server",
+    httpStatus: 409,
+    details: { reason: "task-has-active-run" },
+  });
+  assert.equal(
+    describeCloudTaskActionError(activeRunRejection, translate),
+    "#cloud.errors.not_ready.task_has_active_run",
+  );
+  // complete/stop 等动作的未知 reason 维持通用 not_ready 文案，不猜语义。
+  const unmappedReason = Object.assign(new Error("completion-drain-in-progress"), {
+    code: "not_ready",
+    retryable: false,
+    details: { reason: "completion-drain-in-progress" },
+  });
+  assert.equal(describeCloudTaskActionError(unmappedReason, translate), "#cloud.errors.not_ready");
+  // 缺失 reason 同样回落通用文案（与修订前任务动作行为一致）。
+  const reasonless = Object.assign(new Error("not ready"), {
+    code: "not_ready",
+    retryable: false,
+  });
+  assert.equal(describeCloudTaskActionError(reasonless, translate), "#cloud.errors.not_ready");
+});
+
 test("unmapped draining rejections still surface the raw code instead of an empty toast", () => {
   const unknownRejection = Object.assign(new Error("weird state"), {
     code: "not_a_known_code",
@@ -79,4 +115,102 @@ test("unmapped draining rejections still surface the raw code instead of an empt
   const reason = describeCloudTaskActionError(unknownRejection, (id) => `#${id}`);
   assert.equal(reason, "weird state");
   assert.ok(reason.trim().length > 0);
+});
+
+// ── 输入提交失败的 reason 细分（2026-10-08 终态 run 发送行为修订）──
+//
+// 实测缺陷：run 终态（沙箱已回收）后 composer 发消息，服务端正确返回 409
+// `not_ready/no-active-run`，但 UI 只显示原始码「not_ready」。修订语义：
+// not_ready 按 `details.reason`（服务端稳定标签，respondFailure 放进信封 details）
+// 细分文案；未知/缺失 reason 回落通用 not_ready 文案，不猜语义（09 §8）。
+
+test("not_ready rejections are subdivided by the server reason label", () => {
+  assert.equal(
+    cloudInputRejectionMessageKey("not_ready", "no-active-run"),
+    "cloud.errors.not_ready.no_active_run",
+  );
+  assert.equal(
+    cloudInputRejectionMessageKey("not_ready", "stop-requested"),
+    "cloud.errors.not_ready.stop_requested",
+  );
+  assert.equal(
+    cloudInputRejectionMessageKey("not_ready", "run-not-ready"),
+    "cloud.errors.not_ready.run_not_ready",
+  );
+  // 未知 reason 与缺失 reason 都回落通用文案，不猜语义。
+  assert.equal(
+    cloudInputRejectionMessageKey("not_ready", "some-future-reason"),
+    "cloud.errors.not_ready",
+  );
+  assert.equal(cloudInputRejectionMessageKey("not_ready", null), "cloud.errors.not_ready");
+});
+
+test("non-not_ready input rejections reuse the shared action error table", () => {
+  assert.equal(
+    cloudInputRejectionMessageKey("quota_exceeded", null),
+    "cloud.errors.quota_exceeded",
+  );
+  assert.equal(
+    cloudInputRejectionMessageKey("stale", "run-generation-mismatch"),
+    "cloud.errors.stale",
+  );
+  assert.equal(cloudInputRejectionMessageKey("checkpoint_failed", null), null);
+});
+
+test("readCloudErrorReason extracts details.reason and rejects malformed shapes", () => {
+  assert.equal(readCloudErrorReason({ details: { reason: "no-active-run" } }), "no-active-run");
+  assert.equal(readCloudErrorReason({ details: { reason: "  " } }), null);
+  assert.equal(readCloudErrorReason({ details: { other: 1 } }), null);
+  assert.equal(readCloudErrorReason({ details: "not-an-object" }), null);
+  assert.equal(readCloudErrorReason({}), null);
+  assert.equal(readCloudErrorReason("boom"), null);
+  assert.equal(readCloudErrorReason(null), null);
+});
+
+test("describeCloudInputRejection maps the 409 no-active-run envelope to readable text", () => {
+  // 形状对齐 SDK CloudApiError.fromEnvelope：服务端 precheckAppend 的
+  // fail("not_ready", "no-active-run") 信封（message 与 details.reason 同为 reason）。
+  const rejection = Object.assign(new Error("no-active-run"), {
+    code: "not_ready",
+    retryable: false,
+    details: { reason: "no-active-run" },
+  });
+  assert.equal(
+    describeCloudInputRejection(rejection, (id) => `#${id}`),
+    "#cloud.errors.not_ready.no_active_run",
+  );
+  // reason 未知：回落通用 not_ready 文案而不是原始码。
+  const otherReason = Object.assign(new Error("whatever"), {
+    code: "not_ready",
+    retryable: false,
+    details: { reason: "unmapped" },
+  });
+  assert.equal(
+    describeCloudInputRejection(otherReason, (id) => `#${id}`),
+    "#cloud.errors.not_ready",
+  );
+});
+
+test("describeCloudComposerRejection prefers the key table and falls back to the raw detail", () => {
+  const translate = (id: string) => `#${id}`;
+  assert.equal(
+    describeCloudComposerRejection(
+      { code: "not_ready", reason: "no-active-run", detail: "not_ready" },
+      translate,
+    ),
+    "#cloud.errors.not_ready.no_active_run",
+  );
+  // 未映射码：回落原始 detail（错误码本身），不造文案。
+  assert.equal(
+    describeCloudComposerRejection(
+      { code: "checkpoint_failed", reason: null, detail: "checkpoint_failed" },
+      translate,
+    ),
+    "checkpoint_failed",
+  );
+  // 无结构化信息（本地前置失败）：返回 null，由调用方决定提示。
+  assert.equal(
+    describeCloudComposerRejection({ code: null, reason: null, detail: null }, translate),
+    null,
+  );
 });

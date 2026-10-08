@@ -33,6 +33,7 @@ import { CloudAdapterError, type CloudAdapterLogger } from "./adapterError.js";
 import {
   describeCapabilities,
   MODAL_GATED_CAPABILITIES,
+  unsupportedPauseResume,
   MODAL_SDK_CHANNEL_CAPABILITIES,
   resolveEffectiveMaxLifetimeSeconds,
   type SandboxLifetimeOptions,
@@ -387,6 +388,9 @@ export function createModalSandboxDriver(options: ModalDriverOptions): SandboxDr
       });
       return { status: "unknown", errorCode: "provider_termination_unknown" };
     },
+
+    // Modal 不支持 pause/resume（01 §4.2 修订：目标值 none，终态走 reopen）。
+    ...unsupportedPauseResume("modal"),
   };
 }
 

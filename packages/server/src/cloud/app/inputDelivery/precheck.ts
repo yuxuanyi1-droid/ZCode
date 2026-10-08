@@ -218,8 +218,10 @@ export function createInputPrechecks(deps: CloudCoreDeps): InputPrechecks {
     if (run.stopRequested) {
       return fail("not_ready", "stop-requested");
     }
-    if (run.status !== "ready") {
+    if (run.status !== "ready" && run.status !== "paused") {
       // 11 §7：provisioning/disconnected 首版不接受新的 append，只保留客户端下一条草稿。
+      // paused 例外（03 §6 修订 2026-10-09）：append 按同一 202 持久接收语义接受，
+      // 由控制面循环自驱 resume（同 run 同 generation，不换代、不重开）后按既有通路投递。
       return fail("not_ready", "run-not-ready", { status: run.status });
     }
     // append 不改写 Run 启动 recipe（03 §6.1 尾段），也不创建 create 操作（W1 CR-2）：

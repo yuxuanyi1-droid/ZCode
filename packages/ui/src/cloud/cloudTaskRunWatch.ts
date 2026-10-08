@@ -9,8 +9,10 @@
  * - 只做**有界轮询**：2s 间隔、60s 上限，超时即停（不得用无限轮询掩盖同步缺失）；
  * - run 尚未出现在投影里（draft → start 事务窗口）→ 继续；
  * - run 处于 `provisioning` → 继续（面板需要展示进行中，直到 ready/终态）；
- * - run 进入 `ready` 或终态（failed/stopped/expired/draining/disconnected）→ 停：
- *   ready 由 attachment 生命周期接管，终态由任务面板呈现；
+ * - run 进入 `ready`、`paused` 或终态（failed/stopped/expired/draining/disconnected）→ 停：
+ *   ready 由 attachment 生命周期接管，终态由任务面板呈现；`paused` 不是终态（2026-10-09
+ *   生命周期 v2）：它是稳定的暂停保留态，由状态横幅呈现「发送消息即可恢复」，恢复由
+ *   服务端控制面自驱推进，轮询到此为止（不把 paused 当终态，也不为它空转轮询）。
  * - 单次刷新失败不中断轮询（网络抖动等下一轮），上限兜底。
  *
  * 状态所有者不变：轮询只调用 `refresh()`（即控制器的 quiet reload），把最新
@@ -25,13 +27,24 @@ export const CLOUD_TASK_RUN_WATCH_TIMEOUT_MS = 60_000;
 /** 测试与调用方共用的最小详情形状（不依赖完整 schema）。 */
 export interface CloudTaskRunWatchDetail {
   readonly activeRun?: { readonly status: string } | undefined;
+  /** 服务端 actions 投影（2026-10-08 终态 run 发送行为修订）：含 `reopen` 即停止。 */
+  readonly actions?: readonly string[] | undefined;
 }
 
 /**
  * 下一轮是否继续：run 不可见或 provisioning 时继续；ready/终态即停。
  * 终态判定交给 `cloudRunStatusSchema` 的取值集合，这里不引入第二套状态机。
+ *
+ * 2026-10-08 终态 run 发送行为修订：服务端详情投影只携带非终态 run，run 从
+ * provisioning → 终态的迁移在投影里表现为 `activeRun` 消失；此时服务端 actions
+ * 会给出 `reopen`（无有效写 run 的裁决事实）。把它的出现追加为停止条件——
+ * 否则该迁移会被误判成「run 尚未出现」而轮询到 60s 超时。
  */
 export function shouldContinueCloudTaskRunWatch(detail: CloudTaskRunWatchDetail | null): boolean {
+  if (detail?.actions?.includes("reopen")) {
+    // 无有效 run 且可重开：没有可等的 run 了。
+    return false;
+  }
   const status = detail?.activeRun?.status;
   if (!status) {
     // run 还没出现在投影里：首发 202 后的事务窗口，继续等。

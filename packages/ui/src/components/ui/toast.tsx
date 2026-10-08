@@ -46,15 +46,19 @@ export function upsertToastItem(items: readonly ToastItem[], item: ToastItem): T
 
 export function resolveToastStackClassName(position: ToastPosition): string {
   const bottomInset = "bottom-[calc(1rem+env(safe-area-inset-bottom))]";
+  // 容器是纯布局层（2026-10-07 终验缺陷 G）：fixed + z-[9999] 的栈在有 toast 期间
+  // 覆盖在窗格顶部横幅（重连条/任务状态横幅）上方，不加 pointer-events-none 时
+  // 整个矩形拦截点击，「View technical details / Reconnect」等按钮需要 force click。
+  // 容器一律放行点击；可交互的 toast 卡片自身用 pointer-events-auto 恢复。
   switch (position) {
     case "top-center":
-      return "fixed top-16 left-1/2 z-[9999] flex -translate-x-1/2 flex-col items-center gap-2";
+      return "pointer-events-none fixed top-16 left-1/2 z-[9999] flex -translate-x-1/2 flex-col items-center gap-2";
     case "top-right":
-      return "fixed right-4 top-16 z-[9999] flex max-w-[calc(100vw-2rem)] flex-col items-end gap-2";
+      return "pointer-events-none fixed right-4 top-16 z-[9999] flex max-w-[calc(100vw-2rem)] flex-col items-end gap-2";
     case "bottom-center":
-      return `fixed ${bottomInset} left-1/2 z-[9999] flex -translate-x-1/2 flex-col items-center gap-2`;
+      return `pointer-events-none fixed ${bottomInset} left-1/2 z-[9999] flex -translate-x-1/2 flex-col items-center gap-2`;
     case "bottom-left":
-      return `fixed ${bottomInset} left-4 z-[9999] flex flex-col items-start gap-2`;
+      return `pointer-events-none fixed ${bottomInset} left-4 z-[9999] flex flex-col items-start gap-2`;
   }
 }
 
@@ -311,7 +315,9 @@ export function ToastMessageView({
   return (
     <div
       className={cn(
-        "rounded-2xl border bg-toast/60 text-ui-base shadow-lg backdrop-blur-xl transition-[transform,opacity] duration-200 ease-[cubic-bezier(0.77,0,0.175,1)] motion-reduce:transform-none motion-reduce:transition-opacity",
+        // 栈容器整体 pointer-events-none（缺陷 G：不遮挡下方横幅按钮），
+        // 卡片自身恢复可交互——action/关闭按钮与 hover 仍可用。
+        "pointer-events-auto rounded-2xl border bg-toast/60 text-ui-base shadow-lg backdrop-blur-xl transition-[transform,opacity] duration-200 ease-[cubic-bezier(0.77,0,0.175,1)] motion-reduce:transform-none motion-reduce:transition-opacity",
         isUpdate
           ? "origin-bottom-left w-[min(300px,calc(100vw-1rem))] max-w-[min(300px,calc(100vw-1rem))] border-popover-border text-foreground shadow-lg"
           : isNotice

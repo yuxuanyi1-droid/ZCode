@@ -71,7 +71,11 @@ function isRuntimeRecycleError(error: unknown): boolean {
     message.includes("ZCode agent transport closed") ||
     message.includes("ZCode Protocol client disposed") ||
     message.includes("ZCode Protocol client is disposed") ||
-    message.includes("ZCode Agent runtime is not running")
+    message.includes("ZCode Agent runtime is not running") ||
+    // 云 attachment 断连窗口（2026-10-09 终验缺陷 C）：attach 通道的重连由 SDK 负责，
+    // 这里的有界退避重订在通道恢复后立即成功；「通道暂不可用」是瞬态而非终态，
+    // 停在 connecting（重连提示条）比定格成 error 更符合事实。
+    message.includes("cloud attachment is not connected")
   );
 }
 

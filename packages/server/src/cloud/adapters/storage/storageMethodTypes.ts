@@ -92,6 +92,7 @@ export interface StorageMethodTable {
   "tasks.recordCheckpointSha": MethodSignature<TaskRepo["recordCheckpointSha"]>;
   "tasks.recordArtifact": { params: { artifact: CloudTaskArtifactRecord }; result: void };
   "tasks.setCompleteRequested": MethodSignature<TaskRepo["setCompleteRequested"]>;
+  "tasks.listCompleteRequested": { params: undefined; result: CloudTaskRecord[] };
 
   // ── runs（08 §3.2/§4.2/§7）──
   "runs.get": { params: { runId: string }; result: CloudRunReturn["get"] };
@@ -120,6 +121,7 @@ export interface StorageMethodTable {
   };
   "inputs.markDelivery": MethodSignature<InputRepo["markDelivery"]>;
   "inputs.cancelPending": MethodSignature<InputRepo["cancelPending"]>;
+  "inputs.settleForEndedRun": MethodSignature<InputRepo["settleForEndedRun"]>;
   "inputs.listDeliverable": { params: { taskId: string }; result: CloudTaskInputRecord[] };
 
   // ── projections（02 §7、03 §4）──
@@ -134,7 +136,7 @@ export interface StorageMethodTable {
   "projections.listCheckpoints": { params: { taskId: string }; result: CloudCheckpointRecord[] };
   "projections.recordCheckpoint": { params: { checkpoint: CloudCheckpointRecord }; result: void };
 
-  // ── bridge 凭据（02 §5.1/§5.2）──
+  // ── bridge 凭据（02 §5.1/§5.2；extendForRun 为 B-6 续展，2026-10-09 生命周期 v2）──
   "credentials.saveInitial": MethodSignature<RunCredentialRepo["saveInitial"]>;
   "credentials.consumeForHello": MethodSignature<RunCredentialRepo["consumeForHello"]>;
   "credentials.recoverByAttempt": MethodSignature<RunCredentialRepo["recoverByAttempt"]>;
@@ -142,6 +144,7 @@ export interface StorageMethodTable {
   "credentials.verifyActiveCredential": MethodSignature<
     RunCredentialRepo["verifyActiveCredential"]
   >;
+  "credentials.extendForRun": MethodSignature<RunCredentialRepo["extendForRun"]>;
 
   // ── 正文读取与接纳事务（03 §6.1）──
   "payloads.readInputPayload": {
@@ -162,6 +165,7 @@ export interface StorageMethodTable {
     result: Awaited<ReturnType<OperationOutboxPort["get"]>>;
   };
   "operations.leaseNext": MethodSignature<OperationOutboxPort["leaseNext"]>;
+  "operations.renewLease": MethodSignature<OperationOutboxPort["renewLease"]>;
   "operations.settle": MethodSignature<OperationOutboxPort["settle"]>;
   "operations.listUnsettled": {
     params: undefined;

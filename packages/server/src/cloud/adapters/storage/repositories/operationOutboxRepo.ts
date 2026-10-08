@@ -83,22 +83,39 @@ export const operationOutboxHandlers = {
    * 租约领取：pending、或租约已到期的 leased。
    * `ambiguous`（结果未知待对账）同样在租约到期后可再次领取，否则对账入口不存在；
    * 领取递增 attempt，但 operationId 不变（03 §5「重试复用同一 id」）。
+   * 分相领取过滤（C-4）：`operationIds` 白名单 / `excludeOperationIds` 排除，参数化查询，
+   * 不加优先级列（定稿附录 6）。
    */
   "operations.leaseNext": (context, params) => {
     if (params.kinds.length === 0) return null;
     for (const kind of params.kinds) {
       if (!OPERATION_KIND_VALUES.includes(kind)) throw invalidOperation(`未知操作种类 ${kind}`);
     }
+    if (params.operationIds !== undefined && params.operationIds.length === 0) return null;
     const placeholders = params.kinds.map(() => "?").join(", ");
+    const leaseFilters: string[] = [];
+    const leaseFilterArgs: string[] = [];
+    if (params.operationIds !== undefined) {
+      leaseFilters.push(`AND operation_id IN (${params.operationIds.map(() => "?").join(", ")})`);
+      leaseFilterArgs.push(...params.operationIds);
+    }
+    if (params.excludeOperationIds !== undefined && params.excludeOperationIds.length > 0) {
+      leaseFilters.push(
+        `AND operation_id NOT IN (${params.excludeOperationIds.map(() => "?").join(", ")})`,
+      );
+      leaseFilterArgs.push(...params.excludeOperationIds);
+    }
+    const leasePredicate = leaseFilters.join(" ");
     return withWriteTransaction(context, () => {
       const candidate = context.db
         .prepare(
           `SELECT * FROM external_operations
            WHERE kind IN (${placeholders})
              AND (state = 'pending' OR (state IN ('leased','ambiguous') AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))
+             ${leasePredicate}
            ORDER BY created_at, operation_id LIMIT 1`,
         )
-        .get(...params.kinds, params.now);
+        .get(...params.kinds, params.now, ...leaseFilterArgs);
       if (!candidate) return null;
       const operationId = String(candidate["operation_id"]);
       const leaseToken = randomUUID();
@@ -109,9 +126,10 @@ export const operationOutboxHandlers = {
              state = 'leased', attempt = attempt + 1, lease_token = ?,
              lease_expires_at = ?, updated_at = ?
            WHERE operation_id = ?
-             AND (state = 'pending' OR (state IN ('leased','ambiguous') AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))`,
+             AND (state = 'pending' OR (state IN ('leased','ambiguous') AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?))
+             ${leasePredicate}`,
         )
-        .run(leaseToken, leaseExpiresAt, params.now, operationId, params.now);
+        .run(leaseToken, leaseExpiresAt, params.now, operationId, params.now, ...leaseFilterArgs);
       if (Number(changes.changes) === 0) return null;
       const row = selectByOperationId(context, operationId);
       if (!row) return null;
@@ -121,6 +139,26 @@ export const operationOutboxHandlers = {
         leaseExpiresAt,
       };
     });
+  },
+
+  /**
+   * 租约续期（C-3）：持有人 token CAS 续租——只有当前持有人能把租约往后延。
+   * 令牌不匹配（租约已被他人接管）或已结算（settled/failed/ambiguous）返回 false，
+   * 持有方据此停止续期与副作用（03 §5 迟到结果不得覆盖新 worker）。
+   */
+  "operations.renewLease": (context, params): boolean => {
+    const changes = context.db
+      .prepare(
+        `UPDATE external_operations SET lease_expires_at = ?, updated_at = ?
+         WHERE operation_id = ? AND lease_token = ? AND state = 'leased'`,
+      )
+      .run(
+        params.now + Math.max(1, params.leaseMs),
+        params.now,
+        params.operationId,
+        params.leaseToken,
+      );
+    return Number(changes.changes) > 0;
   },
 
   /** 结算 CAS：租约令牌不匹配（迟到结果）返回 false，只用于对账（03 §5）。 */
@@ -167,6 +205,7 @@ export const operationOutboxHandlers = {
   | "operations.findByKey"
   | "operations.get"
   | "operations.leaseNext"
+  | "operations.renewLease"
   | "operations.settle"
   | "operations.listUnsettled"
 >;

@@ -69,6 +69,8 @@ export interface CloudControlPlaneContext {
     readonly maxConcurrentRuns: number;
     readonly publicOrigin: string;
     readonly storageWorkerEntryPath?: string;
+    /** 空闲 pause 阈值（秒；缺省 600，0=禁用；ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS）。 */
+    readonly sandboxIdlePauseSeconds?: number;
   };
   readonly secrets: CloudDeploymentSecrets;
   readonly drivers: SandboxDriverRegistryPort;
@@ -148,6 +150,10 @@ export async function assembleCloudControlPlane(
   const config = resolveCloudCoreConfig({
     maxConcurrentRuns: context.config.maxConcurrentRuns,
     publicControlPlaneUrl: context.config.publicOrigin,
+    // 空闲 pause 阈值：部署键（秒）→ app 配置（ms）；0 透传 = 显式禁用（非负校验在解析层）。
+    ...(context.config.sandboxIdlePauseSeconds !== undefined
+      ? { idlePauseMs: context.config.sandboxIdlePauseSeconds * 1000 }
+      : {}),
     ...context.coreConfig,
   });
   const clock = { now: () => Date.now() };
@@ -204,6 +210,8 @@ export async function assembleCloudControlPlane(
         ? { sandboxRuntimeSettings: context.sandboxRuntimeSettings }
         : {}),
       attachments: bridge.port,
+      // 浏览器观看事实（08 §7，复核缺陷 1）：登记点=bridge 多路复用器（关即清），非 attachment 注册表。
+      browserWatch: { hasWatcher: (runId) => bridge.hasOpenBrowserStreams(runId) },
       runtimeCommands: bridge.runtimeCommands,
       clock,
       ids,

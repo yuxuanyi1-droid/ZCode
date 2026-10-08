@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { CHECKPOINT_PENDING_MAX_ATTEMPTS } from "../src/cloud/domain/savePolicy.js";
 import { attachReadySession, buildTestPlane } from "./cloudCoreFakes.js";
 
 const PRINCIPAL = "00000000-0000-4000-8000-0000000000aa";
@@ -286,6 +287,43 @@ test("CP-07/CP-10：旧代际 ready 被拒绝；有活动写 run 时拒绝自动
   assert.deepEqual(reopened.ok && reopened.value.resumeChoices, ["restart-from-base"]);
 });
 
+test("D4-12：旧实例终止未确认（槽位未释放）时拒绝自动重开，确认后放行（08 §9、01 §4.3）", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  assert.ok(task && run);
+  // 终止结果未知的收口：run 状态已终态，但 provider 处置未确认、计费槽仍保留
+  //（01 §4.3「终止结果未知的资源都占槽」，runOrchestrator 允许该状态存在）。
+  const settled = await context.plane.runs.settleTerminal({
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    to: "expired",
+    endReason: "provider-unknown",
+    termination: "notTerminated",
+  });
+  assert.ok(settled.ok);
+  assert.equal(context.storage.quotaReleases.includes(run.runId), false, "终止未确认不释放槽位");
+  const taskAfter = await context.storage.tasks.get(task.taskId);
+  assert.ok(taskAfter);
+  const blocked = await context.plane.commands.reopen.verifyReopenEligibility(taskAfter);
+  assert.equal(blocked.ok, false);
+  assert.ok(!blocked.ok && blocked.code === "recovery_required");
+  assert.ok(
+    !blocked.ok && blocked.reason === "previous-run-termination-unconfirmed",
+    "结构化 reason：旧实例处置未确认（防双沙箱计费槽）",
+  );
+
+  // liveness 对账确认终止并释放槽位后（keepalive sweep 的正常产出），重开放行。
+  await context.storage.runs.releaseQuota({
+    runId: run.runId,
+    reason: "provider-terminated",
+    now: context.clock.now(),
+  });
+  const taskConfirmed = await context.storage.tasks.get(task.taskId);
+  assert.ok(taskConfirmed);
+  const allowed = await context.plane.commands.reopen.verifyReopenEligibility(taskConfirmed);
+  assert.equal(allowed.ok, true);
+});
+
 test("stop 意图阻断 ready 发布与投递（08 §8.1、CT-15）", async () => {
   const context = buildTestPlane();
   const { task } = await seedDraftTask(context);
@@ -319,7 +357,12 @@ test("stop 意图阻断 ready 发布与投递（08 §8.1、CT-15）", async () =
     principalId: PRINCIPAL,
     taskId: task.taskId,
   });
-  assert.equal(detail.ok && detail.value.activeRun?.status, "stopped");
+  assert.equal(detail.ok, true);
+  assert.equal(
+    detail.ok ? detail.value.activeRun : null,
+    undefined,
+    "终态 run 不再是有效写 run：activeOfTask 只回非终态（08 §4.2，与真实 repo 同口径）",
+  );
 });
 
 test("心跳看门狗：超时只把 Run 推进到 disconnected（02 §8、08 §3.2）", async () => {
@@ -561,4 +604,239 @@ test("reactivate 需要 PR 状态投影：有 prRef 时明确 not_implemented（
     taskId: task.taskId,
   });
   assert.equal(activated.ok, false, "非 archived 不能 restore");
+});
+
+// ── 第 4 批（D4-4 剩余 + C-1/C-4）：stop op 链与 checkpoint 僵尸治理 ──
+
+test("C-1：已有停止屏障时 beginDrain 复用 run.stopOperationId，不新建 op 不改写指针", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  const first = await context.plane.commands.stop.stopTask({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+  });
+  assert.equal(first.ok, true);
+  const barrierId = (await context.storage.runs.get(run.runId))?.stopOperationId ?? "";
+  assert.ok(barrierId);
+  assert.equal(
+    [...context.outbox.records.values()].filter((op) => op.kind === "checkpoint").length,
+    1,
+    "第一次 stop 只入队一个 checkpoint op",
+  );
+
+  // 幂等重试 + drain sweep 重试：都不得新建第二个 checkpoint 意图。
+  const again = await context.plane.commands.stop.stopTask({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+  });
+  assert.equal(again.ok, true);
+  const checkpointOps = [...context.outbox.records.values()].filter(
+    (op) => op.kind === "checkpoint",
+  );
+  assert.equal(checkpointOps.length, 1, "重试不得新建第二个 checkpoint 意图（C-1）");
+  assert.equal(checkpointOps[0]?.operationId, barrierId);
+  assert.equal(
+    (await context.storage.runs.get(run.runId))?.stopOperationId,
+    barrierId,
+    "屏障指针不被改写",
+  );
+  // 重试仍会把保存通知按**同一 operationId** 重发到沙箱（重试成功的回写通道）。
+  assert.ok(context.attachmentPort.checkpoints.length >= 2);
+  assert.ok(
+    context.attachmentPort.checkpoints.every((id) => id === barrierId),
+    "重发必须携带同一 operationId",
+  );
+});
+
+test("D4-4：stop op 重试成功按最新状态收口，不再假 dataAtRisk", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  await context.plane.commands.stop.stopTask({ principalId: PRINCIPAL, taskId: task.taskId });
+  const operationId = (await context.storage.runs.get(run.runId))?.stopOperationId ?? "";
+
+  // 第一次保存失败：op 结算 failed，dataAtRisk 如实标注（08 §8.2）。
+  await context.plane.lifecycle.checkpoints.handleCheckpointResult({
+    taskId: task.taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    frame: {
+      protocolVersion: 1,
+      type: "checkpoint.result",
+      operationId,
+      status: "failed",
+      errorCode: "checkpoint_failed",
+      error: "git push rejected",
+    },
+  });
+  const settleFailed = await context.plane.lifecycle.checkpoints.sweepCheckpointOperations();
+  assert.equal(settleFailed.failed, 1);
+  assert.equal((await context.storage.runs.get(run.runId))?.dataAtRisk, true);
+
+  // 预算内重试：stop sweep 走 beginDrain（复用同一 op），沙箱重试成功回写同一 operationId。
+  const retrySweep = await context.plane.commands.stop.sweep();
+  assert.equal(retrySweep.waitingSave, 1, "failed 且预算未耗尽：走重试");
+  assert.ok(
+    context.attachmentPort.checkpoints.filter((id) => id === operationId).length >= 2,
+    "重试按同一 operationId 重发保存请求",
+  );
+  await context.plane.lifecycle.checkpoints.handleCheckpointResult({
+    taskId: task.taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    frame: {
+      protocolVersion: 1,
+      type: "checkpoint.result",
+      operationId,
+      status: "saved",
+      branch: "zcode/task-x",
+      remoteSha: "e".repeat(40),
+      hadNewCommits: true,
+    },
+  });
+
+  // 失败的 op 行不再被租约结算：stop sweep 按记录的最新事实（saved）放行收口。
+  const finalSweep = await context.plane.commands.stop.sweep();
+  assert.equal(finalSweep.advanced, 1);
+  const finished = await context.storage.runs.get(run.runId);
+  assert.equal(finished?.status, "stopped");
+  assert.equal(finished?.dataAtRisk, false, "重试成功不得假 dataAtRisk（读最新 op 状态，08 §8.2）");
+});
+
+test("force-stop 不入队保存前置：sweep 查不到 op 时跳过保存通路等待 terminate（C-1/D4-4）", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  const detail = await context.plane.taskDetail.getDetail({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+  });
+  assert.ok(detail.ok);
+  // 终止无法核验：run 停在 draining，stop sweep 才会走到「查 op」分支。
+  context.driver.terminateStatus = "unknown";
+  const stopped = await context.plane.commands.stop.forceStopTask({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+    operationId: "00000000-0000-4000-8000-0000000000fe",
+    expectedRevision: detail.ok ? detail.value.task.revision : 0,
+    lossAcknowledgement: true,
+  });
+  assert.equal(stopped.ok, true);
+  const draining = await context.storage.runs.get(run.runId);
+  assert.equal(draining?.status, "draining");
+  assert.equal(draining?.stopRequested, true);
+  assert.equal(
+    draining?.endReason,
+    "force-stop",
+    "前置：force-stop 的屏障指针是客户端 operationId（从未入队）",
+  );
+  assert.equal(
+    [...context.outbox.records.values()].some((op) => op.kind === "checkpoint"),
+    false,
+    "force-stop 跳过保存前置：没有 checkpoint op",
+  );
+
+  const report = await context.plane.commands.stop.sweep();
+  assert.equal(report.waitingSave, 1);
+  assert.equal(context.attachmentPort.checkpoints.length, 0, "不得对 force-stop 重启保存通路");
+  assert.equal(context.attachmentPort.drains.length, 0, "不得对 force-stop 重启保存通路");
+  assert.equal(
+    (await context.storage.runs.get(run.runId))?.status,
+    "draining",
+    "保持等待 terminate（compensation 循环按 op 收口）",
+  );
+});
+
+test("C-4：run 已终态后僵尸 checkpoint op 结算为 failed，不再无限 pending", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  await context.plane.commands.stop.stopTask({ principalId: PRINCIPAL, taskId: task.taskId });
+  const operationId = (await context.storage.runs.get(run.runId))?.stopOperationId ?? "";
+  // 保存结果永远不来（沙箱死了）：run 直接到达终态。
+  const terminal = await context.storage.runs.transitionStatus({
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    from: ["draining"],
+    to: "stopped",
+    endReason: "stop",
+    now: context.clock.now(),
+  });
+  assert.ok(terminal);
+
+  const report = await context.plane.lifecycle.checkpoints.sweepCheckpointOperations();
+  assert.equal(report.failed, 1, "run 终态 → op 结算 failed（reason=run-terminal）");
+  const operation = await context.outbox.get(operationId);
+  assert.equal(operation?.state, "failed");
+  assert.deepEqual(await context.outbox.listUnsettled(), [], "僵尸 op 不再留在 unsettled 集合");
+  // 幂等：再次 sweep 不重复处理已结算 op。
+  const again = await context.plane.lifecycle.checkpoints.sweepCheckpointOperations();
+  assert.equal(again.failed, 0);
+});
+
+test("C-4：结果长期未到的 pending op 按 attempt 上限结算 failed + 告警", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  await context.plane.commands.stop.stopTask({ principalId: PRINCIPAL, taskId: task.taskId });
+  const operationId = (await context.storage.runs.get(run.runId))?.stopOperationId ?? "";
+  // run 保持非终态（draining），但保存结果始终不来：按领取次数封顶。
+  for (let round = 1; round < CHECKPOINT_PENDING_MAX_ATTEMPTS; round += 1) {
+    const report = await context.plane.lifecycle.checkpoints.sweepCheckpointOperations();
+    assert.equal(report.settled + report.failed, 0, `第 ${round} 轮仍保留 pending`);
+    assert.equal((await context.outbox.get(operationId))?.attempt, round);
+    // 租约到期后才能重领。
+    context.clock.advance(30_000);
+  }
+  const exhausted = await context.plane.lifecycle.checkpoints.sweepCheckpointOperations();
+  assert.equal(exhausted.failed, 1, "attempt 达到上限后结算 failed");
+  const operation = await context.outbox.get(operationId);
+  assert.equal(operation?.state, "failed");
+});
+
+test("C-4：分相领取——停止 sweep 只领屏障关联 op，周期保存不让它饿死", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  // 先入队一个周期保存 op（更早创建，FIFO 头部），再走 stop（屏障 op 更晚）。
+  await context.outbox.enqueue({
+    operationId: "00000000-0000-4000-8000-000000000be5",
+    kind: "checkpoint",
+    idempotencyKey: "checkpoint:periodic-first",
+    taskId: task.taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    now: context.clock.now(),
+  });
+  const began = await context.plane.commands.stop.stopTask({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+  });
+  assert.equal(began.ok, true);
+  const barrierId = (await context.storage.runs.get(run.runId))?.stopOperationId ?? "";
+  assert.ok(barrierId);
+  assert.notEqual(barrierId, "00000000-0000-4000-8000-000000000be5");
+
+  // 只领一个：必须领到停止屏障关联的 op，而不是 FIFO 头部的周期保存 op。
+  // （barrier op 无保存结果 → 结算 pending，不进 settled/failed/ambiguous 计数。）
+  const report = await context.plane.lifecycle.checkpoints.sweepCheckpointOperations({
+    maxLeases: 1,
+  });
+  assert.equal(report.settled + report.ambiguous + report.failed, 0);
+  assert.equal(
+    (await context.outbox.get(barrierId))?.attempt,
+    1,
+    "第 1 相（停止相）先领屏障关联 op",
+  );
+  assert.equal(
+    (await context.outbox.get("00000000-0000-4000-8000-000000000be5"))?.attempt,
+    0,
+    "周期保存 op 未被抢先领取（分相）",
+  );
+
+  // 第 2 相（排除屏障关联）：周期保存 op 正常被领。
+  const secondPhase = await context.plane.lifecycle.checkpoints.sweepCheckpointOperations({
+    maxLeases: 4,
+  });
+  assert.equal(
+    (await context.outbox.get("00000000-0000-4000-8000-000000000be5"))?.attempt,
+    1,
+    "第 2 相领取周期保存 op（不饿死）",
+  );
+  assert.ok(secondPhase);
 });

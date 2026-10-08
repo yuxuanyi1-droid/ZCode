@@ -19,8 +19,19 @@ import type { SqlRow } from "../sqlite/rowMapping.js";
 import { CloudStorageError } from "../cloudStorageError.js";
 import type { AcceptInputRequest, AcceptInputResult } from "../../../app/ports/storagePort.js";
 import type { StorageHandlerTable } from "../storageMethodTypes.js";
-import { requireTaskRow, selectTask } from "./taskRepo.js";
-import { findActiveRun, reserveRunInTransaction, selectRun } from "./runRepo.js";
+import {
+  adoptDraftStartConfigIfAbsent,
+  draftStartConfigEquals,
+  readPersistedDraftStartConfig,
+  requireTaskRow,
+  selectTask,
+} from "./taskRepo.js";
+import {
+  applyRunLifetimeInTransaction,
+  findActiveRun,
+  reserveRunInTransaction,
+  selectRun,
+} from "./runRepo.js";
 import { DEFAULT_ATTACHMENT_LIMITS } from "../attachments/attachmentTypes.js";
 
 type ConflictResult = Extract<AcceptInputResult, { status: "conflict" }>;
@@ -49,6 +60,22 @@ function validateRequest(request: AcceptInputRequest): void {
     invalid("append 不得携带 createOperationId（不创建 create 操作）");
   }
   if (request.createOperationId !== undefined) cloudUuidSchema.parse(request.createOperationId);
+  // 请求寿命（D4-7）：start/reopen 必须在接纳事务内落 runs 行；append 不改写租期事实。
+  if (request.lease !== undefined) {
+    if (request.intent === "append") invalid("append 不得携带 lease（不改写已冻结租期）");
+    if (
+      !Number.isFinite(request.lease.hardDeadlineAt) ||
+      request.lease.hardDeadlineAt <= request.now
+    ) {
+      invalid("lease.hardDeadlineAt 必须是晚于接纳时刻的有限时间戳");
+    }
+    if (
+      request.lease.deadlineEstimate !== undefined &&
+      request.lease.deadlineConfidence === undefined
+    ) {
+      invalid("lease.deadlineEstimate 必须携带 deadlineConfidence（08 §7）");
+    }
+  }
 }
 
 /** 取 start/reopen 必填的 create 操作 id；缺失是调用方错误，fail closed。 */
@@ -57,32 +84,6 @@ function requireCreateOperationId(request: AcceptInputRequest): string {
     invalid(`${request.intent} 必须携带 createOperationId`);
   }
   return request.createOperationId;
-}
-
-/** 草稿启动选择的逐字段比较（`CloudDraftStartConfig` 的完整字段集）。 */
-function draftStartConfigEquals(
-  left: { baseBranch: string; provider: string; templateRef?: string },
-  right: { baseBranch: string; provider: string; templateRef?: string },
-): boolean {
-  return (
-    left.baseBranch === right.baseBranch &&
-    left.provider === right.provider &&
-    (left.templateRef ?? undefined) === (right.templateRef ?? undefined)
-  );
-}
-
-/** 读取已持久 draftStartConfig；缺失或损坏返回 undefined（不猜内容）。 */
-function readPersistedDraftStartConfig(
-  task: SqlRow,
-): { baseBranch: string; provider: string; templateRef?: string } | undefined {
-  const raw = task["draft_start_config_json"];
-  if (typeof raw !== "string") return undefined;
-  try {
-    const parsed = cloudDraftStartConfigSchema.safeParse(JSON.parse(raw));
-    return parsed.success ? parsed.data : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function invalid(message: string): never {
@@ -164,8 +165,9 @@ function acceptInputInTransaction(
       return conflict("stale", "generation-stale");
     }
     if (activeRun.stopRequested) return conflict("stale", "stop-requested");
-    // provisioning/disconnected 不接受新 append（08 §5）；ready 门控后才允许投递。
-    if (activeRun.status !== "ready") return conflict("not_ready", "not-ready");
+    // provisioning/disconnected 不接受新 append；paused 例外＝202 接收+自驱 resume（03 §6 修订）。
+    if (activeRun.status !== "ready" && activeRun.status !== "paused")
+      return conflict("not_ready", "not-ready");
     if (taskStatus !== "active") return conflict("stale", "not-ready");
   }
 
@@ -220,6 +222,19 @@ function acceptInputInTransaction(
       throw error;
     }
     runGeneration = reservation.runGeneration;
+    // 请求寿命与 run 预约同一事务落库（D4-7/审计 #10）：create worker 领取操作时
+    // hardDeadlineAt 已可见，消除了「事务提交后 gateway 单独 updateLease 补写」的
+    // 崩溃窗口（补写丢失 → create 读不到走本地重算、租期无上界）。计算是本地预算，
+    // 预检期已完成，事务内只做写入，无 provider IO（03 §5 纪律）。
+    if (request.lease) {
+      const applied = applyRunLifetimeInTransaction(context, {
+        runId,
+        runGeneration: reservation.runGeneration,
+        lease: request.lease,
+        now: request.now,
+      });
+      if (!applied) invalid("Run 租期在接纳事务中未能落库");
+    }
     // 先落唯一 draftStartConfig（无草稿时），再冻结基线：baseBranch 取自该选择（11 §5/§6）。
     if (request.intent === "start" && request.start) {
       adoptDraftStartConfigIfAbsent(context, request);
@@ -285,21 +300,6 @@ function acceptInputInTransaction(
     ...(runId === undefined ? {} : { runId }),
     ...(runGeneration === undefined ? {} : { runGeneration }),
   };
-}
-
-/**
- * draft 从未持久 draftStartConfig 时，以调用方在 `start` 里给出的选择作为唯一
- * 冻结事实写入（11 §5「Task 保存唯一 draftStartConfig」）：之后 PATCH 只在 draft 生效，
- * 而接纳后 Task 已是 active，因此不会出现第二份可变选择。
- */
-function adoptDraftStartConfigIfAbsent(context: StorageContext, request: AcceptInputRequest): void {
-  if (!request.start) return;
-  const task = selectTask(context, request.taskId);
-  if (!task) return;
-  if (readPersistedDraftStartConfig(task)) return;
-  context.db
-    .prepare("UPDATE tasks SET draft_start_config_json = ?, updated_at = ? WHERE task_id = ?")
-    .run(JSON.stringify(request.start), request.now, request.taskId);
 }
 
 /** 首次接纳冻结 baseBranch/baseSha/taskBranch；已冻结时保持原值（11 §6）。 */

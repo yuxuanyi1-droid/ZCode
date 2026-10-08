@@ -19,13 +19,14 @@ Cloud 控制面：云服务端（= 标准 ZCode host 本体 + cloud 叠加层，
 
 ## 状态所有者（00 §4、02 §2）
 
-| 事实                                | 所有者                   | 本模块职责                            |
-| ----------------------------------- | ------------------------ | ------------------------------------- |
-| Task/Run/activeRunId/runGeneration  | 控制面持久库             | 事务分配与 CAS 改写                   |
-| 已接受、未 admission 的输入         | 控制面 durable outbox    | 只投递与对账，不决定 runtime 准入顺序 |
-| 已 admission 的输入、轮次、权限裁决 | CLI CommandInbox/runtime | 保存 ACK 投影，不另建队列             |
-| 已 ingest 的历史/快照               | 控制面持久投影存储       | 冷启动与回放；不从沙箱拉历史          |
-| attachment 连接对象                 | 控制面内存注册表         | 可重建，不是元数据事实源              |
+| 事实                                | 所有者                   | 本模块职责                                                                                                                     |
+| ----------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| Task/Run/activeRunId/runGeneration  | 控制面持久库             | 事务分配与 CAS 改写                                                                                                            |
+| 已接受、未 admission 的输入         | 控制面 durable outbox    | 只投递与对账，不决定 runtime 准入顺序                                                                                          |
+| 已 admission 的输入、轮次、权限裁决 | CLI CommandInbox/runtime | 保存 ACK 投影，不另建队列                                                                                                      |
+| 已 ingest 的历史/快照               | 控制面持久投影存储       | 冷启动与回放；不从沙箱拉历史                                                                                                   |
+| attachment 连接对象                 | 控制面内存注册表         | 可重建，不是元数据事实源                                                                                                       |
+| 浏览器观看连接（任务通道 rpc 流）   | bridge 通道多路复用器    | 可重建连接事实；空闲 pause 的「有客户端连接」判定事实源（08 §7），经 `BrowserWatchPort` 注入 app；bridge ws 在线不代表有人观看 |
 
 ## 不变量（类型表达不了的部分）
 
@@ -82,13 +83,24 @@ Cloud 控制面：云服务端（= 标准 ZCode host 本体 + cloud 叠加层，
 0003_git_grants
 # 0004 永久退役：原 SSH attachment，随 00 §11⑥ 移除；编号不复用
 0005_task_input_interaction_decisions
-# 下一条从 0006 起
+0006_attachment_objects
+0007_run_status_paused                  # 表重建迁移：走 FK 关闭专用通道（见下方规则）
 ```
 
 规则：**编号一经应用不可改**——只能追加新编号，不得插入、改名、复用退役号或改写已应用
 id（中途改号会破坏 checksum 账本与已部署库的恢复承诺）。迁移账本按 id 记录并校验 checksum；
 checksum 不匹配或迁移未就绪时启动失败，不得开始 provider 操作（03 §8）。本波次无并发
 schema 变更（W0 §8 风险项已确认：Wave 1 只有 W2 的 `adapters/storage` 写 schema）。
+
+**表重建迁移专用通道**：SQLite 无 `ALTER CHECK`，需要 create-new/copy/drop/rename 重建
+被其他表 `REFERENCES` 引用的表（如 `0007` 重建 `runs`）时，迁移条目声明
+`preStatements`/`postStatements`（事务外钩子，非空即走 `migrations.ts` 的专用执行器）：
+`PRAGMA foreign_keys` 在事务内是 no-op，必须先在**事务外**关闭（SQLite
+lang_altertable 官方表重建 recipe；FK 开启时 `DROP TABLE` 对子表残留行即报
+`FOREIGN KEY constraint failed`，2026-10-09 生产事故），语句序列在单事务内执行，
+提交前 `PRAGMA foreign_key_check` 必须为空（非空则整事务回滚、拒绝入账），结束后
+`finally` 恢复 `foreign_keys=ON`——失败路径也不得把 FK 关闭泄漏给普通写路径。
+普通迁移（钩子为空）保持「单事务 = 语句 + 账本」路径不变，行为与历史版本一致。
 
 ### 未发布链上的在修订记录（W0 许可的单向例外）
 

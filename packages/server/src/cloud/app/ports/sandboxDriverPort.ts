@@ -21,6 +21,13 @@ export interface SandboxDriverCapabilities {
   canInspect: boolean;
   canExtendDeadline: boolean;
   canConfirmTermination: boolean;
+  /**
+   * 分级暂停/恢复能力（01 §4.1/§4.2 修订 2026-10-09）：memory=保留进程态（E2B 目标）；
+   * disk=仅保留文件系统、进程态丢失的冷恢复（Daytona 目标）；none=不支持。
+   * **实测解禁门禁（A-7）**：真实账号实测通过前，实现一律上报 "none"（fail-closed：
+   * pause/resume 代码路径存在但不可达，不虚构暂停状态）。
+   */
+  pauseResume: "memory" | "disk" | "none";
   maxLifetimeSeconds?: number;
   /** provider 真实期限 vs 只能估计：估计值必须标 deadlineConfidence 并保守 drain。 */
   deadlineSource: "provider" | "estimated";
@@ -87,9 +94,14 @@ export interface ProviderSandboxHandle {
   deadlineEstimate?: number;
 }
 
-/** 观测结论：network timeout、503、权限丢失不是 notFound（01 §4.1）。 */
+/**
+ * 观测结论：network timeout、503、权限丢失不是 notFound（01 §4.1）。
+ * `paused` 为 2026-10-09 生命周期 v2 增补（01 §4.1 修订）：暂停保留期的实例是**存在
+ * 且被 provider 保留**的资源，不得被 keepalive liveness 按 stopped/notFound 收口；
+ * 暂停保留期的存在性核对走 paused 态。
+ */
 export interface ProviderObservation {
-  status: "running" | "stopped" | "notFound" | "unknown";
+  status: "running" | "paused" | "stopped" | "notFound" | "unknown";
   observedAt: number;
   evidenceSource: "provider-api" | "metadata-search" | "termination-confirmation" | "none";
   /**
@@ -166,6 +178,24 @@ export interface SandboxDriverPort {
     requestedDeadlineMs: number,
   ): Promise<DeadlineResult>;
   terminate(handle: ProviderSandboxHandle): Promise<TerminationObservation>;
+  /**
+   * 暂停沙箱（01 §4.1 修订 2026-10-09）。返回 provider 确认的 paused 观察才算暂停成功；
+   * 确认前不得写 run=paused（B-4 顺序冻结：checkpoint(如需)→provider paused 确认→
+   * detach registry→status=paused，watchdog 显式跳过 paused）。
+   *
+   * **门禁（A-7）**：`describeCapabilities().pauseResume === "none"` 时实现必须抛
+   * `resource_unsupported` 能力错误（"capability-not-enabled"），不得发起 provider 请求、
+   * 不得伪造 paused 观察——未实测核实的 provider 一律按 none 行为（fail-closed）。
+   */
+  pause(handle: ProviderSandboxHandle): Promise<ProviderObservation>;
+  /**
+   * 恢复同一沙箱（同 run 同 generation，不换代、不重开；01 §4.1 修订）。失败不换代、
+   * 不改写原 run。`requestedDeadline` 为 epoch 毫秒：恢复通路同步续展 provider 期限、
+   * run 租期与 bridge 凭据有效期（B-6；收敛于能力上限，不放大）。
+   *
+   * 门禁同 `pause`：能力为 none 时抛 `resource_unsupported`，路径不可达。
+   */
+  resume(handle: ProviderSandboxHandle, requestedDeadline: number): Promise<ProviderObservation>;
 }
 
 /** 解析后的模板事实：镜像引用与版本固定，禁止 latest（01 §5.1 第 2 条）。 */

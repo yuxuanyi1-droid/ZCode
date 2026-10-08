@@ -36,6 +36,7 @@ import {
 import { createCheckpointPipeline, type CheckpointPipeline } from "./lifecycle/checkpoints.js";
 import { createDrainLoop, type DrainLoop } from "./lifecycle/drain.js";
 import { createKeepaliveLoop, type KeepaliveLoop } from "./lifecycle/keepalive.js";
+import { createPauseResumeControl, type PauseResumeControl } from "./lifecycle/pauseResume.js";
 import {
   createProjectionHistoryService,
   type ProjectionHistoryService,
@@ -97,6 +98,8 @@ export interface CloudControlPlane {
     keepalive: KeepaliveLoop;
     drain: DrainLoop;
     checkpoints: CheckpointPipeline;
+    /** paused 通路（2026-10-09 生命周期 v2）：自驱 resume、暂停中停止推进、pause 助手。 */
+    pauseResume: PauseResumeControl;
   };
   commands: {
     taskLifecycle: TaskLifecycleCommands;
@@ -133,6 +136,7 @@ export function assembleCloudControlPlane(
       ? { sandboxRuntimeSettings: input.sandboxRuntimeSettings }
       : {}),
     attachments: input.attachments,
+    ...(input.browserWatch ? { browserWatch: input.browserWatch } : {}),
     runtimeCommands: input.runtimeCommands,
     clock: input.clock,
     ids: input.ids,
@@ -162,9 +166,11 @@ export function assembleCloudControlPlane(
   const readiness = createReadinessWatchdog(deps, runs, compensation);
   const drain = createDrainLoop(deps, gitGrants);
   const keepalive = createKeepaliveLoop(deps, runs);
-  const checkpoints = createCheckpointPipeline(deps);
+  const pauseResume = createPauseResumeControl(deps, runs, compensation, registry);
+  const checkpoints = createCheckpointPipeline(deps, gitGrants);
   const taskLifecycle = createTaskLifecycleCommands(deps, taskDetail, drain);
-  const stop = createStopOperations(deps, runs, compensation, drain, taskDetail);
+  // stop 受理路径与 pauseResume 拍共用「暂停中停止推进」同一实现（第 2 批遗留 1 去重）。
+  const stop = createStopOperations(deps, runs, compensation, drain, taskDetail, pauseResume);
   const interactions = createInteractionCommands(deps, registry);
   const reopen = createReopenOperations(deps);
   const router = createCloudCommandRouter(deps, registry, gateway);
@@ -208,7 +214,7 @@ export function assembleCloudControlPlane(
     watchdog,
     runs,
     provisioning: { create, readiness, compensation, bootstrapConfig },
-    lifecycle: { keepalive, drain, checkpoints },
+    lifecycle: { keepalive, drain, checkpoints, pauseResume },
     commands: { taskLifecycle, interactions, reopen, stop },
     projections: { ingest, history },
     reconciler,

@@ -163,34 +163,24 @@ export function createInputGateway(deps: CloudCoreDeps): InputGateway {
 
       switch (accepted.status) {
         case "accepted": {
-          // 请求寿命只算一次（接纳期）：事务提交后落成 run 的期限事实，create 只读它（01 §4.3）。
+          // 请求寿命只算一次（接纳期，01 §4.3）：D4-7 修复后 hardDeadlineAt 与 runs 行
+          // 在 acceptInput **同一事务**落库，这里不再有事务提交后的补写路径——原
+          // 「提交后 updateLease 补写 hardDeadlineAt」在崩溃窗口下会让 create worker
+          // 读不到期限走本地重算、且永久 NULL 时续期无上界。此处只做审计投影。
           const lease = precheck.acceptFields.lease;
           if (lease && accepted.runId) {
-            const run = await storage.runs.get(accepted.runId);
-            if (run) {
-              await storage.runs.updateLease({
-                runId: run.runId,
-                runGeneration: run.runGeneration,
-                hardDeadlineAt: lease.hardDeadlineAt,
-                ...(lease.deadlineEstimate === undefined
-                  ? {}
-                  : { deadlineEstimate: lease.deadlineEstimate }),
-                ...(lease.deadlineConfidence === undefined
-                  ? {}
-                  : { deadlineConfidence: lease.deadlineConfidence }),
-                now: clock.now(),
-              });
-              cloudCoreLogger.info(undefined, "cloud run lifetime planned", {
-                taskId: task.taskId,
-                runId: run.runId,
-                runGeneration: run.runGeneration,
-                hardDeadlineAt: lease.hardDeadlineAt,
-                effectiveLifetimeMs: lease.effectiveLifetimeMs,
-                basis: lease.basis,
-                providerLimitKnown: lease.providerLimitKnown,
-                converged: lease.converged,
-              });
-            }
+            cloudCoreLogger.info(undefined, "cloud run lifetime planned", {
+              taskId: task.taskId,
+              runId: accepted.runId,
+              ...(accepted.runGeneration === undefined
+                ? {}
+                : { runGeneration: accepted.runGeneration }),
+              hardDeadlineAt: lease.hardDeadlineAt,
+              effectiveLifetimeMs: lease.effectiveLifetimeMs,
+              basis: lease.basis,
+              providerLimitKnown: lease.providerLimitKnown,
+              converged: lease.converged,
+            });
           }
           return ok(accepted.receipt);
         }

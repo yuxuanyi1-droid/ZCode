@@ -106,7 +106,28 @@ export async function handleControlFrame(
           operationId: request.operationId,
         });
       }
-      const result = await options.checkpoint.run(request);
+      let result: Awaited<ReturnType<typeof options.checkpoint.run>>;
+      try {
+        result = await options.checkpoint.run(request);
+      } catch (error) {
+        // 修复依据（2026-10-09 终验缺陷 B，08 §8.1 结果帧必达修订）：checkpoint 通路抛错
+        // （如 grant 兑换失败）时结果帧永远不回——控制面 op 只能靠 attempt 封顶结算 failed，
+        // 且周期保存 sweep 因「无 checkpoint 记录」每拍重建新 op（30 分钟 90 个 failed op
+        // 空转）。checkpoint 协议（02 §4）要求结果帧必达：异常也按 failed 如实上报，
+        // 不让 bridge 入站兜底吞掉保存事实。
+        const message = (error instanceof Error ? error.message : String(error)).slice(0, 512);
+        options.logger.error(undefined, "checkpoint execution failed; reporting failed result", {
+          operationId: request.operationId,
+          message,
+        });
+        result = {
+          operationId: request.operationId,
+          status: "failed" as const,
+          errorCode: "checkpoint_failed" as const,
+          // 帧校验要求 error 非空串：无消息就缺席该字段（02 §4 schema）。
+          ...(message ? { error: message } : {}),
+        };
+      }
       sendFrame(connection, {
         protocolVersion: CLOUD_BRIDGE_PROTOCOL_VERSION,
         type: "checkpoint.result",

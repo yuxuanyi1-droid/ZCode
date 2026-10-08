@@ -70,6 +70,18 @@ export interface AcceptInputRequest {
    */
   createOperationId?: string;
   runId?: string;
+  /**
+   * 请求寿命计划（01 §4.3「请求寿命只算一次」、审计 D4-7）：start/reopen 的硬期限
+   * 必须随接纳事务与 runs 行**同一事务**落库——create worker 领取操作时硬期限已可见，
+   * 不存在「事务提交后补写」的崩溃窗口（补写丢失会让 create 走本地重算、续期无上界）。
+   * 计算是纯本地预算（部署预算与 provider 上限取小，无 provider IO，03 §5 事务纪律），
+   * 在预检期完成；append 不改写已冻结的租期事实，不携带本字段。
+   */
+  lease?: {
+    hardDeadlineAt: number;
+    deadlineEstimate?: number;
+    deadlineConfidence?: "low" | "medium" | "high";
+  };
   /** 配额上限由 domain 判定后传入，事务内 count+reserve 一次完成（01 §4.3）。 */
   quota: { maxConcurrentRuns: number };
   now: number;

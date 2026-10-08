@@ -82,6 +82,22 @@ export function parsePositiveInt(value: string | undefined, fallback: number): n
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
+/**
+ * 可选非负整数（0 合法 = 显式禁用，如 `ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS=0`）。
+ * `undefined`（含空串/空白，readTrimmed 已收敛）= 未设置，调用方按缺省处理；`null` =
+ * 配了但形状非法——全串必须是十进制数字（`parseInt` 会把 "1.5" 截成 1、"-1" 截断符号，
+ * 静默接受截断值等于改写部署意图，与 parseSandboxLifetimeLimits 同一严格口径）。
+ */
+export function parseOptionalNonNegativeInt(value: string | undefined): number | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!/^\d+$/.test(value)) {
+    return null;
+  }
+  return Number.parseInt(value, 10);
+}
+
 /** origin 只接受 scheme + authority：带 path/query/fragment 会让 attachment 地址拼错。 */
 export function parsePublicOrigin(value: string | undefined): string | null {
   if (!value) {

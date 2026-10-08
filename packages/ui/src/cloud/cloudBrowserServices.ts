@@ -14,8 +14,8 @@
  * 账号域**不在这里覆盖**：登录/套餐/模型目录就是 host `/ws` 的既有服务，
  * 模型设置页与 WelcomeScreen 零改动（12 §5）。
  */
-import { ProxyChannel, type IChannelClient } from "@zcode/rpc";
-import { ServiceChannels } from "@zcode/shared";
+import { ProxyChannel, type Event, type IChannelClient } from "@zcode/rpc";
+import { ServiceChannels, buildCloudTaskWorkspaceIdentity } from "@zcode/shared";
 import type {
   IFileService,
   IFileWatcherService,
@@ -153,6 +153,101 @@ function mergeCloudServiceScopes(
 }
 
 /**
+ * attachment 通道的重连感知面（specs/cloud-agent/07 §9、04 §3.3）。
+ *
+ * `CloudAttachClient`（packages/client）结构性提供 `onDidChangeState`；按「UI 不 import
+ * SDK」的边界，这里只做结构探测，不引入对 SDK 具体类型的依赖。没有该面的实现
+ * （测试替身 / 未来实现）返回 null，包装退化为原行为。
+ */
+interface ReconnectAwareAttachmentChannel {
+  onDidChangeState?(
+    listener: (change: { readonly state: string }) => void,
+  ): { readonly dispose: () => void } | void;
+}
+
+type AgentRuntimeLifecycleState = "available" | "unavailable";
+
+interface AttachmentReconnectHub {
+  /**
+   * 注册一个「重连边沿重挂」闭包：断连与重连边沿都会被调用（闭包内部先释放旧
+   * 注册再按当前连接状态重挂；未连接时底层 listen 返回空事件，等价安全退场）。
+   * 返回解除登记函数。
+   */
+  onRebind(listener: () => void): () => void;
+  /** 合成 runtime 生命周期信号：断连边沿 unavailable、重连成功边沿 available。 */
+  onLifecycle(listener: (state: AgentRuntimeLifecycleState) => void): () => void;
+}
+
+/**
+ * 会话面板「断连后订阅静默死亡」的根因修复点（2026-10-09 终验缺陷 C）：
+ * `attach.getChannel().listen` 的裸事件注册绑定在**当次连接**上，bridge 断连
+ * （如 frame-rejected 4001）时 ChannelClient 整体销毁，SDK 的自动重连只重建
+ * `attach.subscribe()` 登记的订阅，经 `ProxyChannel.toService` 走裸 listen 的
+ * 会话帧流（onDynamicConversationFrame）不重挂，控制面连接虽恢复（epoch 3→4），
+ * 页面订阅再收不到任何帧。此 hub 在每个重连边沿统一重挂受管事件，并向前端
+ * 施加合成 runtime 生命周期信号——ConversationProjectionStore 的
+ * handleRuntimeUnavailable/handleRuntimeAvailable 状态机随即携原水位重订阅，
+ * 新连接上的 initial snapshot 经重挂后的帧流收回（pending overlay 一并按权威投影收口）。
+ */
+function createAttachmentReconnectHub(
+  channelClient: ReconnectAwareAttachmentChannel,
+): AttachmentReconnectHub | null {
+  const onDidChangeState = channelClient.onDidChangeState;
+  if (typeof onDidChangeState !== "function") {
+    return null;
+  }
+  const rebinds = new Set<() => void>();
+  const lifecycleListeners = new Set<(state: AgentRuntimeLifecycleState) => void>();
+  // 执行域服务在 attach.connect() 成功之后构建，初始即视为已连接；首个观察到的
+  // 非连接态就是断连边沿。
+  let connected = true;
+  const dispose = onDidChangeState.call(channelClient, (change) => {
+    const isConnected = change?.state === "connected";
+    if (isConnected === connected) {
+      return;
+    }
+    connected = isConnected;
+    // 两个边沿统一重挂：断连边沿重挂会落到空事件（未连接不可listen），即安全退场；
+    // 重连边沿重挂到新连接，随后才广播 available，保证 store 重订阅发出的
+    // initial snapshot 有帧流可落。
+    for (const rebind of rebinds) {
+      rebind();
+    }
+    const state: AgentRuntimeLifecycleState = isConnected ? "available" : "unavailable";
+    for (const listener of lifecycleListeners) {
+      listener(state);
+    }
+  });
+  void dispose;
+  return {
+    onRebind(listener) {
+      rebinds.add(listener);
+      return () => {
+        rebinds.delete(listener);
+      };
+    },
+    onLifecycle(listener) {
+      lifecycleListeners.add(listener);
+      return () => {
+        lifecycleListeners.delete(listener);
+      };
+    },
+  };
+}
+
+/** 事件 Disposable 的最小结构面（rpc 的 IDisposable / 普通函数返回值都满足）。 */
+interface EventSubscription {
+  dispose(): void;
+}
+
+function toEventSubscription(disposable: unknown): EventSubscription {
+  if (typeof disposable === "function") {
+    return { dispose: disposable as () => void };
+  }
+  return (disposable as EventSubscription) ?? { dispose: () => {} };
+}
+
+/**
  * 云 attachment 的 agent 通道不做 clientHello（`initializeConversationV4`）绑定。
  *
  * 事实链（实测 + `zcodeAgentConnectionScope.ts` / supervisor relay 源码）：
@@ -171,21 +266,102 @@ function mergeCloudServiceScopes(
  *
  * 因此这里把 clientHello 就地吸收为 no-op：握手只剩 hello（拿 clientMode/能力声明），
  * 订阅/快照/命令照常工作。桌面 / 本地 web / 手机远控的直连 scope 不经过本包装，语义不变。
+ *
+ * 2026-10-09 缺陷 C 修订：事件面接入重连 hub——会话帧流（`onDynamic*`）与 runtime
+ * 生命周期/换代事件在断连后由 hub 统一重挂到新连接；`onAgentRuntimeLifecycle` 额外
+ * 合成断连/重连边沿，让 v4 投影 store 的既有 runtime 状态机驱动重订阅（保留回放水位）。
  */
 function createCloudAttachmentAgentService(
   channelClient: CloudAttachmentAccessor["channelClient"],
+  taskId: string,
 ): IZCodeAgentService {
   const service = ProxyChannel.toService<IZCodeAgentService>(
     channelClient.getChannel(ServiceChannels.ZCodeAgent),
   );
+  // CloudAttachClient 在 IChannelClient 之外结构性携带 onDidChangeState（packages/client）；
+  // UI 不 import SDK，按结构面探测，缺失时退化为原行为。
+  const hub = createAttachmentReconnectHub(channelClient as ReconnectAwareAttachmentChannel);
+  if (hub === null) {
+    return new Proxy(service, {
+      get(target, property, receiver) {
+        if (property === "initializeConversationV4") {
+          return async () => {};
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  }
+  /** 重挂式事件：每次订阅/重连边沿都向**当前连接**重新取底层事件再挂监听。 */
+  const resilientEvent = <T>(underlying: () => Event<T>): Event<T> => {
+    return (listener: (event: T) => void) => {
+      let subscription: EventSubscription | undefined;
+      const rebind = () => {
+        subscription?.dispose();
+        subscription = toEventSubscription(underlying()(listener));
+      };
+      rebind();
+      const offRebind = hub.onRebind(rebind);
+      return {
+        dispose: () => {
+          offRebind();
+          subscription?.dispose();
+          subscription = undefined;
+        },
+      };
+    };
+  };
   return new Proxy(service, {
     get(target, property, receiver) {
       if (property === "initializeConversationV4") {
         return async () => {};
       }
+      if (typeof property === "string") {
+        if (property.startsWith("onDynamic")) {
+          // 动态事件带参（workspace 描述）：每次重挂都重新取属性再传参，
+          // 底层 toService 会调用当次连接的 channel.listen。
+          return (arg: unknown): Event<unknown> =>
+            resilientEvent(() => {
+              const dynamicEvent = Reflect.get(target, property, receiver) as (
+                a: unknown,
+              ) => Event<unknown>;
+              return dynamicEvent(arg);
+            });
+        }
+        if (property === "onAgentRuntimeLifecycle" || property === "onAgentRuntimeRestarted") {
+          // 合成边沿必须携带 transport 的 workspaceKey（= workspaceIdentity，08 §4.1）：
+          // agentConversationTransport 的生命周期/换代监听按它过滤，缺失会被当作
+          // 「别的 workspace」丢弃。
+          const syntheticWorkspaceKey = buildCloudTaskWorkspaceIdentity(taskId);
+          return (listener: (event: unknown) => void): EventSubscription => {
+            let inner: EventSubscription | undefined;
+            const lifecycleOff =
+              property === "onAgentRuntimeLifecycle"
+                ? hub.onLifecycle((state) => {
+                    // 合成边沿：断连 unavailable / 重连 available。底层真实事件仍并行转发，
+                    // 两路不同源——合成边沿只出现在连接换代时刻，不会与 runtime 进程
+                    // 生命周期事件重复。
+                    listener({ workspaceKey: syntheticWorkspaceKey, state });
+                  })
+                : undefined;
+            inner = toEventSubscription(
+              resilientEvent(() => {
+                const plainEvent = Reflect.get(target, property, receiver) as Event<unknown>;
+                return plainEvent;
+              })(listener),
+            );
+            return {
+              dispose: () => {
+                lifecycleOff?.();
+                inner?.dispose();
+                inner = undefined;
+              },
+            };
+          };
+        }
+      }
       return Reflect.get(target, property, receiver);
     },
-  });
+  }) as IZCodeAgentService;
 }
 
 function createAttachmentExecutionServices(attachment: CloudAttachmentAccessor): IServiceAccessor {
@@ -214,7 +390,7 @@ function createAttachmentExecutionServices(attachment: CloudAttachmentAccessor):
     terminalService: ProxyChannel.toService<ITerminalService>(
       channelClient.getChannel(CLOUD_EXECUTION_SERVICE_BINDINGS[6].channel),
     ),
-    zcodeAgentService: createCloudAttachmentAgentService(channelClient),
+    zcodeAgentService: createCloudAttachmentAgentService(channelClient, attachment.taskId),
     zcodeSessionService: ProxyChannel.toService<IZCodeSessionService>(
       channelClient.getChannel(CLOUD_EXECUTION_SERVICE_BINDINGS[8].channel),
     ),

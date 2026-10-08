@@ -101,8 +101,14 @@ export {
 export {
   isCloudTaskArchiveActionAvailable,
   projectCloudTaskRunPanel,
+  resolveCloudComposerSendPlan,
   resolveCloudReopenPlan,
+  resolveCloudReopenRetryPlan,
+  type CloudComposerReopenResume,
+  type CloudComposerSendFacts,
+  type CloudComposerSendPlan,
   type CloudReopenPlan,
+  type CloudReopenRetryPlan,
   type CloudTaskPanelDetail,
   type CloudTaskRunPanelView,
 } from "./cloudTaskPanel.js";
@@ -126,6 +132,7 @@ export type {
 export type { CloudAttachmentProvider } from "./cloudAttachmentProvider.js";
 export {
   describeCloudSubmissionError,
+  isCloudNoActiveRunRejection,
   reconcileCloudTaskInput,
   submitCloudTaskInput,
   type CloudSubmissionOutcome,
@@ -136,5 +143,13 @@ export {
   isCloudApiErrorRetryable,
   isCloudResyncRequiredError,
   readCloudErrorCode,
+  readCloudErrorReason,
   type CloudApiErrorLike,
 } from "./cloudApiErrorLike.js";
+export {
+  cloudInputRejectionMessageKey,
+  cloudTaskErrorCodeMessageKey,
+  describeCloudComposerRejection,
+  describeCloudInputRejection,
+  describeCloudTaskActionError,
+} from "./cloudTaskErrorText.js";

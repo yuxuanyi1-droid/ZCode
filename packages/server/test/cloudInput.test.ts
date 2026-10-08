@@ -731,3 +731,164 @@ test("决定 ACK 回写：按 (taskId, deliveryCommandId) 反查并推进；查�
   );
   assert.equal(strayInput, null, "也不得新建输入记录");
 });
+
+/** 走到 ready 且首命令已投递（delivering）的 run，供终态收口用例使用。 */
+async function readyRunWithDeliveredStart(
+  context: ReturnType<typeof buildTestPlane>,
+  commandId: string,
+) {
+  const { task, receipt } = await acceptedStart(context, commandId);
+  const runId = receipt.runId ?? "";
+  await context.plane.provisioning.create.runCreateOnce();
+  const run = await context.storage.runs.get(runId);
+  assert.ok(run);
+  await attachReadySession(context, {
+    taskId: task.taskId,
+    runId,
+    runGeneration: run.runGeneration,
+  });
+  await context.plane.runs.markReady({
+    taskId: task.taskId,
+    runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+  const dispatched = await context.plane.delivery.dispatchTask(task.taskId);
+  assert.equal(dispatched.outcomes[0]?.result, "sent");
+  return { task, run: run };
+}
+
+test("run 终态时残留输入确定性收口；complete 不再被 run-ended uncertain 阻塞（08 §8.1、审计 D4-3）", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await readyRunWithDeliveredStart(
+    context,
+    "00000000-0000-4000-8000-00000000020a",
+  );
+  // 追加两条输入：一条保持 accepted，一条显式落入 uncertain（对账结论不明）。
+  const append = (commandId: string) =>
+    context.plane.inputs.submit({
+      principalId: PRINCIPAL,
+      taskId: task.taskId,
+      source: "http",
+      request: {
+        intent: "append",
+        commandId,
+        prompt: "next",
+        expectedRunGeneration: run.runGeneration,
+      },
+    });
+  const acceptedId = "00000000-0000-4000-8000-00000000020b";
+  assert.equal((await append(acceptedId)).ok, true);
+  const uncertainId = "00000000-0000-4000-8000-00000000020c";
+  assert.equal((await append(uncertainId)).ok, true);
+  assert.ok(
+    await context.storage.inputs.markDelivery({
+      taskId: task.taskId,
+      commandId: uncertainId,
+      to: "uncertain",
+      lastError: "ack-lost",
+      now: context.clock.now(),
+    }),
+  );
+
+  // 修复前的事实：run 终态后 dispatcher（activeOfTask 为空）与 reconcileTask 都不再
+  // 处理这些输入，complete 的 unsettled 检查永久 not_ready。
+  const settled = await context.plane.runs.settleTerminal({
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    to: "expired",
+    endReason: "provider-instance-lost",
+    termination: "terminated",
+    dataAtRisk: true,
+  });
+  assert.ok(settled.ok);
+
+  const byId = async (commandId: string) =>
+    await context.storage.inputs.get(task.taskId, commandId);
+  const start = await byId("00000000-0000-4000-8000-00000000020a");
+  assert.equal(
+    start?.deliveryStatus,
+    "uncertain",
+    "delivering 结果不明 → uncertain（不伪称 cancelled）",
+  );
+  assert.equal(start?.lastError, "run-ended", "投递结论随运行终止不可得 → run-ended");
+  const accepted = await byId(acceptedId);
+  assert.equal(accepted?.deliveryStatus, "cancelled", "确定未投递 → cancelled（08 §8.1 收口）");
+  assert.equal(accepted?.lastError, "run-ended");
+  const uncertain = await byId(uncertainId);
+  assert.equal(uncertain?.deliveryStatus, "uncertain", "已在对账 uncertain 的行保持不动");
+  assert.equal(uncertain?.lastError, "ack-lost", "既有对账痕迹不被覆盖");
+
+  // 收口后 complete 可用：uncertain 是历史事实（receipt 呈现），不再阻塞验收。
+  const completed = await context.plane.commands.taskLifecycle.completeTask({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+  });
+  assert.ok(completed.ok, completed.ok ? "" : `${completed.code}/${completed.reason}`);
+  assert.ok(completed.ok && completed.value.task.status === "completed");
+
+  // receipt 查询仍如实呈现「运行已结束时的结果不明」。
+  const receipt = await context.plane.inputs.getReceipt({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+    commandId: uncertainId,
+  });
+  assert.ok(receipt.ok);
+  assert.ok(receipt.ok && receipt.value.deliveryStatus === "uncertain");
+  assert.ok(receipt.ok && receipt.value.runId === run.runId);
+});
+
+test("complete_requested 后台 sweep 在 run 终态且输入收口后自动 complete（审计 N-P3）", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await readyRunWithDeliveredStart(
+    context,
+    "00000000-0000-4000-8000-00000000021a",
+  );
+  await context.plane.runs.settleTerminal({
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    to: "expired",
+    endReason: "provider-instance-lost",
+    termination: "terminated",
+    dataAtRisk: true,
+  });
+  // 先只持久验收意图（模拟用户 complete 在 drain 前失败/退出，未完成最终迁移）。
+  const current = await context.storage.tasks.get(task.taskId);
+  assert.ok(current);
+  assert.ok(
+    await context.storage.tasks.setCompleteRequested({
+      taskId: task.taskId,
+      expectedRevision: current.revision,
+      requested: true,
+      now: context.clock.now(),
+    }),
+  );
+  // 活动还有 run 时不收口（前置不满足静默跳过）。
+  const activeContext = buildTestPlane();
+  const active = await acceptedStart(activeContext, "00000000-0000-4000-8000-00000000021b");
+  await activeContext.storage.tasks.setCompleteRequested({
+    taskId: active.task.taskId,
+    expectedRevision: active.task.revision,
+    requested: true,
+    now: activeContext.clock.now(),
+  });
+  assert.equal(await activeContext.plane.commands.taskLifecycle.settleCompleteRequests(), 0);
+
+  assert.equal(await context.plane.commands.taskLifecycle.settleCompleteRequests(), 1);
+  const done = await context.storage.tasks.get(task.taskId);
+  assert.equal(done?.status, "completed");
+  // 幂等：已 completed 的 Task 不再出现。
+  assert.equal(await context.plane.commands.taskLifecycle.settleCompleteRequests(), 0);
+});
+
+test("start 接纳事务提交后 create worker 即可读硬期限（D4-7，无事务后补写窗口）", async () => {
+  const context = buildTestPlane();
+  const { task, receipt } = await acceptedStart(context, "00000000-0000-4000-8000-00000000022a");
+  const run = await context.storage.runs.get(receipt.runId ?? "");
+  assert.ok(run);
+  // fake driver：maxLifetimeSeconds=3600、deadlineSource=provider → 硬期限 = 接纳时刻 + 1h，
+  // 且 provider 确认型不写估计值（01 §4.3、08 §7）。
+  assert.equal(run.hardDeadlineAt, context.clock.now() + 3_600_000);
+  assert.equal(run.deadlineEstimate, undefined);
+  assert.equal(run.deadlineConfidence, undefined);
+});

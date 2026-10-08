@@ -21,6 +21,7 @@ import {
   ZCODE_CLOUD_MODEL_ENV,
   ZCODE_CLOUD_PROVIDERS_ENV,
   ZCODE_CLOUD_PUBLIC_ORIGIN_ENV,
+  ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS_ENV,
   ZCODE_CLOUD_SANDBOX_MAX_LIFETIME_SECONDS_ENV,
   ZCODE_CLOUD_SANDBOX_TEMPLATE_REF_ENV,
   ZCODE_SERVER_MODE_ENV,
@@ -809,6 +810,51 @@ test("沙箱可用期上限：合法多条目解析，非法形式一律 fail-cl
         issueCodes(result),
         ["sandbox_lifetime_invalid"],
         `非法输入应被拒绝: ${invalid}`,
+      );
+    }
+  });
+});
+
+test("空闲 pause 阈值：缺省未配置、0=显式禁用保留，非法形式 fail-closed（08 §7 修订）", async () => {
+  await withTempDir("cloud-entry-config-", async (dataDir) => {
+    // 未配置 = 缺省 600（10 分钟），不进配置对象。
+    const unset = await readCloudEntryConfig(baseCloudEnv(dataDir));
+    assert.ok(unset.ok);
+    assert.equal(unset.config.sandboxIdlePauseSeconds, undefined);
+
+    // 合法：正整数与 0（0 = 显式禁用，必须原样透传，不得被当「未配置」吞掉）。
+    const ok = await readCloudEntryConfig({
+      ...baseCloudEnv(dataDir),
+      [ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS_ENV]: "600",
+    });
+    assert.ok(ok.ok);
+    assert.equal(ok.config.sandboxIdlePauseSeconds, 600);
+    const disabled = await readCloudEntryConfig({
+      ...baseCloudEnv(dataDir),
+      [ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS_ENV]: "0",
+    });
+    assert.ok(disabled.ok);
+    assert.equal(disabled.config.sandboxIdlePauseSeconds, 0);
+
+    // 空串与空白：readTrimmed 收敛为「未设置」→ 按缺省处理，不报 issue（与既有键同口径）。
+    const blank = await readCloudEntryConfig({
+      ...baseCloudEnv(dataDir),
+      [ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS_ENV]: "  ",
+    });
+    assert.ok(blank.ok);
+    assert.equal(blank.config.sandboxIdlePauseSeconds, undefined);
+
+    // 非法：负数/非整数/非数字一律报 sandbox_idle_pause_invalid（fail-closed，不静默取缺省——
+    // 吞掉部署方的禁用/阈值意图比启动失败更难排查，W5 §5）。
+    for (const invalid of ["-1", "1.5", "abc"]) {
+      const result = await readCloudEntryConfig({
+        ...baseCloudEnv(dataDir),
+        [ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS_ENV]: invalid,
+      });
+      assert.deepEqual(
+        issueCodes(result),
+        ["sandbox_idle_pause_invalid"],
+        `非法输入应被拒绝: "${invalid}"`,
       );
     }
   });

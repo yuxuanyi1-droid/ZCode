@@ -43,13 +43,25 @@ export async function verifyReopenEligibility(
     // 断网/失联不授权第二个 run：拒绝双写并显示核验状态（08 §4.2、CP-10）。
     return fail("recovery_required", "active-write-run-present", { runId: activeRun.runId });
   }
+  // D4-12（08 §9「旧 instance 终止/凭据已处置」）：最近一次 run 即使状态已终态，
+  // 其 provider 终止也必须**已确认**（quota_released_at 非空，01 §4.3 只有确认释放才
+  // 释放槽）。runOrchestrator 允许「终态但终止未确认」（termination unknown 时占槽自查），
+  // 若放行会让新 run 与旧沙箱并存 → 双计费槽。keepalive liveness 对账确认后会释放槽位，
+  // 那时本前置自然放行，因此这里拒绝是可恢复的（recovery_required 而非永久失败）。
+  const lastRun =
+    activeRun ?? (task.activeRunId ? await deps.storage.runs.get(task.activeRunId) : null);
+  if (lastRun && lastRun.quotaReleasedAt === undefined) {
+    return fail("recovery_required", "previous-run-termination-unconfirmed", {
+      runId: lastRun.runId,
+    });
+  }
   if (!task.baseSha || !task.taskBranch) {
     // 首次准备失败且已证明从未发布任务分支的情况由 start 路径处理；此处要求冻结基线。
     return fail("invalid_ref", "task-baseline-not-frozen");
   }
   const resumeChoices: ("checkpoint" | "restart-from-base")[] = ["restart-from-base"];
   if (task.lastCheckpointSha) resumeChoices.unshift("checkpoint");
-  return ok({ lastRun: activeRun, resumeChoices });
+  return ok({ lastRun, resumeChoices });
 }
 
 export function createReopenOperations(deps: CloudCoreDeps): ReopenOperations {

@@ -176,6 +176,22 @@ export const credentialRepoHandlers = {
       .run(now, params.reason, now, params.runId);
     return Number(changes.changes);
   },
+
+  /**
+   * 续展凭据有效期（B-6，2026-10-09 生命周期 v2）：自驱 resume 成功后把 `expires_at`
+   * 沿 run 新租期向外续。**只外推不内缩**（MAX 口径，与 consumeForHello 的期限跟随
+   * 一致）：传入早于现值时保持现值；已撤销凭据不复活（revoked_at IS NULL 前置）。
+   */
+  "credentials.extendForRun": (context, params): boolean => {
+    const now = Date.now();
+    const changes = context.db
+      .prepare(
+        `UPDATE run_credentials SET expires_at = MAX(expires_at, ?), updated_at = ?
+         WHERE run_id = ? AND revoked_at IS NULL`,
+      )
+      .run(params.expiresAt, now, params.runId);
+    return Number(changes.changes) > 0;
+  },
 } satisfies Pick<
   StorageHandlerTable,
   | "credentials.saveInitial"
@@ -183,4 +199,5 @@ export const credentialRepoHandlers = {
   | "credentials.recoverByAttempt"
   | "credentials.revokeRun"
   | "credentials.verifyActiveCredential"
+  | "credentials.extendForRun"
 >;

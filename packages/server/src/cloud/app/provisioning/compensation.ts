@@ -27,6 +27,26 @@ import type { RunOrchestrator } from "../runOrchestrator.js";
 
 export type TerminationVerdict = "terminated" | "notTerminated" | "unknown";
 
+/**
+ * 迟到分配清账的 provider 重试预算（C-3 两阶段清账，定稿附录 6）：create 结果 ambiguous
+ * 时终止意图已持久（terminate/cleanup op 先入队，见 requestTermination），provider IO
+ * 按 cleanup op 的租约重试；超过该预算仍无法核验的，保持 ambiguous + 告警，不再对
+ * provider 反复打 destroy（对账窗口交给启动恢复与运营入口）。
+ */
+export const CLEANUP_RETRY_BUDGET_MS = 30_000 as const;
+
+/** 纯判定：清理重试预算是否耗尽（至少经历过一次 provider IO，attempt > 1）。 */
+export function cleanupRetryBudgetExhausted(input: {
+  attempt: number;
+  createdAt: number;
+  now: number;
+  budgetMs?: number;
+}): boolean {
+  return (
+    input.attempt > 1 && input.now - input.createdAt >= (input.budgetMs ?? CLEANUP_RETRY_BUDGET_MS)
+  );
+}
+
 export interface CompensationReport {
   leased: number;
   settled: number;
@@ -121,7 +141,45 @@ export function createRunCompensation(
       : null;
     if (!handle) {
       // handle 未知：按 create operationKey 对账找回，找不到时保留槽等对账（不谎报已释放）。
-      const reconciliation = await driver.findCreateResult(createOperationKey(run.runId));
+      // C-3 两阶段清账：清理意图已在此前持久（terminate/cleanup op），provider IO 按预算
+      // 重试；预算耗尽（重试 30s+ 仍无结论）保持 ambiguous + 告警，不再反复打 provider。
+      const createOperation = await operations.findByKey(createOperationKey(run.runId));
+      if (
+        cleanupRetryBudgetExhausted({
+          attempt: leased.operation.attempt,
+          createdAt: leased.operation.createdAt,
+          now: clock.now(),
+        })
+      ) {
+        await operations.settle({
+          operationId: leased.operation.operationId,
+          leaseToken: leased.leaseToken,
+          outcome: "ambiguous",
+          errorCode: "provider_termination_unknown",
+          now: clock.now(),
+        });
+        cloudCoreLogger.error(
+          undefined,
+          "cloud cleanup retry budget exhausted; staying ambiguous",
+          {
+            taskId: run.taskId,
+            runId: run.runId,
+            operationId: leased.operation.operationId,
+            attempt: leased.operation.attempt,
+            createOperationRecorded: createOperation !== null,
+          },
+        );
+        return "ambiguous";
+      }
+      // C-3（定稿附录 6）：对账锚点取 create op 的持久 createdAt（跨重启可用）；
+      // op 缺失时不传锚点，findCreateResult 保守回 unknown（不猜「未创建」）。
+      const createAnchor = createOperation
+        ? { operationAttemptedAtMs: createOperation.createdAt }
+        : undefined;
+      const reconciliation = await driver.findCreateResult(
+        createOperationKey(run.runId),
+        createAnchor,
+      );
       if (reconciliation.status === "unknown") {
         await operations.settle({
           operationId: leased.operation.operationId,

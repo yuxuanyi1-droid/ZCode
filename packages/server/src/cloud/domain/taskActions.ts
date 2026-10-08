@@ -57,12 +57,15 @@ export function deriveTaskActions(facts: TaskActionFacts): CloudTaskAction[] {
   const stopping = run?.stopRequested === true;
   const actions: CloudTaskAction[] = [];
 
-  // 输入：draft 首发需要已保存的完整启动配置；active 追加需要 ready run 且未受理停止。
+  // 输入：draft 首发需要已保存的完整启动配置；active 追加需要 ready/paused run 且未受理
+  // 停止（paused 的 append 按 03 §6 修订 2026-10-09 接受——202 持久接收 + 控制面自驱
+  // resume，同 run 同 generation；UI 明示「发送消息即可恢复」，04 §3.3 修订行）。
   const canStart =
     task.status === "draft" &&
     task.draftStartConfig !== undefined &&
     task.draftStartConfig !== null;
-  const canAppend = task.status === "active" && run?.status === "ready" && !stopping;
+  const canAppend =
+    task.status === "active" && (run?.status === "ready" || run?.status === "paused") && !stopping;
   if (canStart || canAppend) actions.push("send-input");
 
   // 撤销：只对尚未进入 runtime 判定的输入开放（已 admitted 的取消需要独立 runtime 命令）。
@@ -85,7 +88,9 @@ export function deriveTaskActions(facts: TaskActionFacts): CloudTaskAction[] {
   }
 
   // 验收：active 即可（控制面在需要时先 drain，进行中显示验收/停止进度，08 §9）。
-  if (task.status === "active") actions.push("complete");
+  // 例外（03 §6 修订 2026-10-09 行为表）：paused 的 complete = 拒绝（须先 resume 或
+  // 完成 stop 终态收口）——投影与执行同表，paused 时不给 complete 入口。
+  if (task.status === "active" && run?.status !== "paused") actions.push("complete");
 
   // 归档：无活动写 run 且未归档。
   if (task.status !== "archived" && !run) actions.push("archive");

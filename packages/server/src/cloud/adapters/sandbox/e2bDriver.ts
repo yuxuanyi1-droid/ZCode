@@ -20,7 +20,9 @@ import { CloudAdapterError, type CloudAdapterLogger } from "./adapterError.js";
 import {
   describeCapabilities,
   E2B_SANDBOX_CAPABILITIES,
+  gatePauseResumeOrThrow,
   resolveEffectiveMaxLifetimeSeconds,
+  resolvePauseResumeCapability,
   type SandboxLifetimeOptions,
 } from "./capabilities.js";
 import { launchE2bSupervisor } from "./e2bBootstrap.js";
@@ -43,6 +45,8 @@ import {
   isDefiniteRejection,
   type SandboxFetch,
 } from "./e2bRest.js";
+import { pauseE2bSandbox, resumeE2bSandbox } from "./e2bPauseResume.js";
+import { inspectE2bSandbox } from "./e2bRest.js";
 import {
   boundEvidence,
   buildReconcileLabels,
@@ -105,7 +109,15 @@ export function createE2bSandboxDriver(options: E2bDriverOptions): SandboxDriver
 
   return {
     async describeCapabilities() {
-      return describeCapabilities(E2B_SANDBOX_CAPABILITIES, options.maxLifetimeSeconds);
+      return describeCapabilities(
+        {
+          ...E2B_SANDBOX_CAPABILITIES,
+          // A-7 实测解禁门禁：未实测（verifiedAt === null）一律收敛为 "none"——
+          // 能力表、控制面分支与 UI 读到的是同一份收敛结果（fail-closed，路径不可达）。
+          pauseResume: resolvePauseResumeCapability(E2B_PROVIDER),
+        },
+        options.maxLifetimeSeconds,
+      );
     },
 
     async create(input: SandboxCreateInput): Promise<ProviderSandboxHandle> {
@@ -243,79 +255,7 @@ export function createE2bSandboxDriver(options: E2bDriverOptions): SandboxDriver
       );
     },
 
-    async inspect(handle: ProviderSandboxHandle): Promise<ProviderObservation> {
-      const path = E2B_PATH_SANDBOX(handle.sandboxId);
-      // 证据串只含端点/状态/状态原文要点（≤160 字符），不含凭据、labels 或响应体。
-      const evidenceOf = (outcome: string) => boundEvidence(`e2b GET ${path} -> ${outcome}`);
-      let response;
-      try {
-        response = await rest.request(path, { method: "GET", attempts: E2B_GET_RETRY_ATTEMPTS });
-      } catch (error) {
-        // 网络超时/权限丢失一律 unknown，不是 notFound（01 §4.1）。
-        const cause = isAbortLike(error) ? "aborted" : "network-error";
-        logger.warn(undefined, "e2b inspect unavailable", {
-          sandboxId: handle.sandboxId,
-          error: cause,
-        });
-        return {
-          status: "unknown",
-          observedAt: now(),
-          evidenceSource: "none",
-          evidence: evidenceOf(cause),
-          errorCode: "provider_unreachable",
-        };
-      }
-      if (response.status === 404) {
-        // provider 明确确认资源不存在 → notFound（可释放计费槽）。
-        return {
-          status: "notFound",
-          observedAt: now(),
-          evidenceSource: "provider-api",
-          evidence: evidenceOf("404 not-found"),
-        };
-      }
-      if (response.status === 401 || response.status === 403) {
-        return {
-          status: "unknown",
-          observedAt: now(),
-          evidenceSource: "provider-api",
-          evidence: evidenceOf(`${response.status} auth-lost`),
-          errorCode: "permission_revoked",
-        };
-      }
-      if (!response.ok) {
-        return {
-          status: "unknown",
-          observedAt: now(),
-          evidenceSource: "provider-api",
-          evidence: evidenceOf(`${response.status} provider-error`),
-          errorCode: "provider_unreachable",
-        };
-      }
-      const body = asRecord(await response.json().catch(() => null));
-      const state = asString(body?.["state"]) ?? asString(body?.["status"]) ?? "";
-      const mapped = mapE2bSandboxState(state);
-      if (mapped !== undefined) {
-        return {
-          status: mapped,
-          observedAt: now(),
-          evidenceSource: "provider-api",
-          evidence: evidenceOf(`200 state=${state}`),
-        };
-      }
-      // 未映射的 provider 状态不猜测：unknown + 证据留给运营核对。
-      logger.warn(undefined, "e2b inspect returned unmapped state", {
-        sandboxId: handle.sandboxId,
-        state: state.slice(0, 32),
-      });
-      return {
-        status: "unknown",
-        observedAt: now(),
-        evidenceSource: "provider-api",
-        evidence: evidenceOf(`200 unmapped-state=${state.slice(0, 32)}`),
-        errorCode: "provider_unreachable",
-      };
-    },
+    inspect: (handle) => inspectE2bSandbox({ rest, logger, now, sandboxId: handle.sandboxId }),
 
     async extendDeadline(
       handle: ProviderSandboxHandle,
@@ -394,6 +334,29 @@ export function createE2bSandboxDriver(options: E2bDriverOptions): SandboxDriver
         evidence: evidenceOf(`${response.status} unconfirmed`),
       });
       return { status: "unknown", errorCode: "provider_termination_unknown" };
+    },
+
+    // 暂停（01 §4.1 修订）：门禁（A-7）none 时本地能力错误、不触网；分支语义在
+    // e2bPauseResume.ts——204 = provider 确认 paused（确认前不得写 run=paused，B-4）。
+    async pause(handle: ProviderSandboxHandle): Promise<ProviderObservation> {
+      gatePauseResumeOrThrow(E2B_PROVIDER);
+      return pauseE2bSandbox({ rest, logger, now, sandboxId: handle.sandboxId });
+    },
+
+    // 恢复（01 §4.1 修订）：requestedDeadline 经 clamp 收敛后作为 resume timeout
+    // （provider 缺省只有 15 秒）。
+    async resume(
+      handle: ProviderSandboxHandle,
+      requestedDeadline: number,
+    ): Promise<ProviderObservation> {
+      gatePauseResumeOrThrow(E2B_PROVIDER);
+      const timeoutSeconds = await clampTimeoutSeconds(requestedDeadline);
+      if (timeoutSeconds < 1) {
+        throw new CloudAdapterError("validation_failed", "requested deadline already elapsed", {
+          requestedDeadline,
+        });
+      }
+      return resumeE2bSandbox({ rest, logger, now, sandboxId: handle.sandboxId, timeoutSeconds });
     },
   };
 }

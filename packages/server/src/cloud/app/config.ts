@@ -14,6 +14,13 @@ export interface CloudCoreConfig {
   /** 部署硬 run 预算，与 provider 上限取较小值（08 §7）。 */
   hardRunDurationMs: number;
   idleArchiveThresholdMs: number;
+  /**
+   * 空闲 pause 阈值（08 §7 修订 2026-10-09、决策 D3）：ready + 无业务活动 + 无客户端
+   * 连接持续达到该阈值 → pauseRun；仅分级能力（pauseResume≠none）provider 参与，
+   * 且单轨替换 idle drain（F-3，drain.sweep 对 memory 级关闭 idle 分支）。
+   * 0 = 禁用（整条空闲 pause 路径休眠）；部署键 ZCODE_CLOUD_SANDBOX_IDLE_PAUSE_SECONDS（秒）。
+   */
+  idlePauseMs: number;
   drainBudgetMs: number;
   periodicCheckpointMs: number;
   autoRenewEnabled: boolean;
@@ -45,6 +52,7 @@ export const CLOUD_CORE_DEFAULTS: CloudCoreConfig = {
   maxConcurrentRuns: DEFAULT_MAX_CONCURRENT_RUNS,
   hardRunDurationMs: SAVE_POLICY_DEFAULTS.hardRunDurationMs,
   idleArchiveThresholdMs: SAVE_POLICY_DEFAULTS.idleArchiveThresholdMs,
+  idlePauseMs: SAVE_POLICY_DEFAULTS.idlePauseMs,
   drainBudgetMs: SAVE_POLICY_DEFAULTS.drainBudgetMs,
   periodicCheckpointMs: SAVE_POLICY_DEFAULTS.periodicCheckpointMs,
   autoRenewEnabled: SAVE_POLICY_DEFAULTS.autoRenewEnabled,
@@ -67,6 +75,8 @@ export function resolveCloudCoreConfig(overrides: Partial<CloudCoreConfig> = {})
       merged.idleArchiveThresholdMs,
       CLOUD_CORE_DEFAULTS.idleArchiveThresholdMs,
     ),
+    // 非负整数：0 是合法值（显式禁用空闲 pause），不能按 positiveInt 回落成默认开启。
+    idlePauseMs: nonNegativeInt(merged.idlePauseMs, CLOUD_CORE_DEFAULTS.idlePauseMs),
     drainBudgetMs: positiveInt(merged.drainBudgetMs, CLOUD_CORE_DEFAULTS.drainBudgetMs),
     periodicCheckpointMs: positiveInt(
       merged.periodicCheckpointMs,
@@ -91,4 +101,9 @@ export function resolveCloudCoreConfig(overrides: Partial<CloudCoreConfig> = {})
 
 function positiveInt(value: number, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback;
+}
+
+/** 非负整数：0 合法（= 显式禁用）；负数/非有限值 fail-closed 回落缺省，不接受越界配置。 */
+function nonNegativeInt(value: number, fallback: number): number {
+  return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : fallback;
 }

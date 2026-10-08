@@ -69,7 +69,9 @@ export function createProjectionHistoryService(deps: CloudCoreDeps): ProjectionH
       });
       const response: CloudHistoryPage = {
         items: page.items.map((record) => toHistoryItem(record, clock.now())),
-        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+        // 复核缺陷 4：空页不携带 cursor（hasMore=false 当且仅当下游确有下一页数据）。
+        // 仓库层已保证，这里对客户端契约再收一道口，防未来分页实现漂移。
+        ...(page.items.length > 0 && page.nextCursor ? { nextCursor: page.nextCursor } : {}),
         // 游标越出保留窗时客户端必须 resync（03 §9）；只声明事实，不静默从零猜。
         ...(page.resyncRequired ? { resyncRequired: true } : {}),
       };

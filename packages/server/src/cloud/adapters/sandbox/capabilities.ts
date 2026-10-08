@@ -12,7 +12,11 @@
  * 能力错误的表达在调用侧：不支持的能力返回 `unsupported`（续期）或归一错误
  * （resource_unsupported / validation_failed），永不伪造成功（01 §4.1）。
  */
-import type { SandboxDriverCapabilities } from "../../app/ports/sandboxDriverPort.js";
+import type {
+  SandboxDriverCapabilities,
+  SandboxDriverPort,
+} from "../../app/ports/sandboxDriverPort.js";
+import { CloudAdapterError } from "./adapterError.js";
 
 export const SANDBOX_PROVIDER_IDS = ["e2b", "modal", "daytona"] as const;
 export type SandboxProviderId = (typeof SANDBOX_PROVIDER_IDS)[number];
@@ -38,6 +42,10 @@ export const E2B_SANDBOX_CAPABILITIES = {
   canInspect: true,
   canExtendDeadline: true, // setTimeout 续期
   canConfirmTermination: true,
+  // 目标分级（01 §4.2 修订）：memory 级——SDK 2.52.1 原生 pause（POST /sandboxes/{id}/pause，
+  // 204 即确认）、resume/connect 即恢复、create 可配 onTimeout=pause（TTL 到点自动暂停）。
+  // **实测解禁前不外报**：driver describeCapabilities 经 resolvePauseResumeCapability 收敛。
+  pauseResume: "memory",
   deadlineSource: "provider",
   supportsOutboundWss: true,
 } as const satisfies Omit<SandboxDriverCapabilities, "maxLifetimeSeconds">;
@@ -52,6 +60,9 @@ export const DAYTONA_SANDBOX_CAPABILITIES = {
   canInspect: true,
   canExtendDeadline: true, // POST /ttl/{minutes}
   canConfirmTermination: true, // DELETE 受理 / 二次查询 404
+  // 目标分级（01 §4.2 修订）：disk 级——stop/start 只停不删（文件系统保留），resume 为
+  // 冷启动、进程态丢失（须如实向用户披露）。**实测解禁前不外报**（同 E2B 门禁）。
+  pauseResume: "disk",
   deadlineSource: "provider",
   supportsOutboundWss: true, // 默认网段不阻断出站；未单独做 WSS 压测
 } as const satisfies Omit<SandboxDriverCapabilities, "maxLifetimeSeconds">;
@@ -69,6 +80,7 @@ export const MODAL_SDK_CHANNEL_CAPABILITIES = {
   canInspect: true,
   canExtendDeadline: false,
   canConfirmTermination: true,
+  pauseResume: "none", // Modal 终态走 reopen（01 §4.2 修订：分级能力目标值 none）
   deadlineSource: "estimated",
   supportsOutboundWss: true,
 } as const satisfies Omit<SandboxDriverCapabilities, "maxLifetimeSeconds">;
@@ -82,6 +94,7 @@ export const MODAL_GATED_CAPABILITIES = {
   canInspect: false,
   canExtendDeadline: false,
   canConfirmTermination: false,
+  pauseResume: "none",
   deadlineSource: "estimated",
   supportsOutboundWss: true,
 } as const satisfies Omit<SandboxDriverCapabilities, "maxLifetimeSeconds">;
@@ -151,7 +164,14 @@ export const SANDBOX_PROVIDER_GATES: Readonly<Record<SandboxProviderId, SandboxP
     e2b: {
       verifiedAt: null,
       source: "specs/cloud-agent/01 §4.2/§6.2（历史联调结论，待本波次复验）",
-      unverified: ["账号生命周期上限", "setTimeout 续期确认", "create 对账命中", "出站 WSS 回连"],
+      unverified: [
+        "账号生命周期上限",
+        "setTimeout 续期确认",
+        "create 对账命中",
+        "出站 WSS 回连",
+        // pauseResume 项已于 2026-10-09 真实账号实测后从清单移除（解禁记录见
+        // SANDBOX_PAUSE_RESUME_GATES.e2b，覆盖 pause/resume 语义、暂停保留与到期语义）。
+      ],
     },
     modal: {
       verifiedAt: null,
@@ -166,9 +186,105 @@ export const SANDBOX_PROVIDER_GATES: Readonly<Record<SandboxProviderId, SandboxP
     daytona: {
       verifiedAt: null,
       source: "specs/cloud-agent/01 §4.2/§6.2（历史联调结论，待本波次复验）",
-      unverified: ["toolboxProxyUrl 通道", "TTL 续期确认", "delete 确认", "labels 对账命中"],
+      unverified: [
+        "toolboxProxyUrl 通道",
+        "TTL 续期确认",
+        "delete 确认",
+        "labels 对账命中",
+        // 2026-10-09 生命周期 v2（A-7）：disk 级解禁条件——stop/start 只停不删、文件系统
+        // 保留、进程态丢失须如实披露（01 §4.2 修订解除「首期不依赖磁盘恢复」冻结）。
+        "pauseResume（disk 级：stop/start 冷恢复语义与启动开销）",
+      ],
     },
   };
+
+// ── pauseResume 实测解禁门禁（A-7，2026-10-09 生命周期 v2）──
+
+export interface PauseResumeProviderGate {
+  /**
+   * 真实账号实测通过日期（YYYY-MM-DD）；null = 未实测。**这是唯一的开关**：
+   * 翻开关（写入实测日期）之前，该 provider 的 pauseResume 能力一律按 "none" 行为。
+   */
+  verifiedAt: string | null;
+  /** 实测目标分级（声明如实）；未实测时不外报。 */
+  level: "memory" | "disk" | "none";
+  /** 证据来源引用（spec 章节 / 联调记录）；不含账号、域名或凭据。 */
+  source: string;
+}
+
+/**
+ * pauseResume 分级能力的实测解禁门禁表（01 §4.2 修订、定稿附录 A-7）。
+ *
+ * fail-closed 规则：`verifiedAt === null` 时 `resolvePauseResumeCapability` 返回 "none"，
+ * 三家一律按 none 行为——pause/resume 代码与契约在（driver 有真实调用实现），但路径
+ * 不可达：`describeCapabilities()` 上报 none、`pause`/`resume` 本地抛能力错误，不发起
+ * provider 请求、不虚构暂停状态、UI 不出现 paused 投影。真实账号实测（覆盖能力声明、
+ * 期限语义、停止语义、暂停/恢复语义与启动开销）后**才**把 `verifiedAt` 翻成实测日期。
+ */
+export const SANDBOX_PAUSE_RESUME_GATES: Readonly<
+  Record<SandboxProviderId, PauseResumeProviderGate>
+> = {
+  e2b: {
+    verifiedAt: "2026-10-09",
+    level: "memory",
+    source:
+      "live verification: 2026-10-09 真实账号实测（重建模板 zcode-sandbox-template）——POST pause 204 后暂停 30s，resume 与 connect 均内存态原地恢复（同一进程 PID、心跳计数续走不重启、恢复后墙钟跨暂停连续）；create autoPause 到期实测自动转 paused",
+  },
+  daytona: {
+    verifiedAt: null,
+    level: "disk",
+    source:
+      "specs/cloud-agent/01 §4.2 修订（stop/start 只停不删、文件系统保留、进程态丢失须披露；待真实账号实测）",
+  },
+  modal: {
+    verifiedAt: null,
+    level: "none",
+    source: "specs/cloud-agent/01 §4.2 修订（Modal 分级能力目标值 none，终态走 reopen）",
+  },
+};
+
+/**
+ * 生效的 pauseResume 能力：未实测（verifiedAt === null）一律收敛为 "none"（fail-closed），
+ * 已实测才放行声明分级。三家 driver 的 `describeCapabilities()` 统一经本函数收敛，
+ * 能力表端点（shared `pauseResume` 字段）与控制面分支读到的是同一份收敛结果。
+ */
+export function resolvePauseResumeCapability(
+  provider: SandboxProviderId,
+): "memory" | "disk" | "none" {
+  const gate = SANDBOX_PAUSE_RESUME_GATES[provider];
+  return gate.verifiedAt === null ? "none" : gate.level;
+}
+
+/**
+ * pause/resume 的统一门禁断言（A-7，driver 方法在 provider 通路前执行）：能力为 none
+ * （未实测）时本地抛能力错误——不发起 provider 请求、不虚构暂停状态（01 §4.1 修订：
+ * 路径不可达，fail-closed）。
+ */
+export function gatePauseResumeOrThrow(provider: SandboxProviderId): void {
+  if (resolvePauseResumeCapability(provider) !== "none") return;
+  throw new CloudAdapterError(
+    "resource_unsupported",
+    `capability-not-enabled: ${provider} pauseResume is gated until real-account verification`,
+    { provider },
+  );
+}
+
+/**
+ * 不支持 pause/resume 的 provider（Modal，01 §4.2 修订目标值 none）共用的端口方法：
+ * 两方法确定性抛能力错误（不是 unknown）——无 provider 请求、不伪造暂停状态。
+ */
+export function unsupportedPauseResume(
+  provider: SandboxProviderId,
+): Pick<SandboxDriverPort, "pause" | "resume"> {
+  const reject = async (): Promise<never> => {
+    throw new CloudAdapterError(
+      "resource_unsupported",
+      `capability-not-enabled: ${provider} does not support pause/resume (terminal runs go through reopen)`,
+      { provider },
+    );
+  };
+  return { pause: reject, resume: reject };
+}
 
 export interface SandboxGateOptions {
   /**

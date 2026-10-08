@@ -102,10 +102,11 @@ test("worker 子进程承载全部持久语义", async () => {
     assert.equal(runs.length, 1);
 
     const readiness = await handle.storage.readiness();
-    assert.equal(readiness.schemaVersion, 6);
+    // 0007_run_status_paused（2026-10-09 生命周期 v2，E-1 表重建）入链后链头为 7。
+    assert.equal(readiness.schemaVersion, 7);
     assert.equal(readiness.writable, true);
     assert.equal(readiness.attachmentsWritable, true);
-    assert.equal(readiness.lastAppliedMigrationId, "0006_attachment_objects");
+    assert.equal(readiness.lastAppliedMigrationId, "0007_run_status_paused");
 
     await handle.close();
     await assert.rejects(

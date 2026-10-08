@@ -29,6 +29,26 @@ export function readCloudErrorCode(value: unknown): CloudErrorCode | null {
   return isCloudApiErrorLike(value) ? value.code : null;
 }
 
+/**
+ * 读取服务端失败 reason（2026-10-08 终态 run 发送行为修订）。
+ *
+ * 服务端把稳定机器可读 reason 同时放进信封 `message` 与 `details.reason`
+ * （http support `respondFailure`），客户端 SDK 原样保留 `details`。UI 不解析
+ * message 文案，只按结构化 `details.reason` 细分语义；形状不匹配返回 null，
+ * 调用方回落到 code 级文案，不猜（04 §6、09 §8）。
+ */
+export function readCloudErrorReason(value: unknown): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const details = (value as Record<string, unknown>).details;
+  if (!details || typeof details !== "object") {
+    return null;
+  }
+  const reason = (details as Record<string, unknown>).reason;
+  return typeof reason === "string" && reason.trim().length > 0 ? reason : null;
+}
+
 export function isCloudApiErrorRetryable(value: unknown): boolean {
   if (!isCloudApiErrorLike(value)) {
     return false;

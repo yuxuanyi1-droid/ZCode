@@ -26,6 +26,7 @@ import {
   DAYTONA_SANDBOX_CAPABILITIES,
   describeCapabilities,
   resolveEffectiveMaxLifetimeSeconds,
+  resolvePauseResumeCapability,
   type SandboxLifetimeOptions,
 } from "./capabilities.js";
 import { launchDaytonaSupervisor } from "./daytonaBootstrap.js";
@@ -34,6 +35,7 @@ import {
   buildDaytonaLabels,
   createDaytonaRestClient,
   createDaytonaTerminateProbe,
+  createDaytonaTtlMinutesClamp,
   DAYTONA_DEFAULT_BASE_URL,
   DAYTONA_DEFAULT_REQUEST_TIMEOUT_MS,
   DAYTONA_GET_RETRY_ATTEMPTS,
@@ -44,7 +46,10 @@ import {
   DAYTONA_PATH_TTL,
   mapDaytonaSandboxState,
   parseEpochMs,
+  readDaytonaListEntries,
 } from "./daytonaRest.js";
+import { pauseDaytonaSandbox, resumeDaytonaSandbox } from "./daytonaPauseResume.js";
+import { inspectDaytonaSandbox } from "./daytonaRest.js";
 import {
   boundEvidence,
   createCreateAttemptAnchors,
@@ -103,18 +108,27 @@ export function createDaytonaSandboxDriver(options: DaytonaDriverOptions): Sandb
     logger,
   };
 
-  async function clampTtlMinutes(requestedDeadlineMs: number): Promise<number> {
-    let usableMs = requestedDeadlineMs - now();
-    const cap = await resolveEffectiveMaxLifetimeSeconds(options);
-    if (cap !== undefined) {
-      usableMs = Math.min(usableMs, cap * 1000);
-    }
-    return Math.max(1, Math.ceil(usableMs / 60_000)); // 向上取整：绝不欠配期限
-  }
+  // TTL 分钟换算的唯一实现（01 §4.3）：create/extend/resume 共用，向上取整不欠配。
+  const clampTtlMinutes = createDaytonaTtlMinutesClamp({
+    now,
+    resolveMaxLifetimeSeconds: () => resolveEffectiveMaxLifetimeSeconds(options),
+  });
+
+  /** inspect 的函数形态（pause 的回查复用同一实现，避免对象字面量内 `this` 依赖）。 */
+  // inspect 委托 rest 层实现（pause 的回查复用同一实现）。
+  const inspectHandle = (handle: ProviderSandboxHandle): Promise<ProviderObservation> =>
+    inspectDaytonaSandbox({ rest, logger, now, sandboxId: handle.sandboxId });
 
   return {
     async describeCapabilities() {
-      return describeCapabilities(DAYTONA_SANDBOX_CAPABILITIES, options.maxLifetimeSeconds);
+      return describeCapabilities(
+        {
+          ...DAYTONA_SANDBOX_CAPABILITIES,
+          // A-7 实测解禁门禁：disk 级未实测一律收敛为 "none"（fail-closed，路径不可达）。
+          pauseResume: resolvePauseResumeCapability(DAYTONA_PROVIDER),
+        },
+        options.maxLifetimeSeconds,
+      );
     },
 
     async create(input: SandboxCreateInput): Promise<ProviderSandboxHandle> {
@@ -217,12 +231,7 @@ export function createDaytonaSandboxDriver(options: DaytonaDriverOptions): Sandb
         });
         return createReconcileUnknown();
       }
-      const record = asRecord(body);
-      const entries: unknown[] = Array.isArray(body)
-        ? body
-        : Array.isArray(record?.["items"])
-          ? (record["items"] as unknown[])
-          : [];
+      const entries = readDaytonaListEntries(body);
       const match = entries
         .map((entry) => asRecord(entry))
         .find((entry) => matchesOperationKey(entry, "labels", operationKey));
@@ -239,80 +248,7 @@ export function createDaytonaSandboxDriver(options: DaytonaDriverOptions): Sandb
       );
     },
 
-    async inspect(handle: ProviderSandboxHandle): Promise<ProviderObservation> {
-      const path = DAYTONA_PATH_SANDBOX(handle.sandboxId);
-      // 证据串只含端点/状态/状态原文要点（≤160 字符），不含凭据、labels 或响应体。
-      const evidenceOf = (outcome: string) => boundEvidence(`daytona GET ${path} -> ${outcome}`);
-      let response;
-      try {
-        response = await rest.request(path, {
-          method: "GET",
-          attempts: DAYTONA_GET_RETRY_ATTEMPTS,
-        });
-      } catch (error) {
-        // 网络超时/权限丢失一律 unknown，不是 notFound（01 §4.1）。
-        const cause = isAbortLike(error) ? "aborted" : "network-error";
-        logger.warn(undefined, "daytona inspect unavailable", {
-          sandboxId: handle.sandboxId,
-          evidence: evidenceOf(cause),
-        });
-        return {
-          status: "unknown",
-          observedAt: now(),
-          evidenceSource: "none",
-          evidence: evidenceOf(cause),
-          errorCode: "provider_unreachable",
-        };
-      }
-      if (response.status === 404) {
-        return {
-          status: "notFound",
-          observedAt: now(),
-          evidenceSource: "provider-api",
-          evidence: evidenceOf("404 not-found"),
-        };
-      }
-      if (response.status === 401 || response.status === 403) {
-        return {
-          status: "unknown",
-          observedAt: now(),
-          evidenceSource: "provider-api",
-          evidence: evidenceOf(`${response.status} auth-lost`),
-          errorCode: "permission_revoked",
-        };
-      }
-      if (!response.ok) {
-        return {
-          status: "unknown",
-          observedAt: now(),
-          evidenceSource: "provider-api",
-          evidence: evidenceOf(`${response.status} provider-error`),
-          errorCode: "provider_unreachable",
-        };
-      }
-      const body = asRecord(await response.json().catch(() => null));
-      const state = asString(body?.["state"]) ?? "";
-      const mapped = mapDaytonaSandboxState(state);
-      if (mapped !== undefined) {
-        return {
-          status: mapped,
-          observedAt: now(),
-          evidenceSource: "provider-api",
-          evidence: evidenceOf(`200 state=${state}`),
-        };
-      }
-      logger.warn(undefined, "daytona inspect returned unmapped state", {
-        sandboxId: handle.sandboxId,
-        state: state.slice(0, 32),
-      });
-      return {
-        status: "unknown",
-        observedAt: now(),
-        evidenceSource: "provider-api",
-        evidence: evidenceOf(`200 unmapped-state=${state.slice(0, 32)}`),
-        errorCode: "provider_unreachable",
-      };
-    },
+    inspect: inspectHandle,
 
     async extendDeadline(
       handle: ProviderSandboxHandle,
@@ -394,6 +330,58 @@ export function createDaytonaSandboxDriver(options: DaytonaDriverOptions): Sandb
         evidence: evidenceOf(`${response.status} unconfirmed`),
       });
       return { status: "unknown", errorCode: "provider_termination_unknown" };
+    },
+
+    /**
+     * disk 级暂停（01 §4.2 修订 2026-10-09）：stop 只停不删、文件系统保留、进程态丢失
+     * （须如实向用户披露）。**门禁（A-7）**：能力为 none（未实测）时本地拒绝，不发起
+     * provider 请求；分支语义在 daytonaPauseResume.ts。
+     */
+    async pause(handle: ProviderSandboxHandle): Promise<ProviderObservation> {
+      if (resolvePauseResumeCapability(DAYTONA_PROVIDER) === "none") {
+        throw new CloudAdapterError(
+          "resource_unsupported",
+          "capability-not-enabled: daytona pauseResume is gated until real-account verification",
+          { sandboxIdLen: handle.sandboxId.length },
+        );
+      }
+      return pauseDaytonaSandbox({
+        rest,
+        logger,
+        now,
+        sandboxId: handle.sandboxId,
+        inspect: (sandboxId) => inspectHandle({ provider: "daytona", sandboxId }),
+      });
+    },
+
+    /**
+     * disk 级恢复（01 §4.2 修订）：POST start 冷启动，随后尽力把 TTL 续到
+     * `requestedDeadline`（B-6 恢复通路同步续展 provider 期限；不放大能力上限）。
+     */
+    async resume(
+      handle: ProviderSandboxHandle,
+      requestedDeadline: number,
+    ): Promise<ProviderObservation> {
+      if (resolvePauseResumeCapability(DAYTONA_PROVIDER) === "none") {
+        throw new CloudAdapterError(
+          "resource_unsupported",
+          "capability-not-enabled: daytona pauseResume is gated until real-account verification",
+          { sandboxIdLen: handle.sandboxId.length },
+        );
+      }
+      if (requestedDeadline <= now()) {
+        throw new CloudAdapterError("validation_failed", "requested deadline already elapsed", {
+          requestedDeadline,
+        });
+      }
+      return resumeDaytonaSandbox({
+        rest,
+        logger,
+        now,
+        sandboxId: handle.sandboxId,
+        requestedDeadline,
+        ttlMinutes: () => clampTtlMinutes(requestedDeadline),
+      });
     },
   };
 }

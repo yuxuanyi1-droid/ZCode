@@ -46,4 +46,11 @@ export interface RunCredentialRepo {
    * **不接受 `now`**（W2 口径确认）：审计时间用 worker 真实时钟。
    */
   revokeRun(request: { runId: string; reason: string }): Promise<number>;
+  /**
+   * 续展该 run 凭据的有效期（B-6，2026-10-09 生命周期 v2 修订）：自驱 resume 成功后，
+   * 控制面把凭据 `expires_at` 沿 run 新租期向外续——墙钟照走，长暂停后凭据过期会让
+   * resume 回连的 hello 永远被拒。**只外推不内缩**（与 `consumeForHello` 的
+   * `MAX(expires_at, …)` 同一口径）：传入值早于现值时不缩短；已撤销的凭据不复活。
+   */
+  extendForRun(request: { runId: string; expiresAt: number }): Promise<boolean>;
 }

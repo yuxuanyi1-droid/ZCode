@@ -38,11 +38,18 @@ export interface FakeSandboxFaults {
   lateHandle?: boolean;
   /** supervisor 启动失败（01 §5.1 第 3 条：失败即补偿终止）。 */
   startSupervisorFailure?: { code: CloudErrorCode; message: string };
+  /** pause 已受理但观察丢失：fake 回 unknown，控制面不得写 run=paused（B-4 fail-closed）。 */
+  dropPauseObservation?: boolean;
+  /** resume 已执行但观察丢失：fake 回 unknown，控制面停留 paused 退避重试。 */
+  dropResumeObservation?: boolean;
+  /** pause 时 provider 侧直接丢失实例（模拟保留期尽/回收）：inspect → notFound。 */
+  loseOnPause?: boolean;
 }
 
 interface FakeSandboxEntry {
   sandboxId: string;
-  state: "running" | "stopped";
+  /** paused 是独立观测态（01 §4.1 修订）：保留中的实例不归 stopped。 */
+  state: "running" | "paused" | "stopped";
   labels: Record<string, string>;
   createdAt: number;
   expiresAt: number;
@@ -69,8 +76,15 @@ export interface FakeSandboxDriver extends SandboxDriverPort {
 export function createFakeSandboxDriver(options?: {
   now?: () => number;
   newSandboxId?: (operationKey: string, index: number) => string;
+  /**
+   * fake 的分级能力声明（fake 对齐真实语义；01 §4.1 修订）。缺省 "none"：与生产
+   * fail-closed 门禁同构——pause/resume 抛能力错误、路径不可达。测试 resume/pause
+   * 通路时显式传 "memory"。
+   */
+  pauseResume?: "memory" | "disk" | "none";
 }): FakeSandboxDriver {
   const now = options?.now ?? Date.now;
+  const pauseResumeCapability = options?.pauseResume ?? "none";
   const newSandboxId =
     options?.newSandboxId ?? ((operationKey, index) => `fake-sbx-${operationKey}-${index}`);
   const sandboxes = new Map<string, FakeSandboxEntry>();
@@ -86,6 +100,7 @@ export function createFakeSandboxDriver(options?: {
     canInspect: true,
     canExtendDeadline: true,
     canConfirmTermination: true,
+    pauseResume: pauseResumeCapability,
     deadlineSource: "provider",
     supportsOutboundWss: true,
   };
@@ -248,6 +263,72 @@ export function createFakeSandboxDriver(options?: {
         return { status: "unknown", errorCode: "provider_termination_unknown" };
       }
       return { status: "terminated" };
+    },
+
+    /**
+     * fake pause：与真实 driver 同一语义（01 §4.1 修订）——none 门禁下本地抛能力错误
+     * （不触达 entries），memory 级确认后置 paused 观测。观察丢失/实例丢失用故障开关注入。
+     */
+    async pause(handle: ProviderSandboxHandle): Promise<ProviderObservation> {
+      requests.push(`pause:${handle.sandboxId}`);
+      if (pauseResumeCapability === "none") {
+        // fail-closed：与生产 e2b/daytona 的门禁行为同构（路径不可达）。
+        throw new CloudAdapterError(
+          "resource_unsupported",
+          "capability-not-enabled: fake pauseResume is none",
+          { sandboxIdLen: handle.sandboxId.length },
+        );
+      }
+      const entry = entryOf(handle);
+      if (!entry || entry.terminated) {
+        return { status: "notFound", observedAt: now(), evidenceSource: "provider-api" };
+      }
+      if (faults.loseOnPause) {
+        entry.terminated = true;
+        entry.state = "stopped";
+        return { status: "notFound", observedAt: now(), evidenceSource: "provider-api" };
+      }
+      entry.state = "paused";
+      if (faults.dropPauseObservation) {
+        return {
+          status: "unknown",
+          observedAt: now(),
+          evidenceSource: "none",
+          errorCode: "provider_unreachable",
+        };
+      }
+      return { status: "paused", observedAt: now(), evidenceSource: "provider-api" };
+    },
+
+    /** fake resume：paused → running；requestedDeadline 覆盖 TTL（与 keepalive 同语义）。 */
+    async resume(
+      handle: ProviderSandboxHandle,
+      requestedDeadline: number,
+    ): Promise<ProviderObservation> {
+      requests.push(`resume:${handle.sandboxId}`);
+      if (pauseResumeCapability === "none") {
+        throw new CloudAdapterError(
+          "resource_unsupported",
+          "capability-not-enabled: fake pauseResume is none",
+          { sandboxIdLen: handle.sandboxId.length },
+        );
+      }
+      const entry = entryOf(handle);
+      if (!entry || entry.terminated) {
+        // 保留期尽/实例不存在：notFound（调用方交 keepalive liveness 收口 expired）。
+        return { status: "notFound", observedAt: now(), evidenceSource: "provider-api" };
+      }
+      entry.expiresAt = requestedDeadline;
+      if (faults.dropResumeObservation) {
+        return {
+          status: "unknown",
+          observedAt: now(),
+          evidenceSource: "none",
+          errorCode: "provider_unreachable",
+        };
+      }
+      entry.state = "running";
+      return { status: "running", observedAt: now(), evidenceSource: "provider-api" };
     },
 
     listSandboxes(): ProviderSandboxHandle[] {

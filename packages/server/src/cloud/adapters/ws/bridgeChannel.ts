@@ -17,6 +17,7 @@ import {
   isCloudRpcFrameInboundAllowed,
   type CloudRpcFrame,
 } from "@zcode/shared";
+import { bridgeCloseDisconnectReason } from "../../domain/runtimeExit.js";
 import {
   bridgeLogger,
   parseBridgeFrame,
@@ -280,6 +281,10 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
       return browserRpc.open(input);
     },
 
+    hasOpenBrowserStreams(runId: string) {
+      return browserRpc.hasOpenStreams(runId);
+    },
+
     async acceptConnection({ runId, socket }) {
       const run = await storage.runs.get(runId);
       if (!run) {
@@ -335,10 +340,17 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
         // registry 摘除 / run 置 disconnected（否则未鉴权方关连接即可把真实桥打断）。
         if (!connection.authenticated) return;
         if (connections.get(runId) === connection) connections.delete(runId);
+        // D4-2 中间步：断连语义归类（02 §3 判定表）——连接生命周期内确认过 runtime
+        // 进程退出的按 runtime-exit 标注（区分「断网」与「runtime 死了」，供后续恢复
+        // 阶梯决策）；落点是 registry detach 理由与 run.endReason（markDisconnected）。
+        // 控制面不据此自动重建 supervisor（第 2 批之后的事），只落事实。
+        const disconnectReason = bridgeCloseDisconnectReason({
+          runtimeExitConfirmed: connection.runtimeExitConfirmed === true,
+        });
         registry.detach({
           runId,
           at: clock.now(),
-          reason: "socket-closed",
+          reason: disconnectReason,
           // 期望代际逐项校验：被新 epoch 接管替换的旧连接关闭时，不摘除新 session。
           expectedRunGeneration: connection.runGeneration,
           expectedConnectionEpoch: connection.connectionEpoch,
@@ -346,12 +358,12 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
         // 连接释放：丢弃在途 RPC 与浏览器流（不重放；命令事实留待对账，02 §6.3）。
         // 释放按「关闭的这条连接」记账：单例命令传输不能被任意一条连接的关闭永久毒化
         // （2026-10-07 真实链路：首条连接关闭后所有 run 的输入投递全部 closed）。
-        commandChannel.release("bridge-socket-closed", {
+        commandChannel.release(disconnectReason, {
           runId,
           runGeneration: connection.runGeneration,
           connectionEpoch: connection.connectionEpoch,
         });
-        browserRpc.closeRun(runId, "bridge-socket-closed");
+        browserRpc.closeRun(runId, disconnectReason);
         // 悬浮 Promise 必须自兜（2026-10-07 实测崩溃：进程关闭期 storage worker 先关，
         // 迟到的 socket close 事件走到这里抛 CloudStorageError，无人接的 rejection
         // 直接把进程带崩 exit 1——关闭路径的失败只记日志，不再有可恢复动作）。
@@ -361,7 +373,7 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
             runId,
             runGeneration: connection.runGeneration,
             connectionEpoch: connection.connectionEpoch,
-            reason: "bridge-socket-closed",
+            reason: disconnectReason,
           })
           .catch((error: unknown) => {
             logger.warn(undefined, "bridge mark disconnected failed", {

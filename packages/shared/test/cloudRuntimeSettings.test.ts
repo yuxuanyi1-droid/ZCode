@@ -23,6 +23,8 @@ function providerFixture(overrides: Record<string, unknown> = {}) {
     canInspect: true,
     canExtendDeadline: true,
     canConfirmTermination: true,
+    // 2026-10-09 生命周期 v2（additive）：分级暂停/恢复能力；实测解禁前部署上报 none。
+    pauseResume: "none",
     deadlineSource: "provider",
     supportsOutboundWss: true,
     apiKeyConfigured: true,

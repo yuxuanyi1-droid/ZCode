@@ -73,6 +73,38 @@ export function createRunOrchestrator(
     return storage.runs.get(runId);
   }
 
+  /**
+   * 终态输入收口（08 §8.1「生命周期对确定未执行输入收口」、审计 D4-3）：run 落终态后，
+   * 残留的 deliverable 输入（accepted/delivering/uncertain）若不收口，dispatcher 因
+   * activeOfTask 返回空而永不处理它们，complete 的 unsettled 检查会永久 not_ready。
+   * 本函数是**所有**终态路径（stop 补偿、keepalive expired、readiness/startup、
+   * create 失败）唯一的收口点：settleTerminal/failProvisioning 是仅有的两个终态 CAS 入口。
+   * 收口失败不回滚已落地的终态（终态是 provider 证据事实），记 error 留待幂等重试
+   * （complete 前的再收口与 sweep 兜底）。
+   */
+  async function settleInputsOfEndedRun(taskId: string, runId: string): Promise<void> {
+    try {
+      const outcome = await storage.inputs.settleForEndedRun({
+        taskId,
+        runId,
+        now: clock.now(),
+      });
+      if (outcome.cancelled > 0 || outcome.unknown > 0) {
+        cloudCoreLogger.info(undefined, "cloud ended run inputs settled", {
+          taskId,
+          runId,
+          ...outcome,
+        });
+      }
+    } catch (error) {
+      cloudCoreLogger.error(undefined, "cloud ended run input settlement failed", {
+        taskId,
+        runId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   return {
     async markReady(input) {
       const run = await currentRun(input.runId);
@@ -101,6 +133,19 @@ export function createRunOrchestrator(
         // 02 §5.3：运行配置/凭据/策略快照安装是 ready 的必要条件；未下发不得发布 ready。
         // 补救路径是「标记 + 下次连接重装」，不在此处补发或放宽。
         return fail("recovery_required", "bootstrap-config-not-sent");
+      }
+      if (run.status === "ready") {
+        // 幂等发布（2026-10-09 生命周期 v2）：控制面自驱 resume 已把 paused CAS 为 ready，
+        // 沙箱随后回连并重发 bridge.ready——此时状态已是 ready，重复 CAS 是自反边。
+        // 不得回 bridge.fault（那会让恢复中的沙箱误判失败），registry.ready 照常置位，
+        // 投递门控只看 attachment ready（02 §5.3）。
+        cloudCoreLogger.debug(undefined, "cloud run ready already published", {
+          taskId: run.taskId,
+          runId: run.runId,
+          runGeneration: run.runGeneration,
+          connectionEpoch: input.connectionEpoch,
+        });
+        return ok(run);
       }
       if (!canTransitionRun(run.status, "ready")) {
         return fail("stale", "invalid-run-transition", { from: run.status });
@@ -132,7 +177,13 @@ export function createRunOrchestrator(
         currentEpoch: run.connectionEpoch,
       });
       if (!fence.accepted) return fail("stale", fence.reason);
-      if (isTerminalRunStatus(run.status) || run.status === "draining") {
+      if (
+        isTerminalRunStatus(run.status) ||
+        run.status === "draining" ||
+        // paused 显式跳过（08 §3.2 修订：watchdog 对 paused 不推进；暂停保留期由
+        // keepalive liveness 按 provider 事实核对，断连语义不适用于已 detach 的暂停 run）。
+        run.status === "paused"
+      ) {
         // draining 失联保持 draining（08 §3.2：draining → disconnected 由既有停止意图决定，
         // 但控制面不得借断线改写终态或解除屏障）。
         return ok(run);
@@ -171,7 +222,10 @@ export function createRunOrchestrator(
       const updated = await storage.runs.transitionStatus({
         runId: run.runId,
         runGeneration: run.runGeneration,
-        from: ["provisioning", "ready", "disconnected", "draining"],
+        // paused 含在内（2026-10-09 生命周期 v2）：暂停预算耗尽 → provider 保留期尽 →
+        // keepalive liveness 确认实例不存在 → expired（paused→expired 边）。paused→stopped
+        // 不在迁移表里：canTransitionRun 会先拒绝（停止推进通路必须先 paused→draining）。
+        from: ["provisioning", "ready", "paused", "disconnected", "draining"],
         to: input.to,
         endReason: input.endReason,
         ...(input.dataAtRisk !== undefined ? { dataAtRisk: input.dataAtRisk } : {}),
@@ -193,6 +247,8 @@ export function createRunOrchestrator(
           termination: input.termination,
         });
       }
+      // 终态扫尾：残留 deliverable 输入确定性收口（08 §8.1、审计 D4-3）。
+      await settleInputsOfEndedRun(run.taskId, run.runId);
       return ok(updated);
     },
 
@@ -227,6 +283,9 @@ export function createRunOrchestrator(
           now: clock.now(),
         });
       }
+      // 终态扫尾：创建失败/停止的 provisioning run 同样收口残留输入（08 §8.1 首命令
+      // 取消/拒绝清理、审计 D4-3）。
+      await settleInputsOfEndedRun(run.taskId, run.runId);
       return ok(updated);
     },
   };

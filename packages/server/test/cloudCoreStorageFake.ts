@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- 存储端口 fake 的 Task/Run repository 与整体装配刻意集中一处，拆分会割裂 fake 的事务语义对齐（同目录其余 fake 已按能力分文件）。 */
 /**
  * 存储端口 fake：Project/Task/Run repository 与整体装配（输入/投影/凭据/写路径见同目录其余 fake 文件）。
  * 语义对齐端口 JSDoc：唯一约束、CAS（revision/generation）、事务内 count+reserve（08 §6）。
@@ -173,11 +174,9 @@ export function createFakeStorage(
       const current = tasksById.get(request.taskId);
       if (!current) return null;
       if (!request.from.includes(current.status)) return null;
-      // 与真实 repo 同一语义（repositories/taskRepo.ts `tasks.transitionStatus` 的
-      // `WHERE ... AND revision < ?`，见 ports/taskPort.ts 的端口契约）：`request.revision`
-      // 是**新的 revision**，必须严格大于当前值；相等/回退一律 stale 返回 null，成功时
-      // revision 直接取 `request.revision`（允许跳号）。fake 旧语义（相等即成功且自动 +1）
-      // 与真实 SQLite 相反，曾让 P0 恒 stale 的缺陷在全绿下漏网（2026-10-07 review）。
+      // 与真实 repo 同语义（端口契约）：`revision` 是**新的 revision**（必须 > 当前值，
+      // 允许跳号），不是 CAS 期望值；相等/回退一律 stale。旧 fake 语义曾让 P0 恒 stale
+      // 缺陷在全绿下漏网（2026-10-07 review）。
       if (request.revision <= current.revision) return null;
       const updated: CloudTaskRecord = {
         ...current,
@@ -232,6 +231,12 @@ export function createFakeStorage(
       tasksById.set(updated.taskId, updated);
       return updated;
     },
+    // 验收扫尾（N-P3）：complete_requested=1 且仍 active 的 Task，与真实 repo 同口径。
+    async listCompleteRequested() {
+      return [...tasksById.values()]
+        .filter((item) => item.completeRequested === true && item.status === "active")
+        .sort((left, right) => left.createdAt - right.createdAt);
+    },
   };
 
   const runsRepo: RunRepo = {
@@ -239,9 +244,14 @@ export function createFakeStorage(
       return runsById.get(runId) ?? null;
     },
     async activeOfTask(taskId) {
+      // 与真实 repo 同语义（按非终态过滤，08 §4.2）：终态 run 不再是有效写 run。
       return (
         [...runsById.values()]
           .filter((item) => item.taskId === taskId)
+          .filter(
+            (item) =>
+              item.status !== "stopped" && item.status !== "expired" && item.status !== "failed",
+          )
           .sort((left, right) => right.runGeneration - left.runGeneration)[0] ?? null
       );
     },
@@ -360,8 +370,13 @@ export function createFakeStorage(
       return true;
     },
     async releaseQuota(request) {
-      // 配额释放只记录事实（测试断言用）：端口语义是「provider 确认后才释放」（01 §4.3）。
+      // 只记录释放事实（01 §4.3「provider 确认后才释放」）；同时写投影 quotaReleasedAt
+      //（与真实 repo 同语义，D4-12 reopen 前置据此判定「终止已确认」）。
       quotaReleases.push(request.runId);
+      const run = runsById.get(request.runId);
+      if (run) {
+        runsById.set(run.runId, { ...run, quotaReleasedAt: run.quotaReleasedAt ?? request.now });
+      }
     },
     async setRunRuntimeSessionId(request) {
       const run = runsById.get(request.runId);

@@ -39,6 +39,14 @@ export interface CloudGitGrantService {
    */
   issueForRun(request: { runId: string; purpose: GitGrantPurpose }): Promise<GitGrantIssueResult>;
   /**
+   * 保存通路的唯一 grant 签发点（01 §7.2 签发时机修订 2026-10-09）：stop/drain 与
+   * **周期保存**都在发 `checkpoint.request` 之前调用——push（保存写）+ fetch（push 后
+   * ls-remote 远端 SHA 对账读）成组签发。失败只记录不抛出：授权不成立/仓库未绑定时
+   * 兑换侧会如实用 checkpoint.result=failed + dataAtRisk 收口（08 §8.1/§8.2），
+   * 不在签发点补兜底分支。
+   */
+  issueSaveGrants(request: { runId: string; traceId?: string }): Promise<void>;
+  /**
    * 执行节点兑换：入口 HTTP 层调用，内部走**同一个 broker 实例**。
    * `proof` 可选：grant 记录绑定 `proofHash` 时必填（broker 做恒定时间比较），否则忽略。
    */
@@ -63,67 +71,90 @@ export function isRecoverableGitGrantFailure(code: CloudErrorCode): boolean {
 export function createCloudGitGrantService(deps: CloudCoreDeps): CloudGitGrantService {
   const { storage, gitGrantStore, gitGrantBroker, clock } = deps;
 
-  return {
-    async issueForRun(request) {
-      if (!gitGrantStore || !gitGrantBroker) {
-        // 未接线：fail-closed，且不因请求而补签（01 §7.2 的兑换侧同样默认拒绝）。
-        return { ok: false, code: "not_configured", reason: "git-grant-not-configured" };
-      }
-      const run = await storage.runs.get(request.runId);
-      if (!run) return { ok: false, code: "not_found", reason: "run-not-found" };
-      const task = await storage.tasks.get(run.taskId);
-      if (!task) return { ok: false, code: "not_found", reason: "task-not-found" };
-      const project = await storage.projects.get(task.projectId);
-      if (!project?.repositoryId || !project.installationId) {
-        // 仓库授权事实缺失：部署/授权未就绪 → 不可自愈（沙箱拿不到 token 也 clone 不了）。
-        return { ok: false, code: "not_configured", reason: "repository-not-bound" };
-      }
-      const authorization = authorizeGitGrant({ run, task, purpose: request.purpose });
-      if (!authorization.ok) {
-        return { ok: false, code: authorization.code, reason: authorization.reason };
-      }
+  async function issueForRun(
+    request: Parameters<CloudGitGrantService["issueForRun"]>[0],
+  ): Promise<GitGrantIssueResult> {
+    if (!gitGrantStore || !gitGrantBroker) {
+      // 未接线：fail-closed，且不因请求而补签（01 §7.2 的兑换侧同样默认拒绝）。
+      return { ok: false, code: "not_configured", reason: "git-grant-not-configured" };
+    }
+    const run = await storage.runs.get(request.runId);
+    if (!run) return { ok: false, code: "not_found", reason: "run-not-found" };
+    const task = await storage.tasks.get(run.taskId);
+    if (!task) return { ok: false, code: "not_found", reason: "task-not-found" };
+    const project = await storage.projects.get(task.projectId);
+    if (!project?.repositoryId || !project.installationId) {
+      // 仓库授权事实缺失：部署/授权未就绪 → 不可自愈（沙箱拿不到 token 也 clone 不了）。
+      return { ok: false, code: "not_configured", reason: "repository-not-bound" };
+    }
+    const authorization = authorizeGitGrant({ run, task, purpose: request.purpose });
+    if (!authorization.ok) {
+      return { ok: false, code: authorization.code, reason: authorization.reason };
+    }
 
-      const now = clock.now();
-      const existing = await gitGrantStore.findCurrentForRun({
-        runId: run.runId,
-        purpose: request.purpose,
-        now,
-      });
-      if (existing && existing.status === "issued" && existing.expiresAt > now) {
-        // 幂等：同一 (runId, purpose) 已有有效 grant 时复用，不重复签发（01 §7.2）。
-        return { ok: true, grantId: existing.grantId, expiresAt: existing.expiresAt };
-      }
+    const now = clock.now();
+    const existing = await gitGrantStore.findCurrentForRun({
+      runId: run.runId,
+      purpose: request.purpose,
+      now,
+    });
+    if (existing && existing.status === "issued" && existing.expiresAt > now) {
+      // 幂等：同一 (runId, purpose) 已有有效 grant 时复用，不重复签发（01 §7.2）。
+      return { ok: true, grantId: existing.grantId, expiresAt: existing.expiresAt };
+    }
 
-      let issued: { grantId: string; expiresAt: number };
-      try {
-        issued = await gitGrantBroker.issue({
-          taskId: task.taskId,
-          runId: run.runId,
-          runGeneration: run.runGeneration,
-          repositoryId: project.repositoryId,
-          installationId: project.installationId,
-          purpose: request.purpose,
-        });
-      } catch (error) {
-        // mint 失败（未配置/权限/外部不可用）：归一为签发失败交给调用方分流，不让异常穿透。
-        const rawCode = (error as { code?: unknown } | null)?.code;
-        const code: CloudErrorCode =
-          typeof rawCode === "string" ? (rawCode as CloudErrorCode) : "network_unknown";
-        cloudCoreLogger.warn(undefined, "cloud git grant issuance failed", {
-          runId: run.runId,
-          purpose: request.purpose,
-          code,
-        });
-        return { ok: false, code, reason: "grant-issue-failed" };
-      }
-      cloudCoreLogger.info(undefined, "cloud git grant issued", {
+    let issued: { grantId: string; expiresAt: number };
+    try {
+      issued = await gitGrantBroker.issue({
         taskId: task.taskId,
         runId: run.runId,
         runGeneration: run.runGeneration,
+        repositoryId: project.repositoryId,
+        installationId: project.installationId,
         purpose: request.purpose,
-        expiresAt: issued.expiresAt,
       });
-      return { ok: true, grantId: issued.grantId, expiresAt: issued.expiresAt };
+    } catch (error) {
+      // mint 失败（未配置/权限/外部不可用）：归一为签发失败交给调用方分流，不让异常穿透。
+      const rawCode = (error as { code?: unknown } | null)?.code;
+      const code: CloudErrorCode =
+        typeof rawCode === "string" ? (rawCode as CloudErrorCode) : "network_unknown";
+      cloudCoreLogger.warn(undefined, "cloud git grant issuance failed", {
+        runId: run.runId,
+        purpose: request.purpose,
+        code,
+      });
+      return { ok: false, code, reason: "grant-issue-failed" };
+    }
+    cloudCoreLogger.info(undefined, "cloud git grant issued", {
+      taskId: task.taskId,
+      runId: run.runId,
+      runGeneration: run.runGeneration,
+      purpose: request.purpose,
+      expiresAt: issued.expiresAt,
+    });
+    return { ok: true, grantId: issued.grantId, expiresAt: issued.expiresAt };
+  }
+
+  return {
+    issueForRun,
+
+    async issueSaveGrants(request) {
+      // 保存凭据目的（09 §3 矩阵）：push = 保存写（contents:write）；fetch = push 后
+      // `ls-remote` 远端 SHA 对账读（`pushAndVerify` 用 `withGrant("fetch")`，不从 push
+      // token 借权限）。缺 fetch 会让保存失败在「远端校验」这一步——终验 2026-10-09：
+      // drain 路径 fetch 被 stopRequested 拒签，push 落地也拿不到保存事实。
+      for (const purpose of ["push", "fetch"] as const) {
+        const grant = await issueForRun({ runId: request.runId, purpose });
+        if (!grant.ok) {
+          cloudCoreLogger.warn(undefined, "cloud git grant issuance failed", {
+            runId: request.runId,
+            purpose,
+            code: grant.code,
+            reason: grant.reason,
+            recoverable: isRecoverableGitGrantFailure(grant.code),
+          });
+        }
+      }
     },
 
     async redeem(request) {

@@ -104,6 +104,8 @@ export function createInputDispatcher(
     }
     if (run.status !== "ready") {
       // ready 门控（02 §5.3 第 6 条）：控制面 CAS 写 ready 后才允许发 createSession/首个 prompt。
+      // paused（2026-10-09 生命周期 v2）落在本分支：reason=run-paused，输入保持 accepted，
+      // 由控制面自驱 resume（lifecycle pauseResume 拍）→ ready 后本门自然放行（03 §6 修订）。
       return { commandId, result: "wait", reason: `run-${run.status}` };
     }
 

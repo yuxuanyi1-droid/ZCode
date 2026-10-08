@@ -18,6 +18,7 @@ import type { IdGeneratorPort } from "../src/cloud/app/ports/idGeneratorPort.js"
 import type { SandboxDriverPort } from "../src/cloud/app/ports/sandboxDriverPort.js";
 import { assembleCloudControlPlane } from "../src/cloud/app/assembleCloudControlPlane.js";
 import type { CloudCoreConfig } from "../src/cloud/app/config.js";
+import type { BrowserWatchPort } from "../src/cloud/app/ports/browserWatchPort.js";
 import { sessionFromAddress } from "../src/cloud/app/attachments/registry.js";
 import {
   createFakeArtifacts,
@@ -76,17 +77,21 @@ export interface FakeOutbox extends OperationOutboxPort {
   readonly records: Map<string, ExternalOperationRecord>;
   leaseTokens: Map<string, string>;
   failures: Set<string>;
+  /** renewLease 成功续期的 operationId 序列（「create 60s+ 不被二次租约」断言用）。 */
+  readonly renewals: string[];
 }
 
 export function createFakeOutbox(): FakeOutbox {
   const records = new Map<string, ExternalOperationRecord>();
   const leaseTokens = new Map<string, string>();
   const failures = new Set<string>();
+  const renewals: string[] = [];
   let leaseCounter = 0;
   return {
     records,
     leaseTokens,
     failures,
+    renewals,
     async enqueue(request) {
       const existing = [...records.values()].find(
         (item) => item.idempotencyKey === request.idempotencyKey,
@@ -114,12 +119,39 @@ export function createFakeOutbox(): FakeOutbox {
       return records.get(operationId) ?? null;
     },
     async leaseNext(request) {
-      const candidate = [...records.values()].find(
-        (item) =>
-          request.kinds.includes(item.kind) &&
-          item.state === "pending" &&
-          (item.leaseExpiresAt === undefined || item.leaseExpiresAt <= request.now),
-      );
+      // 与 SQLite 实现同一领取面（C-3/C-4 对齐）：pending，或租约已到期的 leased/ambiguous。
+      // 之前只领 pending 的简化会让「续期防二次租约」无法被测试暴露。
+      const claimable = (item: ExternalOperationRecord): boolean => {
+        if (!request.kinds.includes(item.kind)) return false;
+        const leaseUsable =
+          item.state === "pending" ||
+          ((item.state === "leased" || item.state === "ambiguous") &&
+            item.leaseExpiresAt !== undefined &&
+            item.leaseExpiresAt <= request.now);
+        if (!leaseUsable) return false;
+        if (
+          request.operationIds !== undefined &&
+          (request.operationIds.length === 0 || !request.operationIds.includes(item.operationId))
+        ) {
+          return false;
+        }
+        if (
+          request.excludeOperationIds !== undefined &&
+          request.excludeOperationIds.includes(item.operationId)
+        ) {
+          return false;
+        }
+        return true;
+      };
+      const candidate = [...records.values()]
+        .filter(claimable)
+        .sort((left, right) =>
+          left.createdAt === right.createdAt
+            ? left.operationId < right.operationId
+              ? -1
+              : 1
+            : left.createdAt - right.createdAt,
+        )[0];
       if (!candidate) return null;
       leaseCounter += 1;
       const token = `lease-${leaseCounter}`;
@@ -134,6 +166,17 @@ export function createFakeOutbox(): FakeOutbox {
         leaseExpiresAt: candidate.leaseExpiresAt,
       };
       return leased;
+    },
+    async renewLease(request) {
+      // 持有人 token CAS 续租：令牌不匹配/已结算不可续（与 SQLite 实现同一语义）。
+      const record = records.get(request.operationId);
+      if (!record) return false;
+      if (leaseTokens.get(request.operationId) !== request.leaseToken) return false;
+      if (record.state !== "leased") return false;
+      record.leaseExpiresAt = request.now + Math.max(1, request.leaseMs);
+      record.updatedAt = request.now;
+      renewals.push(request.operationId);
+      return true;
     },
     async settle(request) {
       const record = records.get(request.operationId);
@@ -185,6 +228,29 @@ export interface TestPlane {
   templates: ReturnType<typeof createFakeTemplateResolver>;
   gitGrantStore: ReturnType<typeof createFakeGitGrantStore>;
   gitGrantBrokerDeps: ReturnType<typeof createFakeGitGrantBrokerDeps>;
+  /** 浏览器观看事实 fake（生产实现是 bridge 通道的多路复用器）。 */
+  browserWatch: FakeBrowserWatch;
+}
+
+/** 浏览器观看连接 fake：`open/close` 模拟任务通道流的建立与关闭（关即清）。 */
+export interface FakeBrowserWatch extends BrowserWatchPort {
+  readonly watchers: Set<string>;
+  open(runId: string): void;
+  close(runId: string): void;
+}
+
+export function createFakeBrowserWatch(): FakeBrowserWatch {
+  const watchers = new Set<string>();
+  return {
+    watchers,
+    open: (runId) => {
+      watchers.add(runId);
+    },
+    close: (runId) => {
+      watchers.delete(runId);
+    },
+    hasWatcher: (runId) => watchers.has(runId),
+  };
 }
 
 /** 组装被测的 app 服务图：只替换端口 fake（W1 §6 app 集成约定）。 */
@@ -213,12 +279,14 @@ export function buildTestPlane(
   const gitGrantStore = gitGrant.store;
   const gitGrantBroker = gitGrant.broker;
   const gitGrantBrokerDeps = gitGrant.deps;
+  const browserWatch = createFakeBrowserWatch();
   const plane = assembleCloudControlPlane({
     storage,
     operations: outbox,
     github,
     drivers: createFakeDriverRegistry(options.driver === undefined ? driver : options.driver),
     attachments: attachmentPort,
+    browserWatch,
     runtimeCommands,
     clock,
     ids,
@@ -247,6 +315,7 @@ export function buildTestPlane(
     templates,
     gitGrantStore,
     gitGrantBrokerDeps,
+    browserWatch,
   };
 }
 

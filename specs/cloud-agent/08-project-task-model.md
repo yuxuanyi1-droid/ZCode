@@ -77,12 +77,18 @@ stateDiagram-v2
     disconnected --> expired: provider确认终止
     draining --> expired: provider硬期限强制终止
     ready --> failed: runtime不可恢复且实例处置完成
+    ready --> paused: 分级能力pause（空闲阈值/暂停预算到期，provider确认暂停）
+    paused --> ready: 控制面自驱resume（同run同generation，沙箱回连验证）
+    paused --> draining: 暂停中停止意图（屏障后直接terminate）
+    paused --> expired: 暂停预算耗尽且provider保留期尽（liveness确认）
     stopped --> [*]
     expired --> [*]
     failed --> [*]
 ```
 
 `reconciling`是pending operation/健康属性，不能靠任意timeout把不确定结果直接归failed。终态run不可复活。旧bridge迟到必须拒绝；重新打开创建runId和更高runGeneration，不能修改旧run继续使用。
+
+**修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）**：状态机增加 `paused` 节点与四条边（上图已并入）：`ready → paused`（仅 `pauseResume ≠ none` 的 provider；顺序冻结：checkpoint（如需）→ provider paused 确认 → detach registry → status=paused；watchdog 显式跳过 paused）；`paused → ready`（控制面自驱 resume，含用户发消息触发；同 run 同 generation，不换代、不重开）；`paused → draining`（暂停中收到停止意图：屏障后直接 terminate，暂停态无运行时写入可收口）；`paused → expired`（终局：暂停预算耗尽 → 停接受 resume（`budget_exhausted`）→ provider 保留期尽 → keepalive liveness 确认实例不存在 → expired，释放占槽）。`paused` 不是终态、照常占槽（§6）；能力位 `none` 的 provider 不进入 paused，生命周期行为与现状完全一致。
 
 ### 3.3 Execution / 保存 / 产物投影
 
@@ -129,6 +135,7 @@ bridge失联时旧Agent可能继续写文件，已发Git token也可能继续pus
 - start携带draft revision；新start在active上冲突，不降为append。append携带当前generation。原commandId合法重放先返回原结果，不因revision增长失败；schema/hash以03为准。
 - 明确未投递的准备失败将原input置rejected并记录原因；已发但结果未知为uncertain。同Task新Run不自动承接旧admitted/uncertain输入。
 - 显式重试/重开持久新commandId/输入、Run/配额/create意图并关联原失败记录；保留原失败，不伪装旧命令执行成功。无有效Run时普通append不能自动reopen。
+  - **修订（2026-10-08 用户产品决议）**：「普通append不能自动reopen」保留为**服务端契约**（append 预检对无有效 run 返回 `not_ready/no-active-run`，不隐式建 run）；客户端例外是**用户主动发送**：run 终态后用户在 composer 显式发送的新消息由客户端路由为 reopen 命令（消息即新工作要求，恢复选择按持久事实确定，见§9），不再发出注定 409 的 append。草稿恢复、unknown attempt 对账、投递重试等自动路径仍不得触发重开。
 - 输入202、runtime ACK、执行结束、保存和用户验收分别投影。所有首发/后续输入经过同一durable application port，CLI唯一管理busy/running队列。
 
 Task 的草稿配置、Run recipe、firstInputCommandId、stopRequested及 completeRequested 的字段/版本需要实施迁移；这些是新增目标，不因为现骨架表存在就假定具备。
@@ -137,7 +144,7 @@ Task 的草稿配置、Run recipe、firstInputCommandId、stopRequested及 compl
 
 在provider调用前持久run、create operation和配额reservation；验证repo授权、provider capability、ref安全、runtime/bridge版本与资源配置。provider操作结果超时进入对账，不直接重试create。
 
-建议初始全局并发上限3，可配置；这只是规划默认值，不是已有行为。占额包括provisioning/ready/disconnected/draining。并发检查和预留必须事务化，不能先count后create。
+建议初始全局并发上限3，可配置；这只是规划默认值，不是已有行为。占额包括provisioning/ready/paused/disconnected/draining（paused 为 2026-10-09 生命周期 v2 增补：暂停保留期占槽，quota_released_at 保持 NULL；并发上限 3 时「3 个 paused 占槽 → 第 4 个任务 409」为预期行为）。并发检查和预留必须事务化，不能先count后create。
 
 bridge ready必须意味着：身份/generation有效、远端RPC握手完成、所需服务可用、选定模型/配置就绪、workspace真实路径校验、runtime服务能处理命令；实际admission/拒绝由独立CommandAck决定。若需warm-up，应通过明确readiness契约完成，不能订阅任意task list掩盖初始化时序。
 
@@ -147,21 +154,29 @@ bridge ready必须意味着：身份/generation有效、远端RPC握手完成、
 
 默认建议（待真实provider能力测量）：
 
-| 策略            | 默认候选      | 规则                                                                  |
-| --------------- | ------------- | --------------------------------------------------------------------- |
-| 闲置归档阈值    | 15分钟        | execution idle、无pending input/interaction、无checkpoint、无业务写入 |
-| 自动续期        | 开            | 业务running/写操作/pending交互保护需要时续期，合并provider请求        |
-| 被动观看续期    | 关            | attach、heartbeat、侧栏轮询本身不算业务活动                           |
-| 硬run时长       | 4小时候选     | 取部署预算与provider上限较小值；不承诺三家都支持4小时                 |
-| 到期前drain预算 | 至少5分钟候选 | 结合checkpoint测量与provider剩余租期配置                              |
-| 周期保存        | 5分钟候选     | 优先轮次安全点，dirty且能获得写屏障才执行                             |
-| 并发上限        | 3             | 预留所有未终态资源，不只running                                       |
+| 策略            | 默认候选       | 规则                                                                                                                                    |
+| --------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| 闲置归档阈值    | 15分钟         | execution idle、无pending input/interaction、无checkpoint、无业务写入；2026-10-09 起仅适用于维持 idle drain 的 provider（见下修订）     |
+| 空闲 pause 阈值 | 10分钟（可配） | 仅 memory 级 provider：闲置且无客户端连接 → pause（替换 idle drain）；有客户端连接先广播「即将暂停」并顺延（2026-10-09 生命周期 v2 增） |
+| 自动续期        | 开             | 业务running/写操作/pending交互保护需要时续期，合并provider请求                                                                          |
+| 被动观看续期    | 关             | attach、heartbeat、侧栏轮询本身不算业务活动                                                                                             |
+| 硬run时长       | 4小时候选      | 取部署预算与provider上限较小值；不承诺三家都支持4小时                                                                                   |
+| 到期前drain预算 | 至少5分钟候选  | 结合checkpoint测量与provider剩余租期配置                                                                                                |
+| 周期保存        | 5分钟候选      | 优先轮次安全点，dirty且能获得写屏障才执行                                                                                               |
+| 并发上限        | 3              | 预留所有未终态资源，不只running                                                                                                         |
 
 heartbeat只证明连接可见，不证明业务活跃。Agent进程存在不等于running；守护进程常驻时不应无限续期。runtime awaiting-input保留明确审批窗口，超过保护时间提示用户并根据保存策略drain，不伪装idle。
 
 provider续期失败或到期时间未知时保留上一次已确认expiresAt；无法读取真实期限的provider持久保守deadlineEstimate/deadlineConfidence，UI标估计并提前drain。不支持extend返回能力错误，不伪造续期。续期结果晚到要CAS当前run，不能更新新的run。活动仅更新lastBusinessActivityAt，不逐帧调用setTimeout。
 
-硬期限优先于“保存失败不停机”的愿望。到达期限前停止接收新工作、请求runtime进入安全点并保存；若provider强制终止，记录真实丢失范围和最后确认remote SHA。
+硬期限优先于“保存失败不停机”的愿望。到达期限前停止接收新工作、请求runtime进入安全点并保存；到期强制动作按能力分叉（2026-10-09 生命周期 v2）：memory 级 = pause（hardDeadline 转为「暂停预算」，到达即强制 pause 而非 terminate，provider 不再杀沙箱），其余 provider = terminate（provider强制终止时记录真实丢失范围和最后确认remote SHA）。显式用户 stop/force-stop 仍 terminate（preserve vs destroy 意图分离：空闲/预算到期 = preserve；用户停止 = destroy）。
+
+**修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）**：闲置规则改**按能力单轨**——`pauseResume=memory` 的 provider：满足闲置条件（execution idle、无 pending input/interaction、无 checkpoint、无业务写入）且无客户端连接、持续达到空闲 pause 阈值（默认 10 分钟，可配）→ **pause（替换原 idle drain）**；其余 provider 维持 idle drain 不变。有客户端连接时不直接暂停：先广播「即将暂停」并顺延。暂停前若存在未保存变更，先走既有 checkpoint 保存（同一保存通道）再暂停——boot 失败路径绝不成为恢复点。硬期限到期强制动作的能力分叉见上段；pause 保留期上限需实测核实（01 §4.3），暂停预算到期由 keepalive liveness 收口为 expired。
+
+**修订（2026-10-09，终验缺陷 B：业务活动事实源收窄与保存失败退避）**：
+- 业务活动事实源收窄：投影 ingest 只在批次**实际新增**记录（按 run 计 appendedRunIds 非空）时推进 lastBusinessActivityAt；执行节点 WAL 重投/补发（同键去重、0 新增）是恢复面流量，不是业务活动——重投循环不得制造「running」假象、不得阻塞空闲 pause。checkpoint/grant 尝试（兑换请求、checkpoint.request/result、op 租约与结算）都不是业务活动。
+- 周期保存失败退避：连续失败按 30s→2min→5min 阶梯放大重试间隔（且不低于周期档），封顶 5 分钟；保存成功即清零。结果帧缺失（op attempt 封顶结算 failed）同样计入连续失败，不无限重建 op。
+- checkpoint 在途占用有界：`saving/pending` 记录只在窗口内（2 分钟）算在途；超窗无更新的记录是僵尸事实，不再阻塞周期保存与空闲 pause，数据风险由 run.dataAtRisk 如实承载。「上次周期保存已 failed」不永久阻塞空闲 pause——v1 空闲 pause 无前置 checkpoint（见 QUIESCE_BOUNDARY），failed 的风险已在 run.dataAtRisk 标注，按事实暂停。
 
 ## 8. 统一 checkpoint / stop 通路
 
@@ -193,6 +208,10 @@ create未发出时取消意图并确认无资源；已在途时保留资源/配�
 
 正常stop操作具有依赖：stop intent → quiesce → checkpoint及远端SHA确认 → terminate →物理终止确认/配额释放。worker不能先领取terminate绕过保存前置。无运行时写入且已核验无需保存、用户明确force-stop或provider硬期限可采用对应分支，并记录证据和风险。保存失败允许剩余预算内重试；只有用户明确选择继续并CAS撤销停止意图才恢复输入，不能checkpoint失败就自动解除屏障。
 
+**修订（2026-10-09，终验缺陷 B：结果帧必达与保存通路凭据）**：
+- 沙箱对 `checkpoint.request` 的处理无论成败**必须回 `checkpoint.result`**（异常按 `failed` + `checkpoint_failed` 如实上报，02 §4）。不回帧时 op 只能靠 attempt 封顶结算 failed，且周期保存 sweep 因「无 checkpoint 记录」每拍重建新 op（终验实证：30 分钟 90 个 failed op、309 次 attempt 空转，并拖慢 stop drain 80-90s）。
+- 周期保存与 stop/drain 同属保存通路：发 `checkpoint.request` 前由唯一签发点成组签发 push+fetch grant（01 §7.2 签发时机修订）；draining 下的 fetch 是 push 后远端 SHA 对账的规格内只读动作。
+
 首命令取消/拒绝阻断该Run继续启动或执行并清理；已经创建的会话仍记录真实结果，后续未投递输入不得被提拔；生命周期对确定未执行输入收口，unknown保留对账。环境清理未核验不释放资源槽。
 
 ### 8.2 保存与终止事实
@@ -222,6 +241,10 @@ force stop是单独显式动作，返回预期丢失信息，需要用户选择�
 ## 9. 重开、完成与历史
 
 重开前：核验无有效写run、旧instance终止/凭据已处置、授权仍有效、配额可预留；有checkpoint时必须确认任务分支存在。新Run固定resumeSha=最后确认checkpoint SHA，并查询taskBranch HEAD是否一致；首次Run从首次接纳时冻结的baseSha派生taskBranch。没有checkpoint的任务只能显式选择从冻结baseSha重新开始；首次准备失败且已证明从未发布任务分支时允许重新创建该分支。分支发布结果未知或已发布分支消失/变化时先对账，不把它当作从未创建；不展示“已恢复全部工作”。
+
+**修订（2026-10-08 用户产品决议）：「显式选择」指 reopen 请求必须显式声明恢复方式，不要求用户在二选一界面手工挑选。run 终态后用户主动发送的新消息触发自动重开时，客户端按持久事实确定声明值——有确认 checkpoint（`state=saved`）→ checkpoint，否则 restart-from-base——并向用户说明依据；服务端仍按本节前置条件独立核验，UI 侧自动选择不绕过任何核验。自动重开只由用户主动发送触发；重开仍是独立命令（不复用 append、不复活旧 run）。**
+
+**修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）**：重开前置硬核验增补——旧 run `quota_released_at` 非空（provider 终止已确认、计费槽已释放）才可重开；`quota_released_at` 为 NULL 时拒绝重开（含自动重开路径，返回 `recovery_required`），不得以超时或推断代替终止确认。`paused`（未终态、占槽）被既有「无有效写 run」前置拒绝（见 03 §6 paused 动作表）。
 
 若远端branch头与lastCheckpointSha不一致，检查是本任务新push、用户编辑还是未知写入。保留远端事实，不force覆盖；需要merge/rebase/显式重新基线的工作作为新输入。外部分支删除明确失败，不能默认clone main当成恢复。
 

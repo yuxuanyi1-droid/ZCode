@@ -24,26 +24,38 @@ export const TERMINAL_RUN_STATUSES = [
   "failed",
 ] as const satisfies readonly CloudRunStatus[];
 
-/** 未终态 run 仍占用资源槽（08 §6：provisioning/ready/disconnected/draining 都算）。 */
+/**
+ * 未终态 run 仍占用资源槽（08 §6：provisioning/ready/paused/disconnected/draining 都算）。
+ * `paused` 为 2026-10-09 生命周期 v2 增补：暂停保留期占槽（quota_released_at 保持 NULL），
+ * 并发上限 3 时「3 个 paused 占槽 → 第 4 个任务 409」为预期行为。
+ */
 export const NON_TERMINAL_RUN_STATUSES = [
   "provisioning",
   "ready",
+  "paused",
   "disconnected",
   "draining",
 ] as const satisfies readonly CloudRunStatus[];
 
 /**
- * Run 状态迁移表（08 §3.2 状态图逐条对齐）。
+ * Run 状态迁移表（08 §3.2 状态图逐条对齐，含 2026-10-09 修订的四条 paused 边）。
  *
- * 注意两处容易写错的地方：
+ * 注意几处容易写错的地方：
  * - `provisioning` 没有到 `draining` 的边：08 §8.1 明确「provisioning 保持供给事实，
  *   停止意图优先」，创建途中的停止靠 stopRequested 阻断启动/ready/投递，不改 run 状态。
  * - `disconnected` 不会自动变 `expired`/`failed`：网络断连只改变 connectivity
  *   （02 §2 不变量 4），终态必须有 provider 终止确认、受控停止结果或执行节点退出事实。
+ * - `paused` 的四条边（08 §3.2 修订）：ready → paused（仅分级能力 provider，provider
+ *   确认暂停后才写）；paused → ready（控制面自驱 resume，同 run 同 generation）；
+ *   paused → draining（暂停中停止意图：屏障后直接 terminate）；paused → expired
+ *   （暂停预算耗尽 → provider 保留期尽 → keepalive liveness 确认后收口）。
+ *   **没有 paused → stopped**：暂停态收口 stopped 必须先过 draining（停止推进通路
+ *   负责 paused→draining 的 CAS），能力位 none 的 provider 根本不进入 paused。
  */
 export const RUN_STATUS_TRANSITIONS: Readonly<Record<CloudRunStatus, readonly CloudRunStatus[]>> = {
   provisioning: ["ready", "failed", "stopped", "expired"],
-  ready: ["disconnected", "draining", "expired", "failed"],
+  ready: ["paused", "disconnected", "draining", "expired", "failed"],
+  paused: ["ready", "draining", "expired"],
   disconnected: ["ready", "draining", "expired", "failed"],
   draining: ["ready", "disconnected", "stopped", "expired", "failed"],
   stopped: [],
@@ -132,6 +144,32 @@ export const FORCE_STOP_END_REASON = "force-stop" as const;
  */
 export function stopIntentBlocksProgress(run: CloudRunRecord): boolean {
   return run.stopRequested === true;
+}
+
+/**
+ * pause 准入（08 §3.2 修订 2026-10-09）：仅 `pauseResume ≠ none` 的分级能力 provider、
+ * ready 且无停止意图的 run 可进入 paused。能力位 none 的 provider 永不进入 paused
+ * （fail-closed，A-7 门禁在 driver describeCapabilities 层已把未实测能力收敛为 none）。
+ */
+export function mayPauseRun(input: {
+  run: CloudRunRecord;
+  pauseResume: "memory" | "disk" | "none";
+}): boolean {
+  return (
+    input.run.status === "ready" &&
+    !stopIntentBlocksProgress(input.run) &&
+    input.pauseResume !== "none"
+  );
+}
+
+/**
+ * resume 预算判定（03 §6 修订 2026-10-09）：暂停预算（run 的硬期限，08 §7 修订：
+ * hardDeadline 在 memory 级 pause 语义下转为「暂停预算」）耗尽后拒绝自驱 resume，
+ * 归一错误 `budget_exhausted`；输入保持 accepted（202 已持久接收，不被追溯拒绝），
+ * 直至 provider 保留期尽、keepalive liveness 确认实例不存在 → expired 并释放占槽。
+ */
+export function resumeBudgetExhausted(input: { run: CloudRunRecord; now: number }): boolean {
+  return input.run.hardDeadlineAt !== undefined && input.now >= input.run.hardDeadlineAt;
 }
 
 /**

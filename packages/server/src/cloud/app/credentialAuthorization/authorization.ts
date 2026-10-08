@@ -69,7 +69,13 @@ export function authorizeGitGrant(input: {
   }
   // clone/fetch（只读凭据）：bootstrap 首 clone 发生在 ready 之前，因此允许 provisioning；
   // 但 stop 受理后不再签发（08 §8.1）。
-  if (input.run.stopRequested) return fail("not_ready", "stop-requested");
+  // 例外（01 §7.2 签发时机修订 2026-10-09）：draining 的 fetch 是保存通路 push 后的
+  // `ls-remote` 远端 SHA 对账读（01 §8），与「draining 的保存写（push）」同属 §8.1
+  // 依赖顺序内的规格内动作。修复依据（终验 2026-10-09）：beginDrain 先写 stopRequested
+  // 再签发，fetch 一律被拒 → push 落地也无法核验远端 SHA，checkpoint.result 永远出不来。
+  if (input.run.stopRequested && !(input.purpose === "fetch" && input.run.status === "draining")) {
+    return fail("not_ready", "stop-requested");
+  }
   if (input.task.status === "archived" || input.task.status === "completed") {
     return fail("not_ready", "task-not-active");
   }

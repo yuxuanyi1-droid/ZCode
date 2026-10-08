@@ -34,6 +34,12 @@ export interface CloudLoopTickReport {
   deliveredTasks: number;
   created: number;
   stopsAdvanced: number;
+  /** 本拍由验收 sweep（N-P3）自动收口为 completed 的 Task 数。 */
+  completedTasks: number;
+  /** 本拍自驱 resume 成功（paused→ready）的 run 数（2026-10-09 生命周期 v2）。 */
+  resumedRuns: number;
+  /** 本拍空闲 pause 成功（ready→paused）的 run 数（2026-10-09 生命周期 v2 第 3 批）。 */
+  idlePausedRuns: number;
   reconciliation: Record<string, number>;
 }
 
@@ -83,7 +89,7 @@ function createTickRunner(plane: CloudControlPlane, workerId: string) {
       report.reconciliation = summarizeReconciliation(reconciliations);
       return report;
     },
-    /** 生命周期：终止结算 → create → readiness → checkpoint 结算 → stop 推进 → 保活/drain → 心跳。 */
+    /** 生命周期：终止结算 → create → readiness → checkpoint 结算 → stop 推进 → 保活/drain → 验收扫尾 → 心跳。 */
     async lifecycleTick(): Promise<CloudLoopTickReport> {
       const report = emptyReport();
       await plane.provisioning.compensation.runCompensationOnce({ workerId });
@@ -96,9 +102,23 @@ function createTickRunner(plane: CloudControlPlane, workerId: string) {
       await plane.lifecycle.checkpoints.sweepCheckpointOperations({ workerId });
       const stopReport = await plane.commands.stop.sweep();
       report.stopsAdvanced = stopReport.advanced;
+      // paused 通路（2026-10-09 生命周期 v2，03 §6 修订）：暂停中停止推进 + 自驱 resume。
+      // 放在 stop sweep 之后（stop 屏障优先于 resume）、keepalive 之前（resume 成功的
+      // run 当拍即可进入正常的租期/投递节奏；keepalive 的 paused liveness 负责保留期
+      // 终局收口）。
+      const pauseResumeReport = await plane.lifecycle.pauseResume.sweep();
+      report.resumedRuns = pauseResumeReport.resumed;
       await plane.lifecycle.keepalive.sweep();
+      // 空闲 pause 拍（D3/08 §7 修订第 3 批）：ready + 无业务活动 + 无客户端连接达到阈值
+      // → pauseRun。先于 drain.sweep：pause 成功的 run 已离开 ready，同拍不会被 idle drain
+      // 重复处理（单轨 F-3 第一道互斥；第二道是 drain.sweep 对 memory 级 provider 的守卫）。
+      const idlePauseReport = await plane.lifecycle.pauseResume.idleSweep();
+      report.idlePausedRuns = idlePauseReport.paused;
       await plane.lifecycle.drain.sweep();
       await plane.lifecycle.checkpoints.sweepPeriodicCheckpoints();
+      // 验收意图扫尾（08 §9、审计 N-P3）：drain/收口之后，complete_requested 且
+      // 无活动 run、输入已收口的 Task 在这里自动落 completed，不再依赖用户重试。
+      report.completedTasks = await plane.commands.taskLifecycle.settleCompleteRequests();
       await plane.watchdog.sweep();
       return report;
     },
@@ -219,6 +239,9 @@ export function startCloudLifecycleLoops(
         deliveredTasks: deliveryReport.deliveredTasks,
         created: lifecycleReport.created,
         stopsAdvanced: lifecycleReport.stopsAdvanced,
+        completedTasks: lifecycleReport.completedTasks,
+        resumedRuns: lifecycleReport.resumedRuns,
+        idlePausedRuns: lifecycleReport.idlePausedRuns,
         reconciliation: deliveryReport.reconciliation,
       };
     },
@@ -235,7 +258,15 @@ export function startCloudLifecycleLoops(
 }
 
 function emptyReport(): CloudLoopTickReport {
-  return { deliveredTasks: 0, created: 0, stopsAdvanced: 0, reconciliation: {} };
+  return {
+    deliveredTasks: 0,
+    created: 0,
+    stopsAdvanced: 0,
+    completedTasks: 0,
+    resumedRuns: 0,
+    idlePausedRuns: 0,
+    reconciliation: {},
+  };
 }
 
 function summarizeReconciliation(

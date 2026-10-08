@@ -6,7 +6,10 @@ import { OccupationOnboardingVisual } from "@/onboarding/OccupationOnboardingVis
 import { occupations, type OccupationValue } from "@/onboarding/occupationOptions.js";
 import { OnboardingModeSelector } from "@/onboarding/OnboardingModeSelector.js";
 import { OnboardingOccupationGrid } from "@/onboarding/OnboardingOccupationGrid.js";
-import { useOnboardingTrigger } from "@/onboarding/useOnboardingTrigger.js";
+import {
+  useOnboardingTrigger,
+  markOnboardingDismissedThisSession,
+} from "@/onboarding/useOnboardingTrigger.js";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useSettings } from "@/hooks/useSettingService.js";
 import { useOnboardingRecordService } from "@/hooks/useOnboardingRecordService.js";
@@ -80,8 +83,13 @@ export function OccupationOnboarding({
   const [error, setError] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const loadDeviceMid = useCallback(() => platform.getDeviceId(), [platform]);
-  // 云模式账号域事实（2026-10-08 巡检修订 P2）：已有任务/项目即不是 first-run。
-  const cloudAccountHasActivity = useCloudAccountHasActivity();
+  // 云模式账号域事实（2026-10-08 巡检修订 P2、2026-10-07 终验缺陷 F 修订）：已有任务/
+  // 项目即不是 first-run。缓存未命中时由 hook 主动经控制面探测（引导可见时 children
+  // 不渲染，侧栏永远没机会把缓存填上——这正是此前短路永不命中的根因）；已作答过的
+  // 用户判定无关，不发探测。
+  const cloudAccountHasActivity = useCloudAccountHasActivity({
+    enabled: settings !== null && !settings.onboardingOccupation,
+  });
   const [needsOnboarding, markOnboarded] = useOnboardingTrigger({
     onboardingRecord,
     userId,
@@ -110,6 +118,9 @@ export function OccupationOnboarding({
     setStep(0);
     setDismissed(true);
     setRequested(false);
+    // 会话级标记（2026-10-07 终验缺陷 F）：Close 的持久化写入（record/settings）失败时
+    // 至少当次会话不再弹——组件 state 会随重挂载丢失，模块级标记不会。
+    markOnboardingDismissedThisSession();
     if (onboardingRecord) {
       void onboardingRecord.dismissOnboarding(platform.getDeviceId()).catch((cause: unknown) => {
         logger.warn("[occupation-onboarding] 写入关闭决策失败", { error: String(cause) });

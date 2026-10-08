@@ -110,7 +110,7 @@ sequenceDiagram
 
 网络超时不等于失败。创建已发生但结果未保存时，用 provider metadata 的 operationId/runId 查找；无可靠查询能力时必须暴露 `reconciling` 阻止盲目重复创建。PR push 成功但回包丢失时查询远端 SHA，PR 创建成功但回包丢失时按 head/base 对账，不能直接重复副作用。
 
-配额预留、run 建立、input 保存和创建意图在同一事务中提交。预留覆盖 provisioning/ready/disconnected/draining，不能只数 running；最终释放以终止/失败核验为依据。
+配额预留、run 建立、input 保存和创建意图在同一事务中提交。预留覆盖 provisioning/ready/paused/disconnected/draining（paused 为 2026-10-09 生命周期 v2 增补：暂停保留期仍占槽，quota_released_at 保持 NULL），不能只数 running；最终释放以终止/失败核验为依据。
 
 ## 6. HTTP API（计划，统一前缀）
 
@@ -180,7 +180,13 @@ interface InputReceipt {
 }
 ```
 
-实际 wire 为 discriminated union 严格 Zod schema，限制长度、未知字段和附件总量；caller 不指定主体、workspacePath、provider secret、trusted role。start 仅 draft，携带当前已保存 draftStartConfig 的完整选择和 revision，事务验证两者一致；active 上的新 start 冲突，不忽略选择并降为 append。append 要求当前 ready Run、generation 匹配且无 stopRequested。provisioning/disconnected 首版只保留客户端下一条草稿，不接受新的 append。reopen 为独立显式命令，携带新 commandId/工作要求、Task revision 和恢复选择，按08原子预约新 Run并持久新输入；不自动迁移旧输入。
+实际 wire 为 discriminated union 严格 Zod schema，限制长度、未知字段和附件总量；caller 不指定主体、workspacePath、provider secret、trusted role。start 仅 draft，携带当前已保存 draftStartConfig 的完整选择和 revision，事务验证两者一致；active 上的新 start 冲突，不忽略选择并降为 append。append 要求当前 ready Run、generation 匹配且无 stopRequested。provisioning/disconnected 首版只保留客户端下一条草稿，不接受新的 append。reopen 为独立命令，携带新 commandId/工作要求、Task revision 和恢复选择，按08原子预约新 Run并持久新输入；不自动迁移旧输入。
+
+**修订（2026-10-08 用户产品决议）：run 终态（failed/stopped/expired）后，用户在客户端显式发送的新消息触发自动重开——客户端把该消息作为 reopen 的工作要求、按持久事实（确认 checkpoint）选择恢复方式，经同一 reopen 命令端点提交，服务端仍按同一准入预检独立校验（无有效写 run、基线/分支核验、配额）。理由：用户明确发送的「继续对话」意图本身就是重开意图，让注定 409（`not_ready/no-active-run`）的 append 发出去只会产生假等待；服务端准入边界不变。其余自动触发路径（草稿恢复、unknown attempt 对账、投递重试、dispatcher）仍禁止触发重开。**
+
+**修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）——append 准入按 Run 状态分派**：`ready` 维持现状直接投递；**`paused` 接受（同一 202 持久接收语义）并由控制面循环自驱 resume**——先 `driver.resume(handle, requestedDeadline)` → 沙箱 bridge 出站回连（connectionEpoch 接管）→ run 回 `ready` → 按既有 durable 通路投递；**同 run 同 generation，不换代、不重开**。`provisioning`/`disconnected` 维持现状（只保留客户端下一条草稿，不接受新 append）。边界重申：上条修订（2026-10-08）的「自动触发路径（草稿恢复、unknown attempt 对账、投递重试、dispatcher）仍禁止触发重开」不变——**paused 的自驱 resume 是同一 run 的恢复，不属于重开**：等待环境的已接受输入由控制面循环自驱恢复（resume），重开仍只由用户主动发送触发。
+
+**修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）——paused 的生命周期动作**（Run=paused 时对上表 stop/force-stop/complete/archive/reopen 各行的补充）：`stop` = 写持久屏障（复用 `run.stopOperationId`，已有屏障时不新建、不改写）→ `paused → draining` → 直接 terminate（暂停态无运行时写入，无 checkpoint 前置可执行）；`force-stop` = 屏障 + 直接 terminate；`complete` = 拒绝（须先 resume 或完成 stop 终态收口，才能进入验收）；`archive` = 409（存在未终态的有效 run）；`reopen` = 拒绝 `recovery_required`（旧 run 未终态，不创建新 generation）；resume × 暂停预算耗尽 = 拒绝 `budget_exhausted`，此后停接受 resume，直至 provider 保留期尽、keepalive liveness 确认实例不存在 → `expired` 并释放占槽（终局：预算耗尽 → 保留期尽 → expired）。
 
 PATCH Task 只接受标题与 draftStartConfig 及 expectedRevision，启动配置只在 draft 可改；不能任意 PATCH status/activeRunId/baseSha。Project 创建由当前主体选择 repositoryId，服务端按09取得权威 installation/owner/name/defaultBranch；显示名是可编辑元数据，不接受请求字段自证授权。
 

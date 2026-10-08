@@ -6877,6 +6877,13 @@ const enUS: Record<string, string> = {
   "cloud.errors.quota_exceeded": "The quota is exhausted; the action cannot run",
   "cloud.errors.budget_exceeded": "The budget is exhausted; the action cannot run",
   "cloud.errors.not_ready": "The runtime is not ready yet; try again shortly",
+  "cloud.errors.not_ready.no_active_run":
+    "The run has ended. Reopen the task to continue the conversation.",
+  "cloud.errors.not_ready.stop_requested": "The task is stopping and cannot accept new input.",
+  "cloud.errors.not_ready.run_not_ready":
+    "The runtime is not ready yet (preparing or reconnecting); try again shortly.",
+  "cloud.errors.not_ready.task_has_active_run":
+    "A run is still in progress; stop the task before archiving.",
   "cloud.errors.idempotency_conflict":
     "A conflicting duplicate request exists; refresh the task state",
   "cloud.errors.rate_limited": "Too many requests; retry later",
@@ -6885,6 +6892,8 @@ const enUS: Record<string, string> = {
   "cloud.errors.bridge_disconnected": "The connection to the runtime is down",
   "cloud.errors.recovery_required": "This task needs a recovery step first",
   "cloud.run.statusWaitingForRun": "Input accepted. Waiting for the cloud environment…",
+  "cloud.run.statusPaused": "Run environment paused",
+  "cloud.run.statusPausedHint": "Send a message to resume the same run (it will not restart)",
   "cloud.run.statusProvisioning": "Preparing the cloud environment (sandbox, clone, warm-up)…",
   "cloud.run.statusFailedTitle": "Task run failed",
   "cloud.run.statusStoppedTitle": "Task run stopped",
@@ -6898,6 +6907,11 @@ const enUS: Record<string, string> = {
     "Run provider is unknown, so this task cannot be reopened from here.",
   "cloud.run.reopenSubmit": "Reopen",
   "cloud.run.statusDraining": "Stopping the task: saving the workspace, then terminating the run…",
+  "cloud.run.statusReopenable": "The previous run has ended",
+  "cloud.run.reopenableHint":
+    "Sending a new message automatically reopens the run environment to continue; or choose “Reopen task”.",
+  "cloud.run.reopenUnavailable":
+    "This task cannot be reopened automatically right now; check the task status above.",
   "cloud.run.stopFailed": "Failed to stop the task: {reason}",
   "cloud.run.forceStop": "Force stop",
   "cloud.run.forceStopTitle": "Force stop this task?",
@@ -6906,6 +6920,11 @@ const enUS: Record<string, string> = {
   "cloud.run.forceStopConfirm": "I understand unsaved changes may be lost",
   "cloud.run.forceStopSubmit": "Force stop",
   "cloud.run.pendingInputHint": "Submitted, waiting for the run environment…",
+  "cloud.history.sectionTitle": "History runs",
+  "cloud.history.loading": "Loading history…",
+  "cloud.history.loadFailed": "Failed to load history",
+  "cloud.history.truncated": "Older history is not loaded",
+  "cloud.history.incompleteStream": "This segment has gaps and may be incomplete",
   "cloud.run.liveReconnecting": "Reconnecting the session…",
   "cloud.run.liveReconnectFailed":
     "The live connection is down; history is still visible. Reconnect to resume updates.",

@@ -151,6 +151,133 @@ test("租约到期后重领同一个 operation，attempt 递增且 id 不变", a
   }
 });
 
+test("renewLease：持有人 CAS 续租，续期窗口内不产生第二个租约（C-3）", async () => {
+  const handle = await openTestStorage();
+  try {
+    const enqueued = await handle.storage.operations.enqueue({
+      operationId: newUuid(),
+      kind: "create",
+      idempotencyKey: "create:renew-1",
+      now: TEST_NOW,
+    });
+    const lease = await handle.storage.operations.leaseNext({
+      kinds: ["create"],
+      workerId: "worker-a",
+      leaseMs: 1_000,
+      now: nextNow(1),
+    });
+    assert.ok(lease);
+    // 错误令牌不得续租（迟到 worker 不能接管持有人的租约）。
+    assert.equal(
+      await handle.storage.operations.renewLease({
+        operationId: enqueued.operationId,
+        leaseToken: "stale-token",
+        leaseMs: 1_000,
+        now: nextNow(500),
+      }),
+      false,
+    );
+    // 持有人续租：到期时间被推走（create 60s+ 不被二次租约的关键语义）。
+    assert.equal(
+      await handle.storage.operations.renewLease({
+        operationId: enqueued.operationId,
+        leaseToken: lease?.leaseToken ?? "",
+        leaseMs: 1_000,
+        now: nextNow(500),
+      }),
+      true,
+    );
+    // 原到期点 nextNow(1)+1000 已过，但租约被续到 nextNow(1500)：第二个 worker 领不到。
+    const second = await handle.storage.operations.leaseNext({
+      kinds: ["create"],
+      workerId: "worker-b",
+      leaseMs: 1_000,
+      now: nextNow(1_100),
+    });
+    assert.equal(second, null, "续期后的租约窗口内不得有第二个持有者");
+    // 已结算的 operation 不可续租。
+    await handle.storage.operations.settle({
+      operationId: enqueued.operationId,
+      leaseToken: lease?.leaseToken ?? "",
+      outcome: "settled",
+      now: nextNow(1_200),
+    });
+    assert.equal(
+      await handle.storage.operations.renewLease({
+        operationId: enqueued.operationId,
+        leaseToken: lease?.leaseToken ?? "",
+        leaseMs: 1_000,
+        now: nextNow(1_300),
+      }),
+      false,
+      "已结算的 operation 不可续租",
+    );
+  } finally {
+    await handle.close();
+    await removeTestRoot(handle.root);
+  }
+});
+
+test("leaseNext 分相过滤：operationIds 白名单与 excludeOperationIds 排除（C-4）", async () => {
+  const handle = await openTestStorage();
+  try {
+    // a 更早创建（FIFO 头部），b 更晚；白名单应能越过 FIFO 直取 b。
+    const a = await handle.storage.operations.enqueue({
+      operationId: newUuid(),
+      kind: "checkpoint",
+      idempotencyKey: "checkpoint:phase-a",
+      now: TEST_NOW,
+    });
+    const b = await handle.storage.operations.enqueue({
+      operationId: newUuid(),
+      kind: "checkpoint",
+      idempotencyKey: "checkpoint:phase-b",
+      now: nextNow(1),
+    });
+    const onlyB = await handle.storage.operations.leaseNext({
+      kinds: ["checkpoint"],
+      workerId: "stop-sweep",
+      leaseMs: 1_000,
+      now: nextNow(2),
+      operationIds: [b.operationId],
+    });
+    assert.equal(onlyB?.operation.operationId, b.operationId, "白名单越过 FIFO 取到目标 op");
+
+    // 空白名单：无候选。
+    assert.equal(
+      await handle.storage.operations.leaseNext({
+        kinds: ["checkpoint"],
+        workerId: "stop-sweep",
+        leaseMs: 1_000,
+        now: nextNow(3),
+        operationIds: [],
+      }),
+      null,
+    );
+
+    // 排除被停止关联的 op：b 已被租约持有，剩余候选只有 a；排除 a 后无候选。
+    const excluded = await handle.storage.operations.leaseNext({
+      kinds: ["checkpoint"],
+      workerId: "periodic-sweep",
+      leaseMs: 1_000,
+      now: nextNow(4),
+      excludeOperationIds: [a.operationId, b.operationId],
+    });
+    assert.equal(excluded, null, "排除后不得领取被停止关联的 op");
+    const afterA = await handle.storage.operations.leaseNext({
+      kinds: ["checkpoint"],
+      workerId: "periodic-sweep",
+      leaseMs: 1_000,
+      now: nextNow(5),
+      excludeOperationIds: [b.operationId],
+    });
+    assert.equal(afterA?.operation.operationId, a.operationId, "排除 b 后正常领取 a");
+  } finally {
+    await handle.close();
+    await removeTestRoot(handle.root);
+  }
+});
+
 test("ambiguous 保留待对账，可重新领取后定案", async () => {
   const handle = await openTestStorage();
   try {
