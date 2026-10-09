@@ -12,7 +12,8 @@
  *   没有 → restart-from-base），并在 UI 说明依据，不提供与服务端事实冲突的二选一。
  * - provisioning 只呈现「进行中」，不渲染重开/失败文案。
  */
-import type { CloudRunStatus } from "@zcode/shared";
+import type { CloudExecutionConfig, CloudRunStatus, ModelSelection } from "@zcode/shared";
+import type { SubmissionMode } from "@zcode/shared/zcode-protocol-v4";
 
 /** 面板最小详情形状（测试可直接构造）。 */
 export interface CloudTaskPanelDetail {
@@ -234,6 +235,43 @@ export interface CloudReopenRetryPlan {
   readonly provider: string;
   readonly resume: CloudComposerReopenResume;
   readonly expectedTaskRevision: number;
+}
+
+/** composer 冻结 Submission 的结构最小形状（createComposerSubmissionConfig 的返回值）。 */
+export interface CloudComposerSubmissionLike {
+  readonly modelSelection: ModelSelection;
+  readonly mode: SubmissionMode;
+  readonly planEnabled: boolean;
+}
+
+/**
+ * composer 冻结 Submission → 云输入 requestedConfig（2026-10-09 实测缺陷修复：
+ * 「云任务运行中在界面切换模型不生效」）。
+ *
+ * Bug 原因：云发送适配层只把 prompt 交给控制面，composer 在发送点击时冻结的
+ * 执行配置整包被丢弃——input record 的 `requestedConfig`/`resolvedExecutionConfig`
+ * 落空，控制面投递的 sendText/createSession 信封不带 modelSelection，沙箱 runtime
+ * admission（resolveSubmittedExecutionState）只能回落当前 Session Selection，而首发
+ * 同样未携带（`firstCommandConfig` 落空），会话永远停留在沙箱缺省模型。
+ *
+ * 修复依据（取证结论「模型随消息参数走」）：V4 `sendText`/`createSession` 协议本就
+ * 携带 modelSelection（02 §6.2 保留既有语义），云输入协议 `requestedConfig`
+ * （CloudExecutionConfig）与控制面投递信封（inputDelivery/envelope.ts）逐层透传；
+ * 唯一断点是 UI 适配层。把完整 Selection 原样映射进既有参数通路即可，不改冻结协议
+ * （02）、不动 provisioning 代际机制。submission 为 null（选择未完成）时省略
+ * requestedConfig，保持「runtime Session Selection」回落，不阻断发送。
+ */
+export function buildCloudRequestedConfig(
+  submission: CloudComposerSubmissionLike | null | undefined,
+): CloudExecutionConfig | undefined {
+  if (!submission) {
+    return undefined;
+  }
+  return {
+    modelSelection: submission.modelSelection,
+    mode: submission.mode,
+    planEnabled: submission.planEnabled,
+  };
 }
 
 /**

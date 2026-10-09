@@ -8,12 +8,111 @@ import type {
 } from "@zcode/shared";
 import { logger } from "@/logger.js";
 import { useServices } from "@/hooks/useServices.js";
+import { useSettings } from "@/hooks/useSettingService.js";
 import { useZCodeSessionService } from "@/hooks/useZCodeSessionService.js";
 import { invalidateDeferredDraftSessionForSkillChange } from "@/lib/zcodeDraftSkillInvalidation.js";
+import { useCloudAccountHasActivity } from "@/onboarding/useCloudOnboardingFacts.js";
 import type { SettingsSyncUiState, SettingsSyncUiTask } from "@/settings-sync/types.js";
 
 const IMPORTING_TASK_DELAY_MS = 320;
 const FORCE_SHOW_ONBOARDING_ON_EVERY_REFRESH = false;
+
+/**
+ * 首启提示的自动弹出决策步（纯函数，node:test 直接覆盖；effect 只负责执行，
+ * 与 useOnboardingTrigger 的 resolveOnboardingDecisionStep 同一模式）：
+ * - `skip`：已处理（handled），或云模式账号已有任务/项目（不是 first-run）——不弹；
+ * - `wait`：云模式账号事实未定（探测进行中）——保持关闭等待事实，不在事实到达前闪弹
+ *   （探测有 5s 超时兜底，事实落地后 effect 重跑）；
+ * - `detect`：未处理且无相反事实——进入 detect / 展示。
+ */
+export type SettingsSyncFirstRunDecision =
+  | { readonly kind: "skip"; readonly reason: "handled" | "account-active" }
+  | { readonly kind: "wait" }
+  | { readonly kind: "detect" };
+
+export function resolveSettingsSyncFirstRunDecision(input: {
+  promptHandled: boolean;
+  cloudAccountHasActivity: boolean | null | "pending";
+}): SettingsSyncFirstRunDecision {
+  if (input.promptHandled) {
+    return { kind: "skip", reason: "handled" };
+  }
+  if (input.cloudAccountHasActivity === true) {
+    return { kind: "skip", reason: "account-active" };
+  }
+  if (input.cloudAccountHasActivity === "pending") {
+    return { kind: "wait" };
+  }
+  return { kind: "detect" };
+}
+
+/**
+ * 首启提示挂载引导（纯异步，node:test 直接覆盖；effect 只负责以真实服务调用它）。
+ *
+ * 2026-10-09 修订（用户实测复发：欢迎/迁移向导每次刷新必弹且关闭不持久）：
+ * - fail-closed：`getFirstRunPromptState` 读取失败（云模式 settings-sync 频道不在
+ *   host 暴露面等）时按「不可判定」收敛到关闭态，不得按「未处理」自动弹向导——
+ *   读不到的键在关闭路径上同样写不进，fail-open 必然形成每次刷新必弹、关闭无效的
+ *   死循环（实测 server.log 连续出现 Unknown channel: settings-sync）；
+ * - 账号事实短路：云模式账号已有任务/项目即不是 first-run，挂载即不弹；事实 pending
+ *   （探测进行中）期间保持关闭等待，不在事实到达前闪弹。
+ */
+export async function runSettingsSyncFirstRunPromptBootstrap(input: {
+  cloudAccountHasActivity: boolean | null | "pending";
+  getFirstRunPromptState: () => Promise<{ readonly handled: boolean }>;
+  loadDiscovery: () => Promise<void>;
+  /** 决策为不弹（handled / 账号已有活动）或读取失败（fail-closed）时收敛到关闭态。 */
+  settleClosed: () => void;
+  /** fail-closed 命中时的诊断日志（带 workspacePath 等上下文，由 effect 注入）。 */
+  logUnavailable: (error: unknown) => void;
+}): Promise<void> {
+  let promptState: { readonly handled: boolean };
+  try {
+    promptState = await input.getFirstRunPromptState();
+  } catch (error) {
+    input.logUnavailable(error);
+    input.settleClosed();
+    return;
+  }
+  const step = resolveSettingsSyncFirstRunDecision({
+    promptHandled: promptState.handled,
+    cloudAccountHasActivity: input.cloudAccountHasActivity,
+  });
+  if (step.kind === "skip") {
+    input.settleClosed();
+    return;
+  }
+  if (step.kind === "wait") {
+    // 云模式账号事实未定（探测进行中）：保持关闭等待事实；事实若为「已有活动」
+    // 直接不弹。事实落地（true/false）会重跑调用方 effect，不永久挂起。
+    return;
+  }
+  await input.loadDiscovery();
+}
+
+/**
+ * 关闭持久化（2026-10-09 修订，node:test 直接覆盖）：优先 settings-sync RPC；
+ * 频道不可用（云模式不在 host 暴露面）时回落 settingService 直写**同一个**
+ * AppSettings 字段（`settingsSyncFirstRunPromptHandled`——读取端
+ * `getFirstRunPromptState` 判定的就是它，读键=写键），保证 X /「开始使用 ZCode」/
+ * 完成任一关闭路径跨刷新、跨会话持久。两条路径都失败时向上抛出由调用方记日志。
+ */
+export const FIRST_RUN_PROMPT_HANDLED_SETTING_PATCH: { settingsSyncFirstRunPromptHandled: true } = {
+  settingsSyncFirstRunPromptHandled: true,
+};
+
+export async function persistSettingsSyncFirstRunHandled(options: {
+  markHandledViaRpc: () => Promise<void>;
+  writeSettingFallback: () => Promise<void>;
+}): Promise<"rpc" | "fallback"> {
+  try {
+    await options.markHandledViaRpc();
+    return "rpc";
+  } catch {
+    await options.writeSettingFallback();
+    return "fallback";
+  }
+}
 
 /** 首启自动检测与设置页手动重开对“空 discovery”的处理不同。 */
 type LoadDiscoveryIntent = "firstRun" | "manual";
@@ -151,6 +250,14 @@ export function useSettingsSync(params: { workspacePath?: string; workspaceIdent
   );
   const runningImportRef = useRef(0);
   const [state, setState] = useState<SettingsSyncUiState>(createInitialState);
+  // 云模式账号域事实（2026-10-09 修订）：已有任务/项目即不是 first-run——迁移向导
+  // （本 hook 的唯一消费方 OnboardingDialog）的自动弹出必须与 OccupationOnboarding
+  // 触发器服从同一短路（此前探测只接了后者，向导挂载时机上短路不生效）。非云模式
+  // 返回 null 判定不变；探测有会话级缓存与超时兜底，不新增常驻 RPC。
+  const cloudAccountHasActivity = useCloudAccountHasActivity();
+  // 关闭持久化的回落写入通道（2026-10-09 修订）：settingService 直写与
+  // settingsSyncService.markFirstRunPromptHandled 同一个 AppSettings 字段。
+  const { update: updateAppSettings } = useSettings();
 
   const loadDiscovery = useCallback(
     async (intent: LoadDiscoveryIntent = "firstRun") => {
@@ -222,12 +329,20 @@ export function useSettingsSync(params: { workspacePath?: string; workspaceIdent
           workspacePath: params.workspacePath,
           error: message,
         });
-        setState((current) => ({
-          ...current,
-          open: true,
-          loading: false,
-          error: message,
-        }));
+        if (intent === "manual") {
+          // 设置页显式打开时保留弹窗呈现错误，用户需要看到失败原因。
+          setState((current) => ({
+            ...current,
+            open: true,
+            loading: false,
+            error: message,
+          }));
+          return;
+        }
+        // firstRun 意图的 detect 失败按 fail-closed 收敛（2026-10-09 修订）：自动弹出
+        // 首启向导的每个失败路径都必须落为「不弹」——否则与关闭持久化失败组合成
+        // 「每次刷新必弹、关闭无效」死循环。保持关闭，等下一次显式入口。
+        setState(createInitialState());
       }
     },
     [params.workspaceIdentity, params.workspacePath, settingsSyncService],
@@ -246,45 +361,36 @@ export function useSettingsSync(params: { workspacePath?: string; workspaceIdent
 
     let cancelled = false;
 
-    void (async () => {
-      try {
-        // onboarding 弹窗是“首启提示”，不是普通刷新提示。
-        // 之前调试阶段直接每次进入 workspace 都弹，用户一旦跳过仍会被重复打断。
-        // 这里先读取 handled 状态，只在第一次尚未消费时才继续做检测和展示。
-        const promptState = await settingsSyncService.getFirstRunPromptState();
-        if (cancelled) {
-          return;
-        }
-
-        if (promptState.handled) {
+    // 决策与失败语义集中在 runSettingsSyncFirstRunPromptBootstrap（可单测）：
+    // handled / 账号事实短路 / pending 等待 / 读取失败 fail-closed。
+    void runSettingsSyncFirstRunPromptBootstrap({
+      cloudAccountHasActivity,
+      getFirstRunPromptState: () => settingsSyncService.getFirstRunPromptState(),
+      loadDiscovery,
+      settleClosed: () => {
+        if (!cancelled) {
           setState(createInitialState());
-          return;
         }
-
-        await loadDiscovery();
-      } catch (error) {
-        const message = normalizeError(error);
-        logger.error("[settings-sync] first run prompt state failed", {
+      },
+      logUnavailable: (error) => {
+        logger.warn("[settings-sync] first run prompt state unavailable, keep prompt closed", {
           workspacePath: params.workspacePath,
-          error: message,
+          error: normalizeError(error),
         });
-        if (cancelled) {
-          return;
-        }
-
-        setState((current) => ({
-          ...current,
-          open: true,
-          loading: false,
-          error: message,
-        }));
-      }
-    })();
+      },
+    }).catch((error) => {
+      // loadDiscovery 自身已内置错误处理（manual 保留弹窗 / firstRun 收敛关闭），
+      // 这里只是防御未预期异常，避免 unhandled rejection。
+      logger.warn("[settings-sync] first run prompt bootstrap failed unexpectedly", {
+        workspacePath: params.workspacePath,
+        error: normalizeError(error),
+      });
+    });
 
     return () => {
       cancelled = true;
     };
-  }, [loadDiscovery, params.workspacePath, settingsSyncService]);
+  }, [cloudAccountHasActivity, loadDiscovery, params.workspacePath, settingsSyncService]);
 
   const selectedCount = state.selectedKeys.length;
   const taskProgress = useMemo(() => {
@@ -303,13 +409,18 @@ export function useSettingsSync(params: { workspacePath?: string; workspaceIdent
     }
     // “关闭 onboarding”本身就表示用户已经处理过这次首启提示，
     // 无论是直接开始还是跳过迁移，都应该立刻落库，避免下次启动再次重复弹出。
-    void settingsSyncService.markFirstRunPromptHandled().catch((error) => {
+    // 持久化语义（2026-10-09 修订）集中在 persistSettingsSyncFirstRunHandled：
+    // RPC 失败回落 settingService 直写同一键，云模式下关闭也跨刷新持久。
+    void persistSettingsSyncFirstRunHandled({
+      markHandledViaRpc: () => settingsSyncService.markFirstRunPromptHandled(),
+      writeSettingFallback: () => updateAppSettings(FIRST_RUN_PROMPT_HANDLED_SETTING_PATCH),
+    }).catch((error) => {
       logger.error("[settings-sync] mark first run prompt handled failed", {
         workspacePath: params.workspacePath,
         error: normalizeError(error),
       });
     });
-  }, [params.workspacePath, settingsSyncService]);
+  }, [params.workspacePath, settingsSyncService, updateAppSettings]);
 
   const reopen = useCallback(() => {
     setState((current) => {

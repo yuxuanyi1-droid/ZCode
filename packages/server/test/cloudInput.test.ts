@@ -296,6 +296,116 @@ test("CP-13：requestedConfig 在接纳时固定，之后不再漂移（03 §6.1
   assert.equal(input?.payloadHash.length, 64, "fingerprint 只覆盖原请求语义字段");
 });
 
+/**
+ * 2026-10-09 实测缺陷「云任务运行中切换模型不生效」的服务端侧保证：
+ * input 的 `requestedConfig.modelSelection` 必须原样进入投递信封——首发
+ * createSession（firstInput + config）与后续 append（sendText）都要携带，
+ * 沙箱 runtime admission（resolveSubmittedExecutionState）才能把它定为
+ * 本次执行的 Session Selection。UI 适配层（useCloudComposerSubmit）负责把
+ * composer 冻结 Selection 映射为 requestedConfig，本用例锁定信封透传不回退。
+ */
+test("requestedConfig.modelSelection 随 createSession/sendText 信封下发（02 §6.2）", async () => {
+  const context = buildTestPlane();
+  const startSelection = {
+    providerId: "zcode-agent",
+    modelId: "glm-4.7",
+    options: { reasoningLevel: "high" },
+  };
+  const task = await draftTask(context);
+  const start = await context.plane.inputs.submit({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+    source: "http",
+    request: {
+      ...startRequest(task.revision, "00000000-0000-4000-8000-000000000112"),
+      requestedConfig: { modelSelection: startSelection, mode: "build", planEnabled: false },
+    },
+  });
+  assert.equal(start.ok, true, start.ok ? "" : `${start.code}/${start.reason}`);
+  assert.ok(start.ok);
+  const runId = start.value.runId ?? "";
+  await context.plane.provisioning.create.runCreateOnce();
+  const run = await context.storage.runs.get(runId);
+  assert.ok(run);
+  await attachReadySession(context, {
+    taskId: task.taskId,
+    runId,
+    runGeneration: run.runGeneration,
+  });
+  await context.plane.runs.markReady({
+    taskId: task.taskId,
+    runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+  const firstDispatch = await context.plane.delivery.dispatchTask(task.taskId);
+  assert.equal(firstDispatch.outcomes[0]?.result, "sent");
+  const createEnvelope = context.attachmentPort.sent[0]?.envelope as {
+    type: string;
+    payload: {
+      firstInput?: { modelSelection?: unknown };
+      config?: { modelSelection?: unknown };
+    };
+  };
+  assert.equal(createEnvelope.type, "createSession");
+  assert.deepEqual(
+    createEnvelope.payload.firstInput?.modelSelection,
+    startSelection,
+    "首发 firstInput 携带 Selection",
+  );
+  assert.deepEqual(
+    createEnvelope.payload.config?.modelSelection,
+    startSelection,
+    "首发 config 携带 Selection",
+  );
+  // runtime ACK 回填 run↔session 映射（02 §6.2）：append 投递的前提。
+  await context.plane.projections.ingest.recordRuntimeAck({
+    taskId: task.taskId,
+    commandId: "00000000-0000-4000-8000-000000000112",
+    runId,
+    runGeneration: run.runGeneration,
+    deliveryStatus: "admitted",
+    runtimeAck: {
+      commandId: "00000000-0000-4000-8000-000000000112",
+      status: "accepted",
+      revisionAtDecision: 1,
+      result: { type: "createSession", sessionId: "runtime-session-1" },
+    },
+  });
+
+  // 运行中切换模型：append 的 requestedConfig 换新 Selection，sendText 信封必须跟随。
+  const nextSelection = {
+    providerId: "zcode-agent",
+    modelId: "glm-5.3",
+    options: { reasoningLevel: "high" },
+  };
+  const append = await context.plane.inputs.submit({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+    source: "rpc",
+    request: {
+      intent: "append",
+      commandId: "00000000-0000-4000-8000-000000000113",
+      prompt: "switched model",
+      expectedRunGeneration: run.runGeneration,
+      requestedConfig: { modelSelection: nextSelection },
+    },
+  });
+  assert.equal(append.ok, true, append.ok ? "" : `${append.code}/${append.reason}`);
+  const secondDispatch = await context.plane.delivery.dispatchTask(task.taskId);
+  assert.equal(secondDispatch.outcomes[0]?.result, "sent");
+  const sendEnvelope = context.attachmentPort.sent.at(-1)?.envelope as {
+    type: string;
+    payload: { modelSelection?: unknown };
+  };
+  assert.equal(sendEnvelope.type, "sendText");
+  assert.deepEqual(
+    sendEnvelope.payload.modelSelection,
+    nextSelection,
+    "append 信封携带切换后的 Selection",
+  );
+});
+
 test("CP-06：ACK 丢失先置 uncertain，对账查到结果则落 admitted，不重复副作用", async () => {
   const context = buildTestPlane();
   const { task, receipt } = await acceptedStart(context, "00000000-0000-4000-8000-00000000010d");

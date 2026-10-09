@@ -179,6 +179,14 @@ stopRequested 是优先于 Run 状态的持久门控：收到受理后显示“�
 
 2026-10-09 修订（生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）：run 状态投影如实呈现 `paused` 与恢复中的 `resuming`（暂停保留与恢复进度复用既有进行中横幅语义）；`paused` 期间用户发消息走 03 §6 的控制面自驱 resume（同一 run，UI 明示「正在恢复运行环境」，不得呈现为重开或新 run）；能力位 `none` 的 provider 不出现 `paused` 投影（fail-closed：UI 不为未声明的能力保留状态位）。
 
+2026-10-09 修订（用户实测复发：欢迎/迁移向导每次刷新必弹且关闭不持久）：首启「欢迎使用 ZCode」迁移向导（`OnboardingDialog`，挂载于 Root 的 `OccupationOnboarding` children 内）的 first-run 判定走 `settings-sync` 频道（`getFirstRunPromptState`/`markFirstRunPromptHandled`），而该频道不在 03 §7.1 云 host 暴露面（扫描/导入本机执行域配置，按 allowlist 边界不外露）。云模式下状态读取被未知频道超时拒绝时，原实现按 fail-open 弹出向导且关闭写回同样失败，形成「刷新必弹、关闭无效」死循环（server.log 实证 `Unknown channel: settings-sync`）。行为统一到 first-run 引导同一套纪律（§first-run 引导 P2 修订）：
+
+- **fail-closed**：首启提示状态读取失败（频道不存在/RPC 错误）时不得自动弹出向导——读不到的键同样写不进，fail-open 必然死循环；仅记录 warn 保持关闭，设置页与引导链的显式打开入口不受影响。firstRun 意图的 detect 失败同理不自动弹（manual 意图保留打开以呈现错误）。
+- **账号事实短路覆盖该向导**：云模式账号已有任务/项目（`useCloudAccountHasActivity` === true）时迁移向导不自动弹；事实 pending（探测进行中）期间保持关闭等待，不在事实到达前闪弹。探测复用会话级缓存。
+- **关闭持久化回落同键**：`markFirstRunPromptHandled` RPC 失败时回落 `settingService.update({ settingsSyncFirstRunPromptHandled: true })`——读取键（`settings.settingsSyncFirstRunPromptHandled`）与回落写入键是同一 AppSettings 字段，`settingService` 在云暴露面内，保证 X /「开始使用 ZCode」/完成任一关闭路径跨刷新、跨会话持久。
+
+2026-10-09 修订（用户实测缺陷：云任务运行中 composer 切换模型不生效）：模型/模式选择属「随消息参数走」的执行配置，不是账号 provisioning 代际——composer 在发送点击冻结的 Submission（modelSelection/mode/planEnabled，`createComposerSubmissionConfig`）必须经云发送适配层映射为控制面 input 的 `requestedConfig`（`buildCloudRequestedConfig`，node:test 覆盖），随 start/append/reopen 请求落进 input record，控制面投递信封（03 §6.1、02 §6.2）把它携带进 createSession（firstInput+config）/sendText payload，沙箱 runtime admission（`resolveSubmittedExecutionState`/`applyRequestedSessionConfig`）据此更新 Session Selection。运行中切换模型后，下一条消息即用新模型执行，选择器状态经既有 ModelSelected 投影回读保持一致；禁止改为 provisioning 代际或第二套配置命令通路。Submission 未完成（null）时省略 `requestedConfig`，回落 runtime Session Selection，不阻断发送。
+
 ### 3.4 输入层次与多端
 
 | 层次                          | 所有者                     | 恢复/呈现                                      |

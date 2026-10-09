@@ -12,6 +12,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildCloudRequestedConfig,
   isCloudTaskArchiveActionAvailable,
   isCloudTaskForceStopActionAvailable,
   isCloudTaskRestoreActionAvailable,
@@ -441,4 +442,38 @@ test("409 race retry plan assembles reopen from stale-detail facts", () => {
   // provider 无事实（run 无 provider 且未保存配置）：无法组装重开，回落归一错误。
   assert.equal(resolveCloudReopenRetryPlan(detail({ runStatus: "ready" })), null);
   assert.equal(resolveCloudReopenRetryPlan(null), null);
+});
+
+test("composer submission maps into cloud requestedConfig (2026-10-09 切模型不生效修复)", () => {
+  // 断言引用：V4 sendText/createSession 本就携带 modelSelection（02 §6.2），云输入
+  // requestedConfig 与控制面投递信封逐层透传；此映射是 UI 侧唯一断点的修复点。
+  const submission = {
+    modelSelection: {
+      providerId: "zcode-agent",
+      modelId: "glm-5.3",
+      options: { reasoningLevel: "high" },
+    },
+    mode: "build" as const,
+    planEnabled: false,
+  };
+  assert.deepEqual(buildCloudRequestedConfig(submission), {
+    modelSelection: submission.modelSelection,
+    mode: "build",
+    planEnabled: false,
+  });
+  // 切换后的新 Selection 原样透传，不归一、不回落账号默认。
+  const switched = {
+    modelSelection: { providerId: "custom-provider", modelId: "deepseek-v4" },
+    mode: "plan" as const,
+    planEnabled: true,
+  };
+  assert.deepEqual(buildCloudRequestedConfig(switched), {
+    modelSelection: switched.modelSelection,
+    mode: "plan",
+    planEnabled: true,
+  });
+  // 选择未完成（null/undefined）时省略 requestedConfig：runtime 回落 Session
+  // Selection，不阻断发送（与修复前行为一致，仅丢配置不丢消息）。
+  assert.equal(buildCloudRequestedConfig(null), undefined);
+  assert.equal(buildCloudRequestedConfig(undefined), undefined);
 });

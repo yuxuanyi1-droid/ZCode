@@ -3057,7 +3057,13 @@ export function SessionPane({
       // 「同 commandId 不重复」失去依据。非云工作区完全不受影响。
       if (cloudComposerSubmit.enabled) {
         try {
-          const outcome = await cloudComposerSubmit.send(text);
+          // 与本机路径（dispatchSendText）同一冻结语义：发送点击瞬间把 composer 选择
+          // 冻结成本次 Submission。云适配层把它映射为控制面 requestedConfig 随信封
+          // 下发——不冻结的话运行中切换模型永远不会生效（input record 落空，runtime
+          // admission 只能回落 Session Selection）。
+          const cloudSubmission =
+            options?.submission === undefined ? createSubmissionFromComposer() : options.submission;
+          const outcome = await cloudComposerSubmit.send(text, cloudSubmission);
           if (outcome.status === "sent") {
             setSendSubmissionError(null);
             // 202 ≠ runtime 已准入（03 §6.2）：optimistic 呈现用户消息（pending overlay，
@@ -3145,6 +3151,7 @@ export function SessionPane({
     [
       appendPendingCloudInput,
       cloudComposerSubmit,
+      createSubmissionFromComposer,
       dispatchSendText,
       focusTimelineToLatest,
       intl,

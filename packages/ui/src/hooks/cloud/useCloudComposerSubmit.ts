@@ -26,10 +26,16 @@
  * 不重复发 `GET /api/cloud/tasks/:taskId`（04 §5「只作 expected 值用于 stale 检测」）。
  */
 import { useCallback, useMemo } from "react";
-import type { CloudRunRecord, CloudTaskRecord, TaskDetailResponse } from "@zcode/shared";
+import type {
+  CloudExecutionConfig,
+  CloudRunRecord,
+  CloudTaskRecord,
+  TaskDetailResponse,
+} from "@zcode/shared";
 import type { CloudSubmissionOutcome } from "@/cloud/cloudTaskSubmission.js";
 import { isCloudNoActiveRunRejection } from "@/cloud/cloudTaskSubmission.js";
 import {
+  buildCloudRequestedConfig,
   resolveCloudComposerSendPlan,
   resolveCloudReopenRetryPlan,
   type CloudComposerBlockedHint,
@@ -39,6 +45,7 @@ import { resolveCloudTaskIdFromWorkspaceIdentity } from "@/cloud/cloudUiBootstra
 import { useCloudTask } from "./useCloudTask.js";
 import { useReopenCloudTask } from "./useReopenCloudTask.js";
 import { useSubmitCloudInput } from "./useSubmitCloudInput.js";
+import type { ComposerSubmissionConfig } from "@/v4/composer/composerSubmissionConfig.js";
 
 export type { CloudComposerBlockedHint };
 export type CloudComposerSubmitResult = "sent" | "blocked" | "unknown";
@@ -78,7 +85,15 @@ export interface UseCloudComposerSubmitResult {
    * 永远不会出现，pane 必须在此状态退场全部遗留 overlay，任务横幅呈现重开视图。
    */
   readonly activeRunGone: boolean;
-  send(prompt: string): Promise<CloudComposerSendOutcome>;
+  /**
+   * `submission` 是 composer 在发送点击时冻结的执行配置（createComposerSubmissionConfig）；
+   * 云链路把它原样映射为控制面 input 的 `requestedConfig`，随 sendText/createSession
+   * 信封下发到沙箱 runtime。null/缺省表示选择未完成，回退 runtime Session Selection。
+   */
+  send(
+    prompt: string,
+    submission?: ComposerSubmissionConfig | null,
+  ): Promise<CloudComposerSendOutcome>;
 }
 
 export function useCloudComposerSubmit(
@@ -118,6 +133,7 @@ export function useCloudComposerSubmit(
     async (
       prompt: string,
       appendOutcome: CloudSubmissionOutcome,
+      requestedConfig?: CloudExecutionConfig,
     ): Promise<CloudComposerSendOutcome> => {
       if (taskId !== null) {
         // 刷新详情：run 终结事实到达 UI（ended/reopenable 投影 + overlay 回滚）。
@@ -132,6 +148,7 @@ export function useCloudComposerSubmit(
         provider: retryPlan.provider,
         resume: retryPlan.resume,
         expectedTaskRevision: retryPlan.expectedTaskRevision,
+        ...(requestedConfig !== undefined ? { requestedConfig } : {}),
       });
       if (outcome.kind === "persisted") {
         return { status: "sent", commandId: outcome.commandId, reopenedRun: true };
@@ -142,10 +159,14 @@ export function useCloudComposerSubmit(
   );
 
   const send = useCallback(
-    async (prompt: string): Promise<CloudComposerSendOutcome> => {
+    async (
+      prompt: string,
+      submission?: ComposerSubmissionConfig | null,
+    ): Promise<CloudComposerSendOutcome> => {
       if (!enabled) {
         throw new Error("cloud composer submit used outside a cloud task workspace");
       }
+      const requestedConfig = buildCloudRequestedConfig(submission);
       const plan = resolveCloudComposerSendPlan({
         task,
         ...(activeRun !== null ? { activeRun } : {}),
@@ -171,6 +192,7 @@ export function useCloudComposerSubmit(
             prompt,
             start,
             expectedTaskRevision: plan.expectedTaskRevision,
+            ...(requestedConfig !== undefined ? { requestedConfig } : {}),
           });
           if (outcome.kind === "persisted") {
             return { status: "sent", commandId: outcome.commandId, reopenedRun: false };
@@ -181,12 +203,13 @@ export function useCloudComposerSubmit(
           const outcome = await submit.submitAppendInput({
             prompt,
             expectedRunGeneration: plan.expectedRunGeneration,
+            ...(requestedConfig !== undefined ? { requestedConfig } : {}),
           });
           if (outcome.kind === "persisted") {
             return { status: "sent", commandId: outcome.commandId, reopenedRun: false };
           }
           if (isCloudNoActiveRunRejection(outcome)) {
-            return retryViaReopenAfterNoActiveRun(prompt, outcome);
+            return retryViaReopenAfterNoActiveRun(prompt, outcome, requestedConfig);
           }
           return rejectedOutcome(outcome);
         }
@@ -194,11 +217,14 @@ export function useCloudComposerSubmit(
           // 无有效 run（2026-10-08 终态 run 发送行为修订）：用户显式发送的这条消息
           // 就是「继续」意图 → 自动重开，不发注定 409（not_ready/no-active-run）的
           // append（04 §3.3、08 §5 修订；服务端仍按 08 §9 独立校验重开前置条件）。
+          // requestedConfig 落进新 run 的 firstCommandConfig：重开会话的首发模型/
+          // 模式与 composer 当前选择一致，而不是沙箱缺省。
           const outcome = await reopenTask({
             prompt,
             provider: plan.provider,
             resume: plan.resume,
             expectedTaskRevision: plan.expectedTaskRevision,
+            ...(requestedConfig !== undefined ? { requestedConfig } : {}),
           });
           if (outcome.kind === "persisted") {
             return { status: "sent", commandId: outcome.commandId, reopenedRun: true };
