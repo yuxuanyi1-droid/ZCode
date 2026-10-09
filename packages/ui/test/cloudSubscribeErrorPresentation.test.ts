@@ -58,3 +58,18 @@ test("null/undefined errors resolve to a generic presentation without detail", (
   assert.deepEqual(classifySubscribeError(null), { kind: "generic", detail: null });
   assert.deepEqual(classifySubscribeError(undefined), { kind: "generic", detail: null });
 });
+
+// 2026-10-09 paused 呈现修订：云执行域「无 ready attachment」的结构化拒绝不是
+// 「与代理的连接已断开」——按状态归一成专门标题，裸 reason 只进技术细节区。
+test("cloud attachment-unavailable rejections are classified as cloud-unavailable", () => {
+  const withTaskId = "cloud task 1a03688c-d2f9-4abd-b682-37532f69e8ec has no ready run attachment";
+  const presentation = classifySubscribeError(withTaskId);
+  assert.equal(presentation.kind, "cloud-unavailable");
+  assert.deepEqual(presentation.kind === "cloud-unavailable" ? presentation.detail : null, withTaskId);
+
+  const defaultReason = "cloud task has no ready run attachment";
+  assert.equal(classifySubscribeError(defaultReason).kind, "cloud-unavailable");
+
+  // 断连等其它错误不被误分类，仍走 generic（重连文案）。
+  assert.equal(classifySubscribeError("transport closed before handshake").kind, "generic");
+});

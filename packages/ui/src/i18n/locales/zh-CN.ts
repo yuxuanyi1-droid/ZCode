@@ -6590,6 +6590,8 @@ const zhCN: Record<string, string> = {
   "cloud.run.liveReconnectFailed": "实时连接已断开，历史仍可查看。可点击重连恢复增量。",
   "cloud.run.error.validationRejected":
     "无法建立会话连接：服务端校验拒绝了请求参数。可以重试或反馈问题。",
+  "cloud.run.error.environmentUnavailable":
+    "运行环境暂不可用，稍后会自动重试；也可以点击重连。",
   "cloud.run.error.technicalDetail": "查看技术细节",
   "cloud.run.settings.timeoutClamped": "已按部署上限收敛到 {seconds} 秒。",
   "chat.attachments.cloud.uploadUnavailable":

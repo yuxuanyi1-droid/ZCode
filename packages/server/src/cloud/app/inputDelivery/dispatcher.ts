@@ -198,6 +198,10 @@ export function createInputDispatcher(
           now: clock.now(),
         });
       }
+      // 投递即业务活动（08 §7 事实源收窄补充）：命令送达就是新的 runtime 工作事实。
+      // 不推进的话，resume 后的窗口内 lastBusinessActivityAt 仍是暂停前旧值，idle 拍
+      // 会把带在途回合的 run 当空闲再次暂停（实测：resume 后 33s 被二次 idle-pause）。
+      await storage.runs.touchBusinessActivity({ runId: run.runId, at: clock.now() });
       cloudCoreLogger.debug(undefined, "cloud input delivered", {
         taskId: run.taskId,
         runId: run.runId,

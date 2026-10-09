@@ -141,6 +141,54 @@ test("cloud task workspace with no loaded detail is fail-closed", () => {
   );
 });
 
+// 2026-10-09 paused 呈现修订（实测缺陷）：run 被空闲暂停后 attachment 已 detach，继续
+// 绑定 sess_… 订阅只会得到 `cloud task … has no ready run attachment`，全屏「连接已断开」
+// 错误面板遮蔽 paused 横幅与 composer。paused 时解除绑定：历史走控制面权威历史（跨 run
+// 只读回放）、发送走 paused→resume；run 回 ready 后同一 detail 流恢复绑定。
+test("a paused run stays unbound so the pane keeps banner + history + composer", () => {
+  const paused = resolveCloudTaskRuntimeSession({
+    workspaceIdentity: CLOUD_IDENTITY,
+    taskDetail: {
+      task: { taskId: TASK_ID },
+      activeRun: {
+        status: "paused",
+        runtimeSessionId: RUNTIME_SESSION_ID,
+        workspacePath: RUN_WORKSPACE_PATH,
+      },
+    },
+  });
+  assert.deepEqual(paused, {
+    isCloudTaskWorkspace: true,
+    runtimeSessionId: null,
+    // 路径事实保留：tab 的 checkout 路径同步不受暂停影响。
+    runWorkspacePath: RUN_WORKSPACE_PATH,
+  });
+
+  // 同一 detail 流上 run 回 ready：绑定自然恢复（不要求重进页面）。
+  const resumed = resolveCloudTaskRuntimeSession({
+    workspaceIdentity: CLOUD_IDENTITY,
+    taskDetail: {
+      task: { taskId: TASK_ID },
+      activeRun: {
+        status: "ready",
+        runtimeSessionId: RUNTIME_SESSION_ID,
+        workspacePath: RUN_WORKSPACE_PATH,
+      },
+    },
+  });
+  assert.equal(resumed.runtimeSessionId, RUNTIME_SESSION_ID);
+
+  // 旧投影/旧用例不带 status：维持原判定（不改变既有绑定语义）。
+  const legacy = resolveCloudTaskRuntimeSession({
+    workspaceIdentity: CLOUD_IDENTITY,
+    taskDetail: detail({
+      runtimeSessionId: RUNTIME_SESSION_ID,
+      workspacePath: RUN_WORKSPACE_PATH,
+    }),
+  });
+  assert.equal(legacy.runtimeSessionId, RUNTIME_SESSION_ID);
+});
+
 test("never borrows the runtime session of another cloud task", () => {
   // 侧栏另一个任务 / 详情尚未切换：不借别的任务的会话（与 selectCloudAttachmentForTask 同语义）。
   const resolution = resolveCloudTaskRuntimeSession({

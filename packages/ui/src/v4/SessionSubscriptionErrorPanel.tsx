@@ -67,7 +67,11 @@ export function SessionSubscriptionErrorPanel({
           id:
             presentation.kind === "structured-validation"
               ? "cloud.run.error.validationRejected"
-              : "chat.error.connectionLost",
+              : presentation.kind === "cloud-unavailable"
+                ? // 云执行域不可用（2026-10-09 paused 呈现修订）：不是「连接已断开」——
+                  // 按状态归一为「运行环境暂不可用」+ 重试入口；原始串只进技术细节区。
+                  "cloud.run.error.environmentUnavailable"
+                : "chat.error.connectionLost",
         })}
       </p>
       {presentation.detail ? (

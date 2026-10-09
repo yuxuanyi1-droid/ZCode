@@ -26,6 +26,15 @@
  * 要求身份与路径**同时传递**、禁止空串/伪路径，因此这里选择「等 workspacePath 落定再
  * ready」而不是把协议字段 optional 化：路径未落定时按「无会话」返回（pane 停在等待态，
  * 不发订阅），调用方（控制器）负责把落定后的路径同步进 pane scope。
+ *
+ * 2026-10-09 修订（paused 呈现，实测缺陷）：`activeRun.status === "paused"` 时**不绑定**
+ * 会话。run 被空闲暂停后执行域 attachment 已被控制面 detach，pane 若仍按 sess_… 发起
+ * 订阅只会得到 `cloud task … has no ready run attachment` 的结构化失败——全屏「连接已
+ * 断开」错误面板替换了整个工作区，遮蔽了 paused 横幅与 composer，用户无法「发消息即
+ * 恢复」。不绑定时 pane 停在草稿态：历史回合由控制面权威历史（GET /tasks/:id/history，
+ * 跨 run 只读回放）呈现（02 §7.3「客户端展示路径只依赖控制面持久副本」，沙箱暂停亦可
+ * 读），composer 经 HTTP 独立通道走 paused→resume（03 §6 修订）；run 回 ready 后详情
+ * 投影刷新，绑定自然恢复、订阅带回回放。
  */
 import { resolveCloudTaskIdFromWorkspaceIdentity } from "./cloudUiBootstrap.js";
 
@@ -47,6 +56,7 @@ export interface CloudTaskRuntimeSessionDetail {
   readonly task: { readonly taskId: string };
   readonly activeRun?:
     | {
+        readonly status?: string | undefined;
         readonly runtimeSessionId?: string | undefined;
         readonly workspacePath?: string | undefined;
       }
@@ -80,11 +90,16 @@ export function resolveCloudTaskRuntimeSession(params: {
     ? detail.activeRun.workspacePath
     : null;
   const runtimeSessionId = detail.activeRun?.runtimeSessionId?.trim();
+  // paused（2026-10-09 修订）：暂停保留中不绑定会话——执行域不可达，订阅注定失败。
+  // 历史由控制面权威历史呈现、发送走 paused→resume 通路；status 缺省（旧用例/旧投影）
+  // 维持原判定，不改变既有绑定语义。
+  const runPaused = detail.activeRun?.status === "paused";
   return {
     isCloudTaskWorkspace: true,
     // 路径未落定时即使 runtimeSessionId 已出现也不绑定：避免 pane 拿空串路径发订阅
     // （P1 巡检缺陷，见文件头注释）。pane 停在等待态，路径落定后随详情刷新绑定。
-    runtimeSessionId: runtimeSessionId && runWorkspacePath !== null ? runtimeSessionId : null,
+    runtimeSessionId:
+      runtimeSessionId && runWorkspacePath !== null && !runPaused ? runtimeSessionId : null,
     runWorkspacePath,
   };
 }

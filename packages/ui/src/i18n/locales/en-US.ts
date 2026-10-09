@@ -6930,6 +6930,8 @@ const enUS: Record<string, string> = {
     "The live connection is down; history is still visible. Reconnect to resume updates.",
   "cloud.run.error.validationRejected":
     "Could not establish the session: the server rejected the request parameters. Retry or report the problem.",
+  "cloud.run.error.environmentUnavailable":
+    "The run environment is temporarily unavailable. It retries automatically, or click reconnect.",
   "cloud.run.error.technicalDetail": "View technical details",
   "cloud.run.settings.timeoutClamped": "Converged to the deployment limit of {seconds} seconds.",
   "chat.attachments.cloud.uploadUnavailable":

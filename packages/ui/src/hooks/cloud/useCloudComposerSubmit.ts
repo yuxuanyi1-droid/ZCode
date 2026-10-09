@@ -103,6 +103,9 @@ export function useCloudComposerSubmit(
   const taskId = resolveCloudTaskIdFromWorkspaceIdentity(workspaceIdentity);
   const isSelectedTask = taskId !== null && context?.selection.taskId === taskId;
   const reloadTask = context?.reloadTask;
+  // paused append 的有界 run 观察（2026-10-09 paused 呈现修订）：与首发同款，函数引用
+  // 由控制器保证稳定。
+  const beginTaskRunWatch = context?.beginTaskRunWatch ?? null;
 
   // hook 必须无条件调用；已经由控制器取数的任务不再重复请求。
   const ownTask = useCloudTask({ taskId: isSelectedTask ? null : taskId });
@@ -206,6 +209,13 @@ export function useCloudComposerSubmit(
             ...(requestedConfig !== undefined ? { requestedConfig } : {}),
           });
           if (outcome.kind === "persisted") {
+            // paused append（2026-10-09 paused 呈现修订，03 §6 修订语义）：run 处于暂停
+            // 保留时本次 202 由控制面自驱 resume（或预算耗尽收口停+重开）。与首发同款
+            // 启动有界 run 观察，把 paused→ready / 终态的详情翻转带回来——否则 pane 无法
+            // 恢复订阅绑定、横幅停在「已暂停」，用户只能手动刷新。
+            if (activeRun?.status === "paused") {
+              beginTaskRunWatch?.();
+            }
             return { status: "sent", commandId: outcome.commandId, reopenedRun: false };
           }
           if (isCloudNoActiveRunRejection(outcome)) {
@@ -242,6 +252,7 @@ export function useCloudComposerSubmit(
     },
     [
       activeRun,
+      beginTaskRunWatch,
       detail,
       enabled,
       isSelectedTask,

@@ -4,16 +4,17 @@
  * 重实现按单一职责拆分（同一实现多处复用，不写两份）：
  *
  * 1. **自驱 resume**（03 §6 修订，`resumeRunWithDeliverableInput`）：paused + deliverable
- *    输入 → 能力门禁（A-7：none 时不可达）→ 预算核对（耗尽拒绝 `budget_exhausted`，输入
- *    保持 accepted）→ 单飞 `driver.resume(handle, requestedDeadline)` → 续展 run 租期 +
- *    bridge 凭据有效期（B-6：墙钟照走，不续展则长暂停后 hello 永远被拒）→ `paused → ready`
- *    CAS。失败停留 paused 退避重试；notFound 交 keepalive liveness 收口 expired。
+ *    输入 → 能力门禁（A-7：none 时不可达）→ 预算核对（耗尽拒绝 `budget_exhausted`）→
+ *    单飞 `driver.resume(handle, requestedDeadline)` → 续展 run 租期 + bridge 凭据有效期
+ *    （B-6：墙钟照走，不续展则长暂停后 hello 永远被拒）→ `paused → ready` CAS。失败停留
+ *    paused 退避重试；notFound 交 keepalive liveness 收口 expired。预算耗尽 + 用户显式
+ *    输入按意图闭环「停旧 run → checkpoint 重开」（规则本体 `budgetExhaustedClosure.ts`）。
  * 2. **暂停中停止推进**（行为表）：屏障已写好（复用 `stopOperationId`）后的推进实现拆在
  *    `pausedStop.ts`——sweep（tick 兜底）与 stopTask（受理即时）共用。
  * 3. **空闲 pause 拍**（D3/08 §7 修订，第 3 批）：裁决在纯模块 `idlePolicy.ts`、编排拆在
- *    `idlePause.ts`——对 ready + 无业务活动 + 无客户端连接达到阈值的 run 调用 `pauseRun`。
- * 4. **pause 转换助手**（B-4 顺序冻结，`pauseRun`）：checkpoint(如需) → `driver.pause` →
- *    provider paused 确认 → detach registry → `ready → paused` CAS；确认前绝不写 paused。
+ *    `idlePause.ts`；4. **pause 转换助手**（B-4 顺序冻结，`pauseRun`）：checkpoint(如需) →
+ *    `driver.pause` → provider paused 确认 → detach registry → `ready → paused` CAS；
+ *    确认前绝不写 paused。
  *
  * 纪律：能力门禁只读 driver 能力声明（实测解禁前一律 none），不持第二份开关。
  */
@@ -21,11 +22,14 @@ import type { CloudRunRecord } from "@zcode/shared";
 import { mayPauseRun, resumeBudgetExhausted } from "../../domain/taskRunState.js";
 import type { CloudCoreDeps } from "../deps.js";
 import { cloudCoreLogger } from "../logger.js";
+import type { InputGateway } from "../inputDelivery/gateway.js";
 import type { ProviderObservation } from "../ports/sandboxDriverPort.js";
 import type { RunCompensation } from "../provisioning/compensation.js";
 import type { RunOrchestrator } from "../runOrchestrator.js";
 import { fail, ok, type CloudAppResult } from "../result.js";
 import type { AttachmentRegistry } from "../attachments/registry.js";
+import { createBudgetExhaustedClosure } from "./budgetExhaustedClosure.js";
+import type { DrainLoop } from "./drain.js";
 import { createIdlePauseSweep, type IdlePauseSweepReport } from "./idlePause.js";
 import { createPausedStopAdvance } from "./pausedStop.js";
 
@@ -41,6 +45,8 @@ export interface ResumeSweepReport {
   stopAdvanced: number;
   /** 因暂停预算耗尽被拒绝的 resume 尝试数（输入保持 accepted）。 */
   budgetExhausted: number;
+  /** 预算耗尽 + 用户显式输入 → 「停旧 run + 重开」闭环完成的 run 数（串联失败不计）。 */
+  budgetExhaustedReopened: number;
   /** 能力门禁关闭（pauseResume=none）而跳过的 run 数（fail-closed 路径不可达）。 */
   gatedSkipped: number;
 }
@@ -52,8 +58,8 @@ export interface PauseResumeControl {
   sweep(now?: number): Promise<ResumeSweepReport>;
   /**
    * 空闲 pause 拍（D3/08 §7 修订）：对满足 idlePolicy 裁决的 ready run 调用 `pauseRun`。
-   * 在 lifecycleTick 中位于 drain.sweep 之前——同一拍内 pause 成功的 run 已离开 ready，
-   * 不会被 idle drain 重复处理（单轨 F-3 的第一道互斥；第二道是 drain.sweep 的守卫）。
+   * 在 lifecycleTick 中位于 drain.sweep 之前——同拍 pause 成功的 run 已离开 ready，
+   * 不会被 idle drain 重复处理（单轨 F-3 第一道互斥；第二道是 drain.sweep 的守卫）。
    */
   idleSweep(now?: number): Promise<IdlePauseSweepReport>;
   /**
@@ -71,9 +77,8 @@ export interface PauseResumeControl {
   /**
    * 暂停中停止推进（行为表共享实现，实现在 `pausedStop.ts`）：`paused → draining` CAS →
    * 直接 terminate → `stopped` 收口（dataAtRisk 按 stop op 结算事实）。传入记录已是
-   * `draining`（stop 受理路径 beginDrain 已推进）时跳过 CAS 直接 terminate。返回 false =
-   * 状态被并发改变或终止未确认，由调用方按自身节奏重试（sweep 下拍重试；stopTask 的 run
-   * 留给 stop sweep 与 compensation 循环按证据收口）。
+   * `draining` 时跳过 CAS 直接 terminate。返回 false = 状态被并发改变或终止未确认，
+   * 由调用方按自身节奏重试（sweep 下拍；stopTask 的 run 留给 stop sweep 按证据收口）。
    */
   advancePausedStop(run: CloudRunRecord, now: number): Promise<boolean>;
 }
@@ -83,8 +88,12 @@ export function createPauseResumeControl(
   orchestrator: RunOrchestrator,
   compensation: RunCompensation,
   registry: AttachmentRegistry,
+  /** durable input gateway：预算耗尽闭环的 reopen 走同一唯一写入路径（02 §6.1）。 */
+  inputs: InputGateway,
+  /** drain 入口：闭环停止复用「屏障 + paused→draining」同一实现（08 §8.1）。 */
+  drain: Pick<DrainLoop, "beginDrain">,
 ): PauseResumeControl {
-  const { storage, drivers, clock, config } = deps;
+  const { storage, drivers, clock, ids, config } = deps;
   const inFlight = new Set<string>();
   const nextResumeAttemptAt = new Map<string, number>();
 
@@ -105,8 +114,8 @@ export function createPauseResumeControl(
       report.gatedSkipped += 1;
       return;
     }
-    // A-7 能力门禁：pauseResume=none（未实测）时路径不可达——不 resume、不报错（这是
-    // 预期形态：能力位 none 的 provider 根本不该出现 paused run，见到即记 warn 供排查）。
+    // A-7 能力门禁：pauseResume=none（未实测）时路径不可达——不 resume、不报错
+    // （预期形态：none 的 provider 根本不该出现 paused run，见到即记 warn 供排查）。
     const capabilities = await driver.describeCapabilities();
     if (capabilities.pauseResume === "none") {
       report.gatedSkipped += 1;
@@ -119,7 +128,7 @@ export function createPauseResumeControl(
     if (inFlight.has(run.runId)) return;
     // 暂停预算（08 §7 修订：hardDeadline 在 memory 级 pause 语义下转为暂停预算）耗尽：
     // 拒绝 resume（budget_exhausted），输入保持 accepted；终局由 keepalive liveness 在
-    // provider 保留期尽后收口 expired 并释放占槽。
+    // provider 保留期尽后收口 expired。
     if (resumeBudgetExhausted({ run, now })) {
       report.budgetExhausted += 1;
       cloudCoreLogger.warn(undefined, "cloud resume rejected: pause budget exhausted", {
@@ -128,6 +137,12 @@ export function createPauseResumeControl(
         hardDeadlineAt: run.hardDeadlineAt,
         errorCode: "budget_exhausted",
       });
+      // 08 §7 修订（2026-10-09 第二批）：预算耗尽 + 用户显式发消息 = 继续工作意图，
+      // 停旧 run → 以该消息 checkpoint 重开（规则本体 budgetExhaustedClosure.ts）；
+      // 无用户输入的 run 维持现状（保留期尽后 liveness 收口 expired）。
+      if (await closeBudgetExhaustedRunWithUserInput(run)) {
+        report.budgetExhaustedReopened += 1;
+      }
       return;
     }
     const backoffAt = nextResumeAttemptAt.get(run.runId);
@@ -200,6 +215,9 @@ export function createPauseResumeControl(
       }
       nextResumeAttemptAt.delete(run.runId);
       report.resumed += 1;
+      // resume 是为继续 pending 工作而做的推进，即业务活动（08 §7 事实源收窄补充）；
+      // 不推进的话 idle 拍会在回合产出首批投影前把 run 再次暂停（实测二次暂停中断回合）。
+      await storage.runs.touchBusinessActivity({ runId: run.runId, at: now });
       cloudCoreLogger.info(undefined, "cloud run resumed to ready", {
         taskId: run.taskId,
         runId: run.runId,
@@ -319,6 +337,15 @@ export function createPauseResumeControl(
   }
 
   const advancePausedStop = createPausedStopAdvance(deps, orchestrator, compensation);
+  // 预算耗尽 + 用户显式输入的意图闭环（08 §7 修订第二批）：规则本体在 budgetExhaustedClosure.ts。
+  const closeBudgetExhaustedRunWithUserInput = createBudgetExhaustedClosure({
+    storage,
+    ids,
+    clock,
+    inputs,
+    drain,
+    advancePausedStop,
+  });
   const idleSweep = createIdlePauseSweep(deps, pauseRun);
 
   return {
@@ -328,6 +355,7 @@ export function createPauseResumeControl(
         resumed: 0,
         stopAdvanced: 0,
         budgetExhausted: 0,
+        budgetExhaustedReopened: 0,
         gatedSkipped: 0,
       };
       const runs = await storage.runs.listNonTerminal();

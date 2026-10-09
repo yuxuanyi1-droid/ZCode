@@ -4944,7 +4944,9 @@ export function SessionPane({
                     id:
                       classifySubscribeError(state.lastError).kind === "structured-validation"
                         ? "cloud.run.error.validationRejected"
-                        : "cloud.run.liveReconnectFailed",
+                        : classifySubscribeError(state.lastError).kind === "cloud-unavailable"
+                          ? "cloud.run.error.environmentUnavailable"
+                          : "cloud.run.liveReconnectFailed",
                   })
                 : intl.formatMessage({ id: "cloud.run.liveReconnecting" })}
             </span>
@@ -5036,7 +5038,10 @@ export function SessionPane({
                 ) : null
               }
               emptyState={
-                isDraft ? (
+                // 云任务 paused（2026-10-09 修订）等「无绑定会话但有跨 run 历史」的草稿态：
+                // 历史块已在 headerSlot 呈现全部已投影回合，不再叠加草稿问候（问候只属于
+                // 真正的空草稿，压在历史上方会遮蔽回放内容）。
+                isDraft && cloudHistoryBlock === null ? (
                   <div data-testid={TID_CHAT_EMPTY} className="w-full">
                     <ConversationDraftEmptyState />
                   </div>

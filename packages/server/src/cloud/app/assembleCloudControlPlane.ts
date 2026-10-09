@@ -166,7 +166,7 @@ export function assembleCloudControlPlane(
   const readiness = createReadinessWatchdog(deps, runs, compensation);
   const drain = createDrainLoop(deps, gitGrants);
   const keepalive = createKeepaliveLoop(deps, runs);
-  const pauseResume = createPauseResumeControl(deps, runs, compensation, registry);
+  const pauseResume = createPauseResumeControl(deps, runs, compensation, registry, gateway, drain);
   const checkpoints = createCheckpointPipeline(deps, gitGrants);
   const taskLifecycle = createTaskLifecycleCommands(deps, taskDetail, drain);
   // stop 受理路径与 pauseResume 拍共用「暂停中停止推进」同一实现（第 2 批遗留 1 去重）。

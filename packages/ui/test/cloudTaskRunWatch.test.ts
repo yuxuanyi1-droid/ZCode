@@ -60,6 +60,13 @@ test("watch continues while the run is not yet visible or provisioning", () => {
   assert.equal(shouldContinueCloudTaskRunWatch(null), true);
 });
 
+// 2026-10-09 paused 呈现修订：paused append 202 后由控制面自驱 resume（或预算耗尽
+// 收口停+重开），客户端只有靠这轮有界轮询把 ready（恢复绑定）或终态（reopenable
+// 投影）翻回详情投影——paused 不再是停止条件。
+test("watch continues while paused so send-to-resume flips the detail back", () => {
+  assert.equal(shouldContinueCloudTaskRunWatch(detailWithRun("paused")), true);
+});
+
 test("watch stops at ready and terminal run states", () => {
   for (const status of ["ready", "failed", "stopped", "expired", "disconnected", "draining"]) {
     assert.equal(

@@ -179,6 +179,12 @@ stopRequested 是优先于 Run 状态的持久门控：收到受理后显示“�
 
 2026-10-09 修订（生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）：run 状态投影如实呈现 `paused` 与恢复中的 `resuming`（暂停保留与恢复进度复用既有进行中横幅语义）；`paused` 期间用户发消息走 03 §6 的控制面自驱 resume（同一 run，UI 明示「正在恢复运行环境」，不得呈现为重开或新 run）；能力位 `none` 的 provider 不出现 `paused` 投影（fail-closed：UI 不为未声明的能力保留状态位）。
 
+2026-10-09 修订（用户实测缺陷：paused run 被全屏「连接已断开」错误面板遮蔽）：
+
+- **paused 不绑定实时会话（P1）**：`activeRun.status === "paused"` 时 pane 不绑定 runtime 会话（`resolveCloudTaskRuntimeSession` 返回无会话）——执行域 attachment 已被控制面 detach，继续按 `sess_…` 订阅只会得到 `cloud task … has no ready run attachment` 的结构化失败，全屏「连接已断开」错误面板替换工作区、composer 消失，「发消息即可恢复」横幅被遮蔽。不绑定时 pane 呈现：paused 横幅（CloudTaskRunStatusBanner）+ 跨 run 只读历史（GET /tasks/:id/history，02 §7.3 持久副本，沙箱暂停亦可读）+ 可用 composer（HTTP 独立通道）；用户发送走 paused→resume（03 §6），run 回 ready 后详情刷新、绑定自然恢复、订阅带回回放——paused 前的历史回合在恢复前后都不丢。
+- **run watch 覆盖 paused append**：paused append 202 后与首发同款启动有界 run 观察，且 `paused` 从「停止条件」改为「继续条件」——自驱 resume/预算耗尽收口由服务端异步推进，客户端靠轮询把 ready（恢复绑定）或终态（reopenable 投影）翻回详情投影，60s 上限兜底。
+- **订阅错误标题归一**：`… has no ready run attachment` 这类云执行域不可用失败不是「与代理的连接已断开」——`classifySubscribeError` 新增 `cloud-unavailable` 分类，标题呈现「运行环境暂不可用，稍后会自动重试；也可以点击重连」，原始串仍收进技术细节区；真正断连场景（generic）沿用重连文案。
+
 2026-10-09 修订（用户实测复发：欢迎/迁移向导每次刷新必弹且关闭不持久）：首启「欢迎使用 ZCode」迁移向导（`OnboardingDialog`，挂载于 Root 的 `OccupationOnboarding` children 内）的 first-run 判定走 `settings-sync` 频道（`getFirstRunPromptState`/`markFirstRunPromptHandled`），而该频道不在 03 §7.1 云 host 暴露面（扫描/导入本机执行域配置，按 allowlist 边界不外露）。云模式下状态读取被未知频道超时拒绝时，原实现按 fail-open 弹出向导且关闭写回同样失败，形成「刷新必弹、关闭无效」死循环（server.log 实证 `Unknown channel: settings-sync`）。行为统一到 first-run 引导同一套纪律（§first-run 引导 P2 修订）：
 
 - **fail-closed**：首启提示状态读取失败（频道不存在/RPC 错误）时不得自动弹出向导——读不到的键同样写不进，fail-open 必然死循环；仅记录 warn 保持关闭，设置页与引导链的显式打开入口不受影响。firstRun 意图的 detect 失败同理不自动弹（manual 意图保留打开以呈现错误）。

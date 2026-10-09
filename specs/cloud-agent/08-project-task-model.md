@@ -90,6 +90,8 @@ stateDiagram-v2
 
 **修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）**：状态机增加 `paused` 节点与四条边（上图已并入）：`ready → paused`（仅 `pauseResume ≠ none` 的 provider；顺序冻结：checkpoint（如需）→ provider paused 确认 → detach registry → status=paused；watchdog 显式跳过 paused）；`paused → ready`（控制面自驱 resume，含用户发消息触发；同 run 同 generation，不换代、不重开）；`paused → draining`（暂停中收到停止意图：屏障后直接 terminate，暂停态无运行时写入可收口）；`paused → expired`（终局：暂停预算耗尽 → 停接受 resume（`budget_exhausted`）→ provider 保留期尽 → keepalive liveness 确认实例不存在 → expired，释放占槽）。`paused` 不是终态、照常占槽（§6）；能力位 `none` 的 provider 不进入 paused，生命周期行为与现状完全一致。
 
+**修订（2026-10-09 第二批，暂停预算耗尽的用户意图闭环）**：暂停预算耗尽的 paused run 上，用户显式发消息（accepted append 存在）即继续工作意图——自驱 resume 不再无限重试被拒后让输入永远挂 accepted，而是控制面在同一 sweep 通路内自动「停止旧 run（复用暂停中停止推进，屏障+terminate+终态如实标 dataAtRisk）→ 以该消息为 prompt 串联 reopen（checkpoint 恢复语义：有 lastCheckpointSha 选 checkpoint、否则 restart-from-base；requestedConfig 随行；走同一 durable gateway，revision CAS 与 08 §9 重开核验原样生效）」。串联失败不自动重试：run 已终态时由既有 reopenable 投影 + 用户手动重开接管；多条排队输入只携带首条 append，其余由终态扫口如实收口 cancelled。无用户输入的 budget-exhausted run 维持原终局（保留期尽 → expired）。此闭环属用户意图的承接，不是自动续期暂停预算。
+
 ### 3.3 Execution / 保存 / 产物投影
 
 - Execution：unknown / idle / running / awaiting-input；更新必须有runtime来源、epoch与revision。

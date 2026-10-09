@@ -358,6 +358,20 @@ test("composer send routes user-initiated sends; terminal run reopens instead of
     { kind: "append", expectedRunGeneration: 2 },
   );
 
+  // 2026-10-09 paused 呈现修订：暂停保留中的 run 发消息 = 同 run 同 generation 的
+  // append（paused→resume 通路，03 §6 修订），不是 reopen 也不是 blocked——这是
+  // 「发消息即可恢复」的路由依据；pane 此刻无绑定会话（paused 不订阅），composer
+  // 的发送完全走这条 HTTP 通路。
+  assert.deepEqual(
+    resolveCloudComposerSendPlan({
+      ...base,
+      task: { status: "active", revision: 5 },
+      activeRun: { runGeneration: 1, provider: "e2b", status: "paused" },
+      actions: ["send-input", "stop"],
+    } as Parameters<typeof resolveCloudComposerSendPlan>[0]),
+    { kind: "append", expectedRunGeneration: 1 },
+  );
+
   // 终态 run 已被收回（无 activeRun）+ actions.reopen：自动重开——不发注定 409 的
   // append；resume 按持久事实自动选（saved checkpoint → checkpoint）。
   assert.deepEqual(

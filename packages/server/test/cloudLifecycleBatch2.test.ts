@@ -10,7 +10,8 @@
  *   2026-10-09 真实账号实测解禁为 memory 级）；未实测 provider 一律 none、pause/resume
  *   路径不可达（本地能力错误，不发起 provider 请求）；paused 观测态归一；
  * - resume 通路（03 §6 修订）：paused append 接受（202）、dispatcher wait run-paused、
- *   自驱 resume → 续租 → ready；失败退避；预算耗尽拒绝（budget_exhausted）；
+ *   自驱 resume → 续租 → ready；失败退避；预算耗尽拒绝（budget_exhausted）且按用户
+ *   意图闭环停旧 run + checkpoint 重开（08 §7 修订 2026-10-09 第二批，串联失败降级）；
  *   能力 none 跳过（fail-closed）；暂停中停止推进（屏障复用 → draining → stopped）；
  * - keepalive liveness：paused→保持不收口；notFound→expired+释放槽；startup paused→保持；
  * - 行为表：complete=拒绝、archive=409、reopen=recovery_required；markReady 幂等 ready；
@@ -536,7 +537,59 @@ test("resume 失败停留 paused 退避重试；notFound 交 keepalive liveness�
   assert.equal((await context.storage.runs.get(session.runId))?.status, "paused");
 });
 
-test("resume × 预算耗尽：拒绝（budget_exhausted）、输入保持 accepted、run 停留 paused", async () => {
+test(
+  "resume × 预算耗尽 + 用户显式输入：停旧 run → 以该消息 checkpoint 重开（08 §7 修订第二批）",
+  async () => {
+    const context = buildTestPlane();
+    const session = await pausedRun(context);
+    await context.plane.inputs.submit({
+      principalId: PRINCIPAL,
+      taskId: session.taskId,
+      source: "http",
+      request: {
+        intent: "append",
+        commandId: "00000000-0000-4000-8000-0000000000e5",
+        prompt: "too late",
+        expectedRunGeneration: session.runGeneration,
+      },
+    });
+    context.driver.pauseResume = "memory";
+    const run = await context.storage.runs.get(session.runId);
+    assert.ok(run?.hardDeadlineAt, "start 接纳事务已落硬期限（D4-7）");
+    context.clock.set(run.hardDeadlineAt + 1);
+    const report = await context.plane.lifecycle.pauseResume.sweep();
+    assert.equal(report.budgetExhausted, 1);
+    assert.equal(context.driver.resumeCalls, 0, "预算耗尽不再发起 resume");
+    // 用户意图闭环（08 §7 修订 2026-10-09 第二批）：停旧 run → 串联 reopen，输入不丢。
+    assert.equal(report.budgetExhaustedReopened, 1);
+    const closed = await context.storage.runs.get(session.runId);
+    assert.equal(closed?.status, "stopped", "旧 run 经暂停中停止推进收口终态");
+    assert.equal(closed?.stopRequested, true, "复用持久停止屏障（08 §8.1）");
+    assert.ok(context.driver.terminateCalls >= 1, "暂停态直接 terminate（无 checkpoint 前置）");
+    // 原输入：内容已由 reopen 承接，终态扫口如实收口 cancelled（不静默丢弃）。
+    const oldInput = await context.storage.inputs.get(
+      session.taskId,
+      "00000000-0000-4000-8000-0000000000e5",
+    );
+    assert.equal(oldInput?.deliveryStatus, "cancelled");
+    // 新 run：同一 durable gateway 的 reopen input，prompt=用户消息（checkpoint 恢复语义
+    // 按持久事实自动选：无 checkpoint → restart-from-base）。
+    const deliverable = await context.storage.inputs.listDeliverable(session.taskId);
+    const reopenInput = deliverable.find((input) => input.intent === "reopen");
+    assert.ok(reopenInput, "串联 reopen input 已被同一 gateway 接纳");
+    assert.equal(reopenInput.deliveryStatus, "accepted");
+    const payload = await context.storage.payloads.readInputPayload({
+      taskId: session.taskId,
+      commandId: reopenInput.commandId,
+    });
+    assert.equal(payload?.prompt, "too late", "用户消息原文随 reopen 首条投递");
+    assert.notEqual(reopenInput.commandId, "00000000-0000-4000-8000-0000000000e5");
+    const created = await context.plane.provisioning.create.runCreateOnce();
+    assert.equal(created?.outcome, "created", "新 run 已进入 provisioning");
+  },
+);
+
+test("预算耗尽闭环串联失败降级：run 已终态，reopen 被拒不重试（reopenable 投影接管）", async () => {
   const context = buildTestPlane();
   const session = await pausedRun(context);
   await context.plane.inputs.submit({
@@ -545,24 +598,29 @@ test("resume × 预算耗尽：拒绝（budget_exhausted）、输入保持 accep
     source: "http",
     request: {
       intent: "append",
-      commandId: "00000000-0000-4000-8000-0000000000e5",
+      commandId: "00000000-0000-4000-8000-0000000000e7",
       prompt: "too late",
       expectedRunGeneration: session.runGeneration,
     },
   });
   context.driver.pauseResume = "memory";
+  // 让 reopen 预检失败：清掉冻结基线（task-baseline-not-frozen）。
+  const staleBaseline = context.storage.tasksById.get(session.taskId);
+  assert.ok(staleBaseline);
+  const degradedTask: CloudTaskRecord = { ...staleBaseline };
+  delete (degradedTask as Partial<CloudTaskRecord>).baseSha;
+  delete (degradedTask as Partial<CloudTaskRecord>).taskBranch;
+  context.storage.tasksById.set(session.taskId, degradedTask);
   const run = await context.storage.runs.get(session.runId);
-  assert.ok(run?.hardDeadlineAt, "start 接纳事务已落硬期限（D4-7）");
+  assert.ok(run?.hardDeadlineAt);
   context.clock.set(run.hardDeadlineAt + 1);
   const report = await context.plane.lifecycle.pauseResume.sweep();
   assert.equal(report.budgetExhausted, 1);
-  assert.equal(context.driver.resumeCalls, 0, "预算耗尽不再发起 resume");
-  assert.equal((await context.storage.runs.get(session.runId))?.status, "paused");
-  const input = await context.storage.inputs.get(
-    session.taskId,
-    "00000000-0000-4000-8000-0000000000e5",
-  );
-  assert.equal(input?.deliveryStatus, "accepted", "202 已持久接收，不被追溯拒绝");
+  assert.equal(report.budgetExhaustedReopened, 0, "串联被拒不计数、不重试");
+  assert.equal((await context.storage.runs.get(session.runId))?.status, "stopped");
+  // 新输入不存在：终态后 UI 以 reopenable 投影 + 手动重开接管。
+  const deliverable = await context.storage.inputs.listDeliverable(session.taskId);
+  assert.equal(deliverable.some((input) => input.intent === "reopen"), false);
 });
 
 test("能力门禁关闭（pauseResume=none）：resume 路径不可达（fail-closed，gatedSkipped）", async () => {
