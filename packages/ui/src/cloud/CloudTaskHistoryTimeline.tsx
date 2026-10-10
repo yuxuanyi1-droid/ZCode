@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { ConversationShareReadonlyTimeline } from "@/v4/ConversationShareReadonlyTimeline.js";
 import type { UseCloudTaskHistoryReplayResult } from "@/hooks/cloud/useCloudTaskHistoryReplay.js";
+import { cloudTaskErrorCodeMessageKey } from "@/cloud/cloudTaskErrorText.js";
 import { resolveCloudTaskHistoryViewPlan } from "@/store/cloud/cloudTaskHistoryReplay.js";
 
 export interface CloudTaskHistoryTimelineProps {
@@ -43,6 +44,13 @@ export function CloudTaskHistoryTimeline({
     streams: history.replay.streams,
     ...(excludeTopic !== undefined ? { excludeTopic } : {}),
   });
+
+  // 2026-10-09 实测缺陷：history 失败时 store 里的 error 是 describeCloudSubmissionError
+  // 的原始错误码（如 protocol_incompatible），直接当文案渲染用户无法行动。
+  // 按 04 §6「UI 不解析异常文字、按 code 归类」：命中 cloudTaskErrorCodeMessageKey
+  // 文案表即翻译成可读提示；未映射码回落原始串，不猜语义（09 §8）。
+  const errorCodeMessageKey =
+    history.error === null ? null : cloudTaskErrorCodeMessageKey(history.error);
 
   if (!plan.visible) {
     return null;
@@ -102,7 +110,9 @@ export function CloudTaskHistoryTimeline({
           className="flex items-center gap-2 px-4 text-ui-sm text-[var(--color-danger)]"
         >
           <span className="min-w-0 flex-1">
-            {history.error ?? intl.formatMessage({ id: "cloud.history.loadFailed" })}
+            {errorCodeMessageKey !== null
+              ? intl.formatMessage({ id: errorCodeMessageKey })
+              : (history.error ?? intl.formatMessage({ id: "cloud.history.loadFailed" }))}
           </span>
           <Button type="button" variant="outline" size="sm" onClick={history.reload}>
             {intl.formatMessage({ id: "common.retry" })}

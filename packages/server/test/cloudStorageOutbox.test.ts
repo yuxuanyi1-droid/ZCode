@@ -332,3 +332,86 @@ test("ambiguous 保留待对账，可重新领取后定案", async () => {
     await removeTestRoot(handle.root);
   }
 });
+
+test("requeueFailed：仅 failed → pending 的 CAS，attempt/错误码保持（08 §8.1 修订）", async () => {
+  const handle = await openTestStorage();
+  try {
+    const enqueued = await handle.storage.operations.enqueue({
+      operationId: newUuid(),
+      kind: "terminate",
+      idempotencyKey: "terminate:run-5",
+      now: TEST_NOW,
+    });
+
+    // 非 failed 状态不可重排队：pending。
+    assert.equal(
+      await handle.storage.operations.requeueFailed({
+        operationId: enqueued.operationId,
+        now: nextNow(1),
+      }),
+      false,
+      "pending 不是重排队对象",
+    );
+
+    // failed → pending：重排队成功，attempt 保持（退避与封顶按 attempt 判定）。
+    const lease = await handle.storage.operations.leaseNext({
+      kinds: ["terminate"],
+      workerId: "worker-a",
+      leaseMs: 1_000,
+      now: nextNow(1),
+    });
+    assert.equal(lease?.operation.attempt, 1);
+    assert.equal(
+      await handle.storage.operations.settle({
+        operationId: enqueued.operationId,
+        leaseToken: lease?.leaseToken as string,
+        outcome: "failed",
+        errorCode: "provider_unreachable",
+        now: nextNow(2),
+      }),
+      true,
+    );
+    assert.equal(
+      await handle.storage.operations.requeueFailed({
+        operationId: enqueued.operationId,
+        now: nextNow(3),
+      }),
+      true,
+    );
+    const requeued = await handle.storage.operations.get(enqueued.operationId);
+    assert.equal(requeued?.state, "pending");
+    assert.equal(requeued?.attempt, 1, "attempt 不清零");
+    assert.equal(requeued?.errorCode, "provider_unreachable", "最后一次失败证据保留可查");
+    assert.equal(requeued?.leaseExpiresAt, undefined, "租约字段清空");
+
+    // ambiguous/settled 不可重排队（ambiguous 归对账、settled 是已确认事实）。
+    const secondLease = await handle.storage.operations.leaseNext({
+      kinds: ["terminate"],
+      workerId: "worker-b",
+      leaseMs: 1_000,
+      now: nextNow(4),
+    });
+    assert.equal(secondLease?.operation.attempt, 2, "重排队后由租约重领（attempt 递增）");
+    assert.equal(
+      await handle.storage.operations.settle({
+        operationId: enqueued.operationId,
+        leaseToken: secondLease?.leaseToken as string,
+        outcome: "ambiguous",
+        now: nextNow(5),
+      }),
+      true,
+    );
+    assert.equal(
+      await handle.storage.operations.requeueFailed({
+        operationId: enqueued.operationId,
+        now: nextNow(6),
+      }),
+      false,
+      "ambiguous 归对账通路，不走失败重排队",
+    );
+    assert.equal((await handle.storage.operations.get(enqueued.operationId))?.state, "ambiguous");
+  } finally {
+    await handle.close();
+    await removeTestRoot(handle.root);
+  }
+});

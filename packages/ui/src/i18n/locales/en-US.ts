@@ -1200,6 +1200,11 @@ const enUS: Record<string, string> = {
   "git.empty.gitUnavailableTitle": "Git is not available in this environment",
   "git.empty.gitUnavailableDescription":
     "Install Git first, or make sure the current runtime environment can execute the git command.",
+  "git.cloud.pausedDescription":
+    "Send a message to resume the run (same run, it will not restart). Git changes become available once it resumes.",
+  "git.cloud.environmentUnavailableTitle": "Runtime environment is unavailable",
+  "git.cloud.environmentUnavailableDescription":
+    "Git changes become available once the runtime environment is ready.",
   "git.empty.notRepositoryTitle": "This workspace is not inside a Git repository",
   "git.empty.notRepositoryDescription":
     "Open a Git repository directory and this pane will show changes scoped to the current workspace.",
@@ -6891,6 +6896,8 @@ const enUS: Record<string, string> = {
   "cloud.errors.provider_unreachable": "The cloud provider is temporarily unreachable",
   "cloud.errors.bridge_disconnected": "The connection to the runtime is down",
   "cloud.errors.recovery_required": "This task needs a recovery step first",
+  "cloud.errors.protocol_incompatible":
+    "The app version is incompatible with the server. Refresh the page and try again.",
   "cloud.run.statusWaitingForRun": "Input accepted. Waiting for the cloud environment…",
   "cloud.run.statusPaused": "Run environment paused",
   "cloud.run.statusPausedHint": "Send a message to resume the same run (it will not restart)",

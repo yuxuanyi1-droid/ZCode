@@ -261,6 +261,7 @@ export async function createCloudStorage(options: CloudStorageOptions): Promise<
     leaseNext: (leaseRequest) => request("operations.leaseNext", leaseRequest),
     renewLease: (renewRequest) => request("operations.renewLease", renewRequest),
     settle: (settleRequest) => request("operations.settle", settleRequest),
+    requeueFailed: (requeueRequest) => request("operations.requeueFailed", requeueRequest),
     listUnsettled: () => request("operations.listUnsettled", undefined),
   };
 

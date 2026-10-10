@@ -15,6 +15,7 @@ import type { CloudCoreDeps } from "../deps.js";
 import { cloudCoreLogger } from "../logger.js";
 import type { CloudAppResult } from "../result.js";
 import { hasCheckpointInFlight } from "../../domain/checkpointPolicy.js";
+import { occupiesWorkspaceByInput } from "../../domain/deliveryStatus.js";
 import { decideIdlePause } from "./idlePolicy.js";
 
 /** 空闲 pause 的持久 endReason（run 详情/诊断可读；与 idle drain 的 reason=idle 区分）。 */
@@ -60,8 +61,10 @@ export function createIdlePauseSweep(deps: CloudCoreDeps, pauseRun: PauseRunFn):
         // 08 §7 修订的闲置条件（保守口径，与 drain.sweep 的 idle 判定同源）：
         // 无 pending 输入、无保存中的 checkpoint、有持久业务活动事实且已达到阈值。
         const pendingInputs = await storage.inputs.listDeliverable(run.taskId);
-        const pendingInputCount = pendingInputs.filter(
-          (input) => input.deliveryStatus === "accepted" || input.deliveryStatus === "delivering",
+        // pending 输入事实含 uncertain（08 §7 修订 2026-10-09 审计第一批，domain 唯一谓词）：
+        // 与 resume 触发/idle drain 同口径，漏计会让 run 被暂停且无法自驱恢复。
+        const pendingInputCount = pendingInputs.filter((input) =>
+          occupiesWorkspaceByInput(input.deliveryStatus),
         ).length;
         const checkpoints = await storage.projections.listCheckpoints(run.taskId);
         const decision = decideIdlePause({

@@ -5,10 +5,9 @@
  *
  * 1. **自驱 resume**（03 §6 修订，`resumeRunWithDeliverableInput`）：paused + deliverable
  *    输入 → 能力门禁（A-7：none 时不可达）→ 预算核对（耗尽拒绝 `budget_exhausted`）→
- *    单飞 `driver.resume(handle, requestedDeadline)` → 续展 run 租期 + bridge 凭据有效期
- *    （B-6：墙钟照走，不续展则长暂停后 hello 永远被拒）→ `paused → ready` CAS。失败停留
- *    paused 退避重试；notFound 交 keepalive liveness 收口 expired。预算耗尽 + 用户显式
- *    输入按意图闭环「停旧 run → checkpoint 重开」（规则本体 `budgetExhaustedClosure.ts`）。
+ *    单飞 `driver.resume(handle, requestedDeadline)` → 续租+凭据续展（B-6）→
+ *    `paused → ready` CAS；失败退避重试，notFound 交 keepalive liveness 收口 expired。
+ *    预算耗尽 + 用户显式输入闭环「停旧 run → checkpoint 重开」（budgetExhaustedClosure.ts）。
  * 2. **暂停中停止推进**（行为表）：屏障已写好（复用 `stopOperationId`）后的推进实现拆在
  *    `pausedStop.ts`——sweep（tick 兜底）与 stopTask（受理即时）共用。
  * 3. **空闲 pause 拍**（D3/08 §7 修订，第 3 批）：裁决在纯模块 `idlePolicy.ts`、编排拆在
@@ -20,6 +19,7 @@
  */
 import type { CloudRunRecord } from "@zcode/shared";
 import { mayPauseRun, resumeBudgetExhausted } from "../../domain/taskRunState.js";
+import { occupiesWorkspaceByInput } from "../../domain/deliveryStatus.js";
 import type { CloudCoreDeps } from "../deps.js";
 import { cloudCoreLogger } from "../logger.js";
 import type { InputGateway } from "../inputDelivery/gateway.js";
@@ -126,9 +126,8 @@ export function createPauseResumeControl(
       return;
     }
     if (inFlight.has(run.runId)) return;
-    // 暂停预算（08 §7 修订：hardDeadline 在 memory 级 pause 语义下转为暂停预算）耗尽：
-    // 拒绝 resume（budget_exhausted），输入保持 accepted；终局由 keepalive liveness 在
-    // provider 保留期尽后收口 expired。
+    // 暂停预算（08 §7 修订：hardDeadline 即暂停预算）耗尽：拒绝 resume（budget_exhausted）；
+    // 输入保持 accepted，终局由 keepalive liveness 在 provider 保留期尽后收口 expired。
     if (resumeBudgetExhausted({ run, now })) {
       report.budgetExhausted += 1;
       cloudCoreLogger.warn(undefined, "cloud resume rejected: pause budget exhausted", {
@@ -205,8 +204,8 @@ export function createPauseResumeControl(
         now,
       });
       if (!updated) {
-        // CAS 失败：暂停期间状态已被改变（如停止推进已转 draining）——沙箱恢复成功但
-        // 停止屏障优先生效，stop 推进通路会按 draining 收口；不回写 paused。
+        // CAS 失败：停止推进已赢得竞争（run 已转 draining）——沙箱恢复成功但屏障优先，
+        // stop 推进通路按 draining 收口；不回写 paused。
         cloudCoreLogger.warn(undefined, "cloud resume ready cas failed", {
           taskId: run.taskId,
           runId: run.runId,
@@ -228,10 +227,7 @@ export function createPauseResumeControl(
     }
   }
 
-  /**
-   * pause 转换助手（B-4 顺序冻结；空闲拍与后续预算 pause 的共用入口）。独立闭包函数：
-   * idlePause 编排与控制面对象都引用同一实现（不写两份）。
-   */
+  /** pause 转换助手（B-4 顺序冻结；空闲拍与后续预算 pause 的共用入口，不写两份）。 */
   async function pauseRun(input: {
     taskId: string;
     runId: string;
@@ -368,9 +364,13 @@ export function createPauseResumeControl(
             if (await advancePausedStop(run, now)) report.stopAdvanced += 1;
             continue;
           }
+          // 自驱 resume 触发输入（03 §6 修订，生命周期 v2 审计第一批）：accepted|delivering|
+          // uncertain 都构成「用户意图等待」；resume 后由 reconcile/重投通路收敛，不直接投递。
           const deliverable = await storage.inputs.listDeliverable(run.taskId);
-          const hasAcceptedInput = deliverable.some((input) => input.deliveryStatus === "accepted");
-          if (!hasAcceptedInput) continue;
+          const hasAwaitingInput = deliverable.some((input) =>
+            occupiesWorkspaceByInput(input.deliveryStatus),
+          );
+          if (!hasAwaitingInput) continue;
           await resumeRunWithDeliverableInput(run, now, report);
         } catch (error) {
           // 单 run 异常只属于该 run（D4-9 sweep 隔离），不得穿透整轮 sweep。

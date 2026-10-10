@@ -37,6 +37,7 @@ import { createCheckpointPipeline, type CheckpointPipeline } from "./lifecycle/c
 import { createDrainLoop, type DrainLoop } from "./lifecycle/drain.js";
 import { createKeepaliveLoop, type KeepaliveLoop } from "./lifecycle/keepalive.js";
 import { createPauseResumeControl, type PauseResumeControl } from "./lifecycle/pauseResume.js";
+import { createPausedStopAdvance } from "./lifecycle/pausedStop.js";
 import {
   createProjectionHistoryService,
   type ProjectionHistoryService,
@@ -165,10 +166,15 @@ export function assembleCloudControlPlane(
   const bootstrapConfig = createBootstrapConfigSender(deps, registry);
   const readiness = createReadinessWatchdog(deps, runs, compensation);
   const drain = createDrainLoop(deps, gitGrants);
-  const keepalive = createKeepaliveLoop(deps, runs);
+  // 暂停中停止推进（pausedStop.ts 共享实现）：keepalive 的崩溃窗口兜底认领直接复用同一
+  // 工厂（stop 受理路径经 pauseResume 内部使用同一实现）——一个实现，多处复用，不写两份。
+  const pausedStopAdvance = createPausedStopAdvance(deps, runs, compensation);
+  const keepalive = createKeepaliveLoop(deps, runs, compensation, pausedStopAdvance);
   const pauseResume = createPauseResumeControl(deps, runs, compensation, registry, gateway, drain);
   const checkpoints = createCheckpointPipeline(deps, gitGrants);
-  const taskLifecycle = createTaskLifecycleCommands(deps, taskDetail, drain);
+  // 归档 on paused run（08 §3.2 修订 2026-10-10）：归档驱动的暂停中停止与 stop 受理路径
+  // 复用 pauseResume 暴露的同一推进实现（pausedStop.ts，一个实现多处复用）。
+  const taskLifecycle = createTaskLifecycleCommands(deps, taskDetail, drain, pauseResume);
   // stop 受理路径与 pauseResume 拍共用「暂停中停止推进」同一实现（第 2 批遗留 1 去重）。
   const stop = createStopOperations(deps, runs, compensation, drain, taskDetail, pauseResume);
   const interactions = createInteractionCommands(deps, registry);

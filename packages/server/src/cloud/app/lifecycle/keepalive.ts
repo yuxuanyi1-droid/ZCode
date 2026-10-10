@@ -9,14 +9,30 @@
  * - 不支持 extend 返回能力错误，不伪造续期（01 §4.3）。
  * - 迟到结果必须 CAS 当前 run，不能更新新的 run（08 §7）：updateLease 带 runGeneration。
  * - 活动节流合并为一次续期，不逐 stream chunk 调 API（01 §4.3）：本 sweep 每轮每 run 最多一次。
+ *
+ * 审计第二批增补（03 修订 2026-10-09）：本 sweep 还承担两个有界兜底——
+ * **停止链路崩溃窗口自愈**（draining + stopRequested + 无 stop op 且停摆 → 认领并复用
+ * advancePausedStop 收口 stopped）与**暂停预算耗尽的时间兜底**（paused 超宽限 → 主动
+ * 终止，provider 确认后收口 expired；实现与 liveness 判定在 providerReconciliation.ts）。
  */
 import type { CloudExtensionResponse, CloudRunRecord } from "@zcode/shared";
 import { resolveEffectiveDeadline, shouldRenewLease } from "../../domain/savePolicy.js";
 import type { CloudCoreDeps } from "../deps.js";
 import { cloudCoreLogger } from "../logger.js";
-import type { ProviderObservation } from "../ports/sandboxDriverPort.js";
+import type { RunCompensation } from "../provisioning/compensation.js";
+import type { PausedStopAdvance } from "./pausedStop.js";
 import type { RunOrchestrator } from "../runOrchestrator.js";
 import { fail, ok, type CloudAppResult } from "../result.js";
+import { createProviderFactControl } from "./providerReconciliation.js";
+
+// provider 事实核对与 paused 终局兜底的常量/实现：本体在 providerReconciliation.ts，
+// 这里按既有导入面转出（liveness/暂停预算用例仍从 keepalive 导入）。
+export {
+  PAUSED_BUDGET_END_REASON,
+  PAUSED_BUDGET_TERMINATION_GRACE_MS,
+  PROVIDER_INSTANCE_LOST_END_REASON,
+  PROVIDER_LIVENESS_RECHECK_MS,
+} from "./providerReconciliation.js";
 
 /**
  * 「仍在执行」的判定窗口：对齐 08 §7 周期保存候选 5 分钟——该窗口内有过业务活动
@@ -26,22 +42,6 @@ import { fail, ok, type CloudAppResult } from "../result.js";
  */
 export const BUSINESS_ACTIVITY_FRESH_MS = 5 * 60 * 1000;
 
-/** provider 明确报告实例不存在/已终止时的收口标签（03 §9 可读原因）。 */
-export const PROVIDER_INSTANCE_LOST_END_REASON = "provider-instance-lost";
-
-/**
- * 断连后的 provider 事实核对周期（08 §7 断连保留槽位、01 §4.3 只有确认释放才释放计费槽）。
- *
- * 为什么需要：断连本身**要**保留槽位（bridge 可能重连），但断连之后若没人核对 provider 事实，
- * 一个已被删除/已停止的沙箱会让槽位一直占到硬期限。真实链路：两个 run 停在 disconnected、
- * `quota_released_at` 为 NULL、sandbox 已被 provider 删除（204），期间所有新接纳都 409
- * `quota_exceeded`，直到硬期限才自愈。
- *
- * 频率：不新建定时器，跟着 sweep 既有节奏（lifecycle 30s 一拍）；但同一 run 两次核对之间
- * 至少间隔本值，避免每轮都对每个 run 打 provider。
- */
-export const PROVIDER_LIVENESS_RECHECK_MS = 60_000;
-
 export interface LeaseSweepReport {
   examined: number;
   renewed: number;
@@ -50,6 +50,10 @@ export interface LeaseSweepReport {
   skipped: number;
   /** provider 明确报告实例已不存在/已终止、并已按收口入口终止的 run 数。 */
   instancesLost: number;
+  /** 停止链路崩溃窗口自愈：keepalive 认领「draining + stopRequested + 无 op」并推进到 stopped 的 run 数。 */
+  stopFallbackAdvanced: number;
+  /** 暂停预算超宽限被主动终止并收口 expired 的 run 数。 */
+  pausedBudgetClosed: number;
 }
 
 export interface KeepaliveLoop {
@@ -64,10 +68,13 @@ export interface KeepaliveLoop {
 export function createKeepaliveLoop(
   deps: CloudCoreDeps,
   orchestrator: RunOrchestrator,
+  /** 既有终止入口：预算宽限兜底收口经 providerReconciliation 复用，不另写终止。 */
+  compensation: RunCompensation,
+  /** 暂停中停止推进（pausedStop.ts 共享实现）：崩溃窗口自愈认领时复用同一推进核心。 */
+  advancePausedStop: PausedStopAdvance,
 ): KeepaliveLoop {
   const { storage, operations, drivers, clock, config } = deps;
-  /** 上一次 provider 事实核对时间（进程内节流；重启后立即核对一次，无害）。 */
-  const lastLivenessCheckAt = new Map<string, number>();
+  const providerFacts = createProviderFactControl(deps, orchestrator, compensation);
 
   function executionFreshness(run: CloudRunRecord, now: number): "running" | "idle" {
     const last = run.lastBusinessActivityAt;
@@ -76,110 +83,12 @@ export function createKeepaliveLoop(
   }
 
   /**
-   * 断连/停摆 run 的 provider 事实核对（08 §7、01 §4.3、01 §4.1 修订 2026-10-09）。
-   *
-   * 只对 **provider 的确定事实** 下结论：
-   * - `notFound` / `stopped`（实例不存在或已终止）→ 按既有唯一收口入口
-   *   `RunOrchestrator.settleTerminal` 终止并释放槽位（`termination: "terminated"` 由
-   *   provider 结论作为证据；本文件不另写终止/释放逻辑）；
-   * - `running` → 什么都不做（断连保留槽位，等 bridge 重连）；
-   * - `paused` → 什么都不做（01 §4.1 修订：暂停保留期的实例被 provider 保留，存在性
-   *   核对走 paused 态——**不得**按 stopped/notFound 收口；run 保持 paused、不续期，
-   *   收口只发生在暂停预算/保留期尽后的确定事实上）；
-   * - 不可达/超时/`unknown` → **什么都不做**，只记 warn，下一轮再查。绝不「查不到就释放」：
-   *   结果未知不等于资源已释放（01 §4.3、03 §5），提前释放会让另一个 run 与旧沙箱并跑。
+   * stop 指针是否无对应 operation 行（03 修订审计第二批兜底推进的认领条件之一）：
+   * 指针缺失，或 operations.get 查不到（屏障写入后、入队前崩溃）。指向存在 op 的 run
+   * 一律不认领——pending/failed 的保存重试归 stop sweep（不得绕过保存前置，08 §8.1）。
    */
-  async function reconcileProviderLiveness(
-    run: CloudRunRecord,
-    now: number,
-  ): Promise<"alive" | "lost" | "unknown" | "throttled" | "no-fact" | "stop-pending"> {
-    if (!run.provider || !run.providerHandle) return "no-fact";
-    const last = lastLivenessCheckAt.get(run.runId);
-    if (last !== undefined && now - last < PROVIDER_LIVENESS_RECHECK_MS) return "throttled";
-    lastLivenessCheckAt.set(run.runId, now);
-
-    const driver = await drivers.resolve(run.provider);
-    if (!driver) {
-      cloudCoreLogger.warn(undefined, "cloud provider liveness check unavailable", {
-        runId: run.runId,
-        provider: run.provider,
-      });
-      return "unknown";
-    }
-    let observation: ProviderObservation;
-    try {
-      observation = await driver.inspect({
-        provider: run.provider,
-        sandboxId: run.providerHandle,
-      });
-    } catch (error) {
-      // 不可达/超时：结果未知，保留槽位并等下一轮；不猜、不提前释放。
-      cloudCoreLogger.warn(undefined, "cloud provider liveness check failed", {
-        runId: run.runId,
-        provider: run.provider,
-        message: error instanceof Error ? error.message : String(error),
-      });
-      return "unknown";
-    }
-    if (observation.status === "running") return "alive";
-    if (observation.status === "paused") {
-      // 暂停保留期（01 §4.1 修订）：实例仍被 provider 保留，绝不按 stopped 收口。
-      cloudCoreLogger.debug(undefined, "cloud provider liveness paused", {
-        runId: run.runId,
-        provider: run.provider,
-      });
-      return "alive";
-    }
-    if (observation.status === "unknown") {
-      cloudCoreLogger.warn(undefined, "cloud provider liveness unknown", {
-        runId: run.runId,
-        provider: run.provider,
-      });
-      return "unknown";
-    }
-
-    // 已请求停止的 run 收口为 stopped；未请求停止却资源消失按 expired 收口（08 §3.2 状态图，
-    // 与补偿路径 `settleTerminated` 同口径）。保存风险如实暴露（08 §8.2）：与 stop sweep 同一
-    // 判据——stop operation 已 settled 才算保存已确认。
-    // 第 2 批遗留 2：stopRequested 但尚未 draining（paused/disconnected/ready）的 run 在这里
-    // **跳过收口**（实例消失的事实不在此定终态）——迁移表没有 paused→stopped 边，若按 expired
-    // 收口会与 stop 屏障打架（「用户已停止」的 run 以过期终态落账）。终态由 stop 推进通路
-    // （pauseResume.advancePausedStop / drain→stop sweep）收口 stopped。
-    if (run.stopRequested === true && run.status !== "draining") {
-      return "stop-pending";
-    }
-    const to = run.status === "draining" ? "stopped" : "expired";
-    let dataAtRisk = true;
-    if (to === "stopped" && run.stopOperationId) {
-      const stopOperation = await operations.get(run.stopOperationId);
-      dataAtRisk = stopOperation?.state !== "settled";
-    }
-    const settled = await orchestrator.settleTerminal({
-      runId: run.runId,
-      runGeneration: run.runGeneration,
-      to,
-      endReason: PROVIDER_INSTANCE_LOST_END_REASON,
-      termination: "terminated",
-      dataAtRisk,
-      lastError: `provider reported instance ${observation.status}`,
-    });
-    if (!settled.ok) {
-      // CAS 失败（run 已换代/已终态）：不重试，下一轮重新核对（幂等）。
-      cloudCoreLogger.warn(undefined, "cloud lost instance could not be settled", {
-        runId: run.runId,
-        code: settled.code,
-        reason: settled.reason,
-      });
-      return "unknown";
-    }
-    lastLivenessCheckAt.delete(run.runId);
-    cloudCoreLogger.info(undefined, "cloud run closed: provider instance lost", {
-      taskId: run.taskId,
-      runId: run.runId,
-      to,
-      instanceStatus: observation.status,
-    });
-    return "lost";
+  async function isStopOperationMissing(run: CloudRunRecord): Promise<boolean> {
+    return !run.stopOperationId || (await operations.get(run.stopOperationId)) === null;
   }
 
   async function renewRun(run: CloudRunRecord, now: number): Promise<LeaseSweepReport> {
@@ -190,6 +99,8 @@ export function createKeepaliveLoop(
       unsupported: 0,
       skipped: 0,
       instancesLost: 0,
+      stopFallbackAdvanced: 0,
+      pausedBudgetClosed: 0,
     };
     if (run.status === "stopped" || run.status === "expired" || run.status === "failed") {
       report.skipped += 1;
@@ -290,11 +201,56 @@ export function createKeepaliveLoop(
         unsupported: 0,
         skipped: 0,
         instancesLost: 0,
+        stopFallbackAdvanced: 0,
+        pausedBudgetClosed: 0,
       };
       for (const run of runs) {
         // D4-9（审计 #5）：单 run 的核对/续期异常只属于该 run，不得穿透整轮 sweep
         //（否则一个毒 run 会挡住其余 run 的续期与 provider 事实核对）。记 warn 后继续。
         try {
+          // 兜底推进（03 修订审计第二批：停止链路崩溃窗口自愈）。窗口：beginDrain 写好
+          // 屏障并推进 paused→draining 后、advancePausedStop 前崩溃 → draining run 的
+          // stop 指针无 operation 行（paused 分支不入队 checkpoint op）——stop sweep 对
+          // 无 op 行只跳过、pauseResume sweep 只认 paused，run 卡 draining 到 provider
+          // 保留期尽。这里认领并复用 advancePausedStop 直接 terminate 收口 stopped。
+          // 守卫逐条说明：
+          // - 停摆（超过 drain 预算无进展）才认领：正常推进在一拍内完成，不与在途的
+          //   stopTask/预算闭环串联抢跑；
+          // - 只认「op 行不存在」：pending/leased/failed 的 op 归 stop sweep（保存重试
+          //   与预算内重试是它的职责，不得在此绕过保存前置，08 §8.1）；
+          // - 就绪态停止「屏障已写、checkpoint op 未入队」的微窗口同样命中本兜底：
+          //   屏障即用户停止意图，收口后 dataAtRisk 如实为 true（provider 保留期与
+          //   dataAtRisk 是该微窗口的既定 backstop）。
+          if (
+            run.status === "draining" &&
+            run.stopRequested === true &&
+            isDrainStalled(run, now, config.drainBudgetMs) &&
+            (await isStopOperationMissing(run))
+          ) {
+            cloudCoreLogger.warn(
+              undefined,
+              "cloud stop fallback advancing draining run without stop operation",
+              {
+                taskId: run.taskId,
+                runId: run.runId,
+              },
+            );
+            if (await advancePausedStop(run, now)) total.stopFallbackAdvanced += 1;
+            continue;
+          }
+          // 暂停预算耗尽的时间兜底（03 修订审计第二批）：paused + 预算耗尽超宽限 →
+          // 主动终止收口 expired（provider 保留期无界时 run 永久占槽）。带停止意图的
+          // paused run 不进本兜底——终态语义归停止推进通路（stopped，不落 expired）。
+          if (
+            run.status === "paused" &&
+            run.stopRequested !== true &&
+            providerFacts.isPauseBudgetGraceExpired(run, now) &&
+            (await providerFacts.terminatePauseBudgetExpired(run))
+          ) {
+            total.pausedBudgetClosed += 1;
+            continue;
+            // 终止未确认：落回 liveness/下一拍重试（幂等 terminate op 键）。
+          }
           // 断连（以及 drain 之后长期无进展的）run：先核对 provider 事实再决定是否续期——
           // 资源已被 provider 删除时续期毫无意义，且槽位会被白占到硬期限。
           // paused（2026-10-09 生命周期 v2）：暂停保留期纳入周期 liveness——provider
@@ -305,7 +261,7 @@ export function createKeepaliveLoop(
             run.status === "paused" ||
             isDrainStalled(run, now, config.drainBudgetMs)
           ) {
-            const liveness = await reconcileProviderLiveness(run, now);
+            const liveness = await providerFacts.reconcileLiveness(run, now);
             if (liveness === "lost") {
               total.instancesLost += 1;
               continue;
@@ -329,10 +285,7 @@ export function createKeepaliveLoop(
         }
       }
       // 节流表只留仍未终态的 run，避免长跑进程里无限增长。
-      const stillLive = new Set(runs.map((run) => run.runId));
-      for (const runId of lastLivenessCheckAt.keys()) {
-        if (!stillLive.has(runId)) lastLivenessCheckAt.delete(runId);
-      }
+      providerFacts.pruneLiveRuns(new Set(runs.map((run) => run.runId)));
       return total;
     },
 

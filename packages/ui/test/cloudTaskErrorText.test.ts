@@ -29,6 +29,21 @@ test("structured action error codes map to user-readable i18n keys", () => {
   assert.equal(cloudTaskErrorCodeMessageKey("rate_limited"), "cloud.errors.rate_limited");
 });
 
+// 实测缺陷回归（2026-10-09，历史时间线）：history wire 校验失败时 SDK 归一为
+// protocol_incompatible，CloudTaskHistoryTimeline 旧实现把 store 里的原始错误码
+// 直接当文案渲染（用户看到 protocolIncompatible 不可行动）。修复后按既有约定
+// 走 cloudTaskErrorCodeMessageKey 文案表归一为「版本不兼容」可读提示。
+test("history timeline raw error code normalizes through the message key table", () => {
+  // store.error 存的是 describeCloudSubmissionError 的结果：结构化错误即原始码字符串。
+  assert.equal(
+    cloudTaskErrorCodeMessageKey("protocol_incompatible"),
+    "cloud.errors.protocol_incompatible",
+  );
+  // 未映射码 / 非结构化消息：返回 null，组件回落原始串或通用 loadFailed 文案。
+  assert.equal(cloudTaskErrorCodeMessageKey("checkpoint_failed"), null);
+  assert.equal(cloudTaskErrorCodeMessageKey("fetch failed"), null);
+});
+
 test("unmapped codes fall back to the raw code instead of guessing", () => {
   // 目录里存在但没有用户动作语义映射的码（如 checkpoint_failed）：返回 null，
   // 由调用方展示原始码，不造一条可能误导的文案。

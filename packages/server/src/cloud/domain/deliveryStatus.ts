@@ -40,3 +40,17 @@ export function canAdvanceDeliveryStatus(
   if (from === to) return true;
   return INPUT_DELIVERY_TRANSITIONS[from].includes(to);
 }
+
+/**
+ * 输入占用事实（08 §7 修订 2026-10-09 生命周期 v2 审计第一批，domain 唯一谓词）：
+ * `accepted | delivering | uncertain` 都算「工作面仍有待完成输入」——uncertain 可能
+ * 已在沙箱执行（结果未知待对账，03 §8），delivering 是投递在途。三个消费方共用本
+ * 谓词保证同一口径（08 §7「保守口径，多处同改」的单一实现）：
+ * - paused 自驱 resume 的触发判定（03 §6 修订：非 accepted 态也构成用户等待意图）；
+ * - 空闲 pause 拍的 pendingInputCount（有占用事实不 pause）；
+ * - idle drain 的 pendingInputCount（有占用事实不归档）。
+ * 只数 accepted 会让带 uncertain/delivering 输入的 run 被空闲暂停且无法自驱恢复。
+ */
+export function occupiesWorkspaceByInput(status: InputDeliveryStatus): boolean {
+  return status === "accepted" || status === "delivering" || status === "uncertain";
+}

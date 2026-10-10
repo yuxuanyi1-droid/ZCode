@@ -189,6 +189,17 @@ export function createFakeOutbox(): FakeOutbox {
       record.updatedAt = request.now;
       return true;
     },
+    async requeueFailed(request) {
+      // 与 SQLite 实现同一 CAS 语义：仅 failed → pending；attempt/错误码保持
+      // （退避与封顶按 attempt 判定，最后一次失败证据保留可查）。
+      const record = records.get(request.operationId);
+      if (!record) return false;
+      if (record.state !== "failed") return false;
+      record.state = "pending";
+      record.updatedAt = request.now;
+      leaseTokens.delete(request.operationId);
+      return true;
+    },
     async listUnsettled() {
       return [...records.values()].filter(
         (item) => item.state === "pending" || item.state === "leased" || item.state === "ambiguous",

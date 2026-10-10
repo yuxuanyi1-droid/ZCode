@@ -14,6 +14,7 @@ import {
   SelectValue,
 } from "@/components/ui/select.js";
 import { type GitPaneFileChange, type GitPaneRepositoryState } from "@/hooks/useGitRepository.js";
+import { resolveGitPaneEmptyStateCopy } from "@/cloud/cloudGitPaneScope.js";
 import { useServices } from "@/hooks/useServices.js";
 import { useFileContextActions } from "@/hooks/useFileContextActions.js";
 import { useWorkspaceOpenInEditorTarget } from "@/hooks/useWorkspaceOpenInEditorTarget.js";
@@ -105,56 +106,27 @@ export function GitPane({
   const normalizedFileChangeFindQuery = fileChangeFindQuery.trim();
 
   const emptyStateCopy = useMemo(() => {
-    if (currentSourceOption.id === "last-turn") {
-      return {
-        title: intl.formatMessage({ id: "git.empty.lastTurnTitle" }),
-        description: intl.formatMessage({
-          id: "git.empty.lastTurnDescription",
-        }),
-      };
-    }
-
-    if (gitState.loading) {
-      return {
-        title: intl.formatMessage({ id: "common.loading" }),
-        description: intl.formatMessage({ id: "git.loading.description" }),
-      };
-    }
-
-    if (gitState.error) {
-      return {
-        title: intl.formatMessage({ id: "git.error.title" }),
-        description: intl.formatMessage(
-          { id: "git.error.description" },
-          { message: gitState.error },
-        ),
-      };
-    }
-
-    if (!gitState.summary.isGitAvailable) {
-      return {
-        title: intl.formatMessage({ id: "git.empty.gitUnavailableTitle" }),
-        description: intl.formatMessage({
-          id: "git.empty.gitUnavailableDescription",
-        }),
-      };
-    }
-
-    if (!gitState.summary.isRepository) {
-      return {
-        title: intl.formatMessage({ id: "git.empty.notRepositoryTitle" }),
-        description: intl.formatMessage({
-          id: "git.empty.notRepositoryDescription",
-        }),
-      };
-    }
-
+    // 云环境感知空态（04 §3.3「2026-10-10 修订」）：paused / 无 attachment 呈现环境
+    // 引导，而不是「请先安装 Git」。文案选择规则收口在纯函数，便于单测覆盖。
+    const copy = resolveGitPaneEmptyStateCopy({
+      isLastTurnSource: currentSourceOption.id === "last-turn",
+      loading: gitState.loading,
+      error: gitState.error,
+      cloudEnvironment: gitState.cloudEnvironment,
+      isGitAvailable: gitState.summary.isGitAvailable,
+      isRepository: gitState.summary.isRepository,
+    });
     return {
-      title: intl.formatMessage({ id: "git.empty.title" }),
-      description: intl.formatMessage({ id: "git.empty.description" }),
+      title: intl.formatMessage({ id: copy.titleMessageId }),
+      description: intl.formatMessage(
+        { id: copy.descriptionMessageId },
+        // 仅 git.error.description 携带 {message} 插值；其余文案不含占位符，多传无害。
+        { message: gitState.error ?? "" },
+      ),
     };
   }, [
     currentSourceOption.id,
+    gitState.cloudEnvironment,
     gitState.error,
     gitState.loading,
     gitState.summary.isGitAvailable,

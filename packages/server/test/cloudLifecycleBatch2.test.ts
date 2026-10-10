@@ -14,7 +14,9 @@
  *   意图闭环停旧 run + checkpoint 重开（08 §7 修订 2026-10-09 第二批，串联失败降级）；
  *   能力 none 跳过（fail-closed）；暂停中停止推进（屏障复用 → draining → stopped）；
  * - keepalive liveness：paused→保持不收口；notFound→expired+释放槽；startup paused→保持；
- * - 行为表：complete=拒绝、archive=409、reopen=recovery_required；markReady 幂等 ready；
+ * - 行为表（08 §3.2 修订 2026-10-10）：complete=拒绝、archive=自动推进停止后归档
+ *   （dataAtRisk 如实落库；terminate 未确认 → 409 重试）、reopen=recovery_required；
+ *   markReady 幂等 ready；
  * - pause 助手（B-4 顺序冻结）：provider 未确认不写 paused；确认后 detach→CAS；
  * - 凭据续展（B-6）：extendForRun 只外推不内缩、已撤销不复活。
  */
@@ -106,7 +108,7 @@ test("resume 预算判定（03 §6 修订）：暂停预算（硬期限）耗尽
   assert.equal(resumeBudgetExhausted({ run: makeRun({ taskId: "t", runId: "r" }), now }), false);
 });
 
-test("Task 能力投影（paused）：send-input 可用、complete/reopen/archive 不投影（行为表同表）", () => {
+test("Task 能力投影（paused）：send-input/stop 可用、archive 放行、complete/reopen 不投影（08 §3.2 修订 2026-10-10 同表）", () => {
   const task = {
     taskId: "t1",
     status: "active",
@@ -125,9 +127,16 @@ test("Task 能力投影（paused）：send-input 可用、complete/reopen/archiv
   assert.ok(actions.includes("send-input"));
   assert.ok(actions.includes("stop"));
   assert.ok(actions.includes("force-stop"));
-  assert.equal(actions.includes("complete"), false);
+  assert.ok(
+    actions.includes("archive"),
+    "paused 投影 archive（归档是用户结束任务的显式意图，2026-10-10 修订）",
+  );
+  assert.equal(
+    actions.includes("complete"),
+    false,
+    "complete 拒绝不变：须先 resume 或完成停止收口",
+  );
   assert.equal(actions.includes("reopen"), false);
-  assert.equal(actions.includes("archive"), false);
 });
 
 // ── B. 迁移 0007（E-1：表重建；0001 冻结不被改写）──
@@ -537,57 +546,54 @@ test("resume 失败停留 paused 退避重试；notFound 交 keepalive liveness�
   assert.equal((await context.storage.runs.get(session.runId))?.status, "paused");
 });
 
-test(
-  "resume × 预算耗尽 + 用户显式输入：停旧 run → 以该消息 checkpoint 重开（08 §7 修订第二批）",
-  async () => {
-    const context = buildTestPlane();
-    const session = await pausedRun(context);
-    await context.plane.inputs.submit({
-      principalId: PRINCIPAL,
-      taskId: session.taskId,
-      source: "http",
-      request: {
-        intent: "append",
-        commandId: "00000000-0000-4000-8000-0000000000e5",
-        prompt: "too late",
-        expectedRunGeneration: session.runGeneration,
-      },
-    });
-    context.driver.pauseResume = "memory";
-    const run = await context.storage.runs.get(session.runId);
-    assert.ok(run?.hardDeadlineAt, "start 接纳事务已落硬期限（D4-7）");
-    context.clock.set(run.hardDeadlineAt + 1);
-    const report = await context.plane.lifecycle.pauseResume.sweep();
-    assert.equal(report.budgetExhausted, 1);
-    assert.equal(context.driver.resumeCalls, 0, "预算耗尽不再发起 resume");
-    // 用户意图闭环（08 §7 修订 2026-10-09 第二批）：停旧 run → 串联 reopen，输入不丢。
-    assert.equal(report.budgetExhaustedReopened, 1);
-    const closed = await context.storage.runs.get(session.runId);
-    assert.equal(closed?.status, "stopped", "旧 run 经暂停中停止推进收口终态");
-    assert.equal(closed?.stopRequested, true, "复用持久停止屏障（08 §8.1）");
-    assert.ok(context.driver.terminateCalls >= 1, "暂停态直接 terminate（无 checkpoint 前置）");
-    // 原输入：内容已由 reopen 承接，终态扫口如实收口 cancelled（不静默丢弃）。
-    const oldInput = await context.storage.inputs.get(
-      session.taskId,
-      "00000000-0000-4000-8000-0000000000e5",
-    );
-    assert.equal(oldInput?.deliveryStatus, "cancelled");
-    // 新 run：同一 durable gateway 的 reopen input，prompt=用户消息（checkpoint 恢复语义
-    // 按持久事实自动选：无 checkpoint → restart-from-base）。
-    const deliverable = await context.storage.inputs.listDeliverable(session.taskId);
-    const reopenInput = deliverable.find((input) => input.intent === "reopen");
-    assert.ok(reopenInput, "串联 reopen input 已被同一 gateway 接纳");
-    assert.equal(reopenInput.deliveryStatus, "accepted");
-    const payload = await context.storage.payloads.readInputPayload({
-      taskId: session.taskId,
-      commandId: reopenInput.commandId,
-    });
-    assert.equal(payload?.prompt, "too late", "用户消息原文随 reopen 首条投递");
-    assert.notEqual(reopenInput.commandId, "00000000-0000-4000-8000-0000000000e5");
-    const created = await context.plane.provisioning.create.runCreateOnce();
-    assert.equal(created?.outcome, "created", "新 run 已进入 provisioning");
-  },
-);
+test("resume × 预算耗尽 + 用户显式输入：停旧 run → 以该消息 checkpoint 重开（08 §7 修订第二批）", async () => {
+  const context = buildTestPlane();
+  const session = await pausedRun(context);
+  await context.plane.inputs.submit({
+    principalId: PRINCIPAL,
+    taskId: session.taskId,
+    source: "http",
+    request: {
+      intent: "append",
+      commandId: "00000000-0000-4000-8000-0000000000e5",
+      prompt: "too late",
+      expectedRunGeneration: session.runGeneration,
+    },
+  });
+  context.driver.pauseResume = "memory";
+  const run = await context.storage.runs.get(session.runId);
+  assert.ok(run?.hardDeadlineAt, "start 接纳事务已落硬期限（D4-7）");
+  context.clock.set(run.hardDeadlineAt + 1);
+  const report = await context.plane.lifecycle.pauseResume.sweep();
+  assert.equal(report.budgetExhausted, 1);
+  assert.equal(context.driver.resumeCalls, 0, "预算耗尽不再发起 resume");
+  // 用户意图闭环（08 §7 修订 2026-10-09 第二批）：停旧 run → 串联 reopen，输入不丢。
+  assert.equal(report.budgetExhaustedReopened, 1);
+  const closed = await context.storage.runs.get(session.runId);
+  assert.equal(closed?.status, "stopped", "旧 run 经暂停中停止推进收口终态");
+  assert.equal(closed?.stopRequested, true, "复用持久停止屏障（08 §8.1）");
+  assert.ok(context.driver.terminateCalls >= 1, "暂停态直接 terminate（无 checkpoint 前置）");
+  // 原输入：内容已由 reopen 承接，终态扫口如实收口 cancelled（不静默丢弃）。
+  const oldInput = await context.storage.inputs.get(
+    session.taskId,
+    "00000000-0000-4000-8000-0000000000e5",
+  );
+  assert.equal(oldInput?.deliveryStatus, "cancelled");
+  // 新 run：同一 durable gateway 的 reopen input，prompt=用户消息（checkpoint 恢复语义
+  // 按持久事实自动选：无 checkpoint → restart-from-base）。
+  const deliverable = await context.storage.inputs.listDeliverable(session.taskId);
+  const reopenInput = deliverable.find((input) => input.intent === "reopen");
+  assert.ok(reopenInput, "串联 reopen input 已被同一 gateway 接纳");
+  assert.equal(reopenInput.deliveryStatus, "accepted");
+  const payload = await context.storage.payloads.readInputPayload({
+    taskId: session.taskId,
+    commandId: reopenInput.commandId,
+  });
+  assert.equal(payload?.prompt, "too late", "用户消息原文随 reopen 首条投递");
+  assert.notEqual(reopenInput.commandId, "00000000-0000-4000-8000-0000000000e5");
+  const created = await context.plane.provisioning.create.runCreateOnce();
+  assert.equal(created?.outcome, "created", "新 run 已进入 provisioning");
+});
 
 test("预算耗尽闭环串联失败降级：run 已终态，reopen 被拒不重试（reopenable 投影接管）", async () => {
   const context = buildTestPlane();
@@ -620,7 +626,10 @@ test("预算耗尽闭环串联失败降级：run 已终态，reopen 被拒不重
   assert.equal((await context.storage.runs.get(session.runId))?.status, "stopped");
   // 新输入不存在：终态后 UI 以 reopenable 投影 + 手动重开接管。
   const deliverable = await context.storage.inputs.listDeliverable(session.taskId);
-  assert.equal(deliverable.some((input) => input.intent === "reopen"), false);
+  assert.equal(
+    deliverable.some((input) => input.intent === "reopen"),
+    false,
+  );
 });
 
 test("能力门禁关闭（pauseResume=none）：resume 路径不可达（fail-closed，gatedSkipped）", async () => {
@@ -715,7 +724,7 @@ test("startup 对账：paused 观察 → 保持 paused（不收口、不标 disc
   assert.equal((await context.storage.runs.get(session.runId))?.status, "paused");
 });
 
-test("行为表：paused 的 complete=拒绝（not_ready）、archive=409、reopen=recovery_required", async () => {
+test("行为表（08 §3.2 修订 2026-10-10）：paused 的 complete=拒绝；archive=自动推进停止后归档（dataAtRisk 如实落库）；reopen=recovery_required", async () => {
   const context = buildTestPlane();
   const session = await pausedRun(context);
   const completed = await context.plane.commands.taskLifecycle.completeTask({
@@ -727,22 +736,72 @@ test("行为表：paused 的 complete=拒绝（not_ready）、archive=409、reop
   // complete 拒绝不得启动保存通路（暂停态无 checkpoint 前置可执行）。
   assert.equal(context.attachmentPort.checkpoints.length, 0);
 
+  // paused（未终态、占槽）拒绝重开：行为表 reopen 行不变（08 §9 修订 2026-10-09）。
+  const pausedTask = await context.storage.tasks.get(session.taskId);
+  assert.ok(pausedTask);
+  const reopenPaused = await context.plane.commands.reopen.verifyReopenEligibility(pausedTask);
+  assert.equal(reopenPaused.ok, false);
+  assert.equal(
+    reopenPaused.ok === false && reopenPaused.code,
+    "recovery_required",
+    "旧 run 未终态：拒绝重开（不换代）",
+  );
+
+  // 归档 = 用户结束任务的显式意图：自动推进暂停中停止（屏障 + terminate + stopped 收口）
+  // 后完成归档，HTTP 响应返回归档完成后的任务详情（03 §6 修订 2026-10-10）。
   const archived = await context.plane.commands.taskLifecycle.archiveTask({
     principalId: PRINCIPAL,
     taskId: session.taskId,
   });
-  assert.equal(archived.ok, false);
-  assert.equal(archived.ok === false && archived.code, "not_ready", "archive=409（活动 run）");
-
-  const task = await context.storage.tasks.get(session.taskId);
-  assert.ok(task);
-  const reopen = await context.plane.commands.reopen.verifyReopenEligibility(task);
-  assert.equal(reopen.ok, false);
+  assert.ok(archived.ok, `paused 归档应成功：${archived.ok === false ? archived.code : ""}`);
   assert.equal(
-    reopen.ok === false && reopen.code,
-    "recovery_required",
-    "旧 run 未终态：拒绝重开（不换代）",
+    archived.ok === true && archived.value.task.status,
+    "archived",
+    "响应即归档完成后的任务详情",
   );
+  assert.ok(
+    (archived.ok === true ? archived.value.actions : []).includes("archive") === false,
+    "归档后 actions 不再含 archive",
+  );
+  const run = await context.storage.runs.get(session.runId);
+  assert.equal(run?.stopRequested, true, "归档驱动停止写持久屏障");
+  assert.ok(run?.stopOperationId, "屏障复用 stopOperationId（08 §8.1）");
+  assert.equal(run?.status, "stopped", "暂停中停止推进完成（paused→draining→stopped）");
+  assert.equal(
+    run?.dataAtRisk,
+    true,
+    "暂停态无运行时写入可收口：checkpoint 未能执行，dataAtRisk 如实落库（08 §8.2）",
+  );
+  assert.ok(context.driver.terminateCalls >= 1, "暂停态直接 terminate（无 checkpoint 前置）");
+  assert.equal(context.attachmentPort.checkpoints.length, 0, "归档驱动的停止不走保存通路");
+  assert.ok(context.storage.quotaReleases.includes(session.runId), "provider 确认终止后释放槽");
+
+  // 归档后的详情投影（同库事实）：无活动 run、actions 不再含 archive。
+  const detail = await context.plane.taskDetail.getDetail({
+    principalId: PRINCIPAL,
+    taskId: session.taskId,
+  });
+  assert.ok(detail.ok);
+  assert.equal(detail.ok === true && detail.value.actions.includes("archive"), false);
+});
+
+test("行为表（08 §3.2 修订 2026-10-10）：paused 归档时 terminate 未确认 → 409 让 UI 重试，run 留 draining", async () => {
+  const context = buildTestPlane();
+  const session = await pausedRun(context);
+  // provider 明确拒绝终止（如 403/402）：advancePausedStop 拿不到 terminated 确认。
+  context.driver.terminateStatus = "notTerminated";
+  const archived = await context.plane.commands.taskLifecycle.archiveTask({
+    principalId: PRINCIPAL,
+    taskId: session.taskId,
+  });
+  assert.equal(archived.ok, false, "terminate 未确认：归档不完成");
+  assert.equal(archived.ok === false && archived.code, "not_ready");
+  assert.equal(archived.ok === false && archived.reason, "task-has-active-run");
+  const run = await context.storage.runs.get(session.runId);
+  assert.equal(run?.status, "draining", "run 留 draining 占槽，由 stop/compensation sweep 收口");
+  assert.equal(run?.stopRequested, true, "屏障已写（重试时复用同一 stopOperationId）");
+  const task = await context.storage.tasks.get(session.taskId);
+  assert.equal(task?.status, "active", "task 未被归档（UI 重试路径）");
 });
 
 test("markReady 幂等 ready（resume 后 bridge.ready 重发不回 fault）：直接 ok 且 registry ready", async () => {

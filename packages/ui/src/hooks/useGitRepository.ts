@@ -15,6 +15,13 @@ import type {
 import { buildTurnChangeSummary, toWorkspaceRelativePath } from "@/lib/taskChangeSummary.js";
 import { logger } from "@/logger.js";
 import { shouldEnableWorkspaceRpc } from "@/lib/workspaceRpcAvailability.js";
+import {
+  resolveCloudGitPaneScope,
+  type CloudGitPaneEnvironment,
+} from "@/cloud/cloudGitPaneScope.js";
+import { selectCloudAttachmentForTask } from "@/cloud/cloudBrowserServices.js";
+import { resolveCloudTaskIdFromWorkspaceIdentity } from "@/cloud/cloudUiBootstrap.js";
+import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
 import { useServices } from "@/hooks/useServices.js";
 import { useResolvedRemoteWorkspaceSessionId } from "@/hooks/useResolvedRemoteWorkspaceSessionId.js";
 
@@ -76,6 +83,11 @@ export interface GitPaneRepositoryState {
   loading: boolean;
   error: string | null;
   revision: number;
+  /**
+   * 执行环境呈现态（04 §3.3「2026-10-10 修订」）：非云恒为 ready；云工作区在
+   * paused / 无 attachment 时为对应引导态，GitPane 据此替代 install 文案。
+   */
+  cloudEnvironment: CloudGitPaneEnvironment;
   sourceOptions: GitPaneSourceOption[];
   datasets: Record<GitChangeSourceId, GitPaneDataset>;
 }
@@ -200,6 +212,7 @@ function createInitialState(
     loading?: boolean;
     error?: string | null;
     revision?: number;
+    cloudEnvironment?: CloudGitPaneEnvironment;
   },
 ): GitPaneRepositoryState {
   const datasets = createEmptyDatasets();
@@ -213,6 +226,7 @@ function createInitialState(
     loading: options?.loading ?? true,
     error: options?.error ?? null,
     revision: options?.revision ?? 0,
+    cloudEnvironment: options?.cloudEnvironment ?? "ready",
     sourceOptions: buildSourceOptions(datasets),
     datasets,
   };
@@ -395,10 +409,31 @@ export function useGitRepository(options: {
     workspaceIdentity,
     remoteTarget,
   );
-  const workspaceRpcEnabled = shouldEnableWorkspaceRpc({
-    workspaceIdentity,
-    remoteSessionId,
-    remoteTarget,
+  // 云任务工作区（identity = `cloud-task:<taskId>`）没有、也不会有 remote session 登记，
+  // 通用判据会恒为 false，导致 Git 面板从未发起查询、ready run 也呈现「请先安装 Git」
+  // （2026-10-10 实测缺陷）。云身份的开关只由当前 Run attachment 的真实状态决定，
+  // 与会话面板（resolveV4PaneConversationServices）同一接缝；非云链路语义不变。
+  const cloudTaskId = resolveCloudTaskIdFromWorkspaceIdentity(workspaceIdentity);
+  const cloudWorkspace = useCloudWorkspaceContext();
+  const attachmentForTask = selectCloudAttachmentForTask(
+    cloudWorkspace?.attachment ?? null,
+    cloudTaskId,
+  );
+  // 详情投影属于「当前选中的任务」（与 CloudTaskRunStatusBanner 同款判定）：非选中的
+  // 云任务工作区不能拿别的任务的状态当自己的 paused 依据，只按 attachment 不可用呈现。
+  const isActiveCloudTask =
+    cloudTaskId !== null && cloudWorkspace?.selection.taskId === cloudTaskId;
+  const { workspaceRpcEnabled, environment: cloudEnvironment } = resolveCloudGitPaneScope({
+    cloudTaskId,
+    attachmentReady: attachmentForTask !== null,
+    activeRunStatus: isActiveCloudTask
+      ? (cloudWorkspace?.taskDetail?.activeRun?.status ?? null)
+      : null,
+    genericWorkspaceRpcEnabled: shouldEnableWorkspaceRpc({
+      workspaceIdentity,
+      remoteSessionId,
+      remoteTarget,
+    }),
   });
   const workspaceKey = workspaceIdentity?.trim() || workspacePath;
   // store 收尾：per-turn 变更摘要 map（setPerTurnSummaries/setPerTurnFileChanges）
@@ -426,11 +461,13 @@ export function useGitRepository(options: {
       lastLiveRefreshInputRef.current = nextRefreshInput;
       // 断连远端 workspace 可以展示 Git 面板空壳，但不能在 session 未恢复前
       // 主动查询远端 Git，否则会把断连代理错误放大成每次首屏挂载的日志噪音。
+      // 云工作区的 paused / 无 attachment 场景同走这里，并携带环境引导态供呈现。
       setRepositoryState((current) =>
         createInitialState(workspacePath, {
           workspaceKey,
           loading: false,
           error: null,
+          cloudEnvironment,
           revision: current.revision,
         }),
       );
@@ -497,6 +534,7 @@ export function useGitRepository(options: {
           loading: false,
           error: null,
           revision: requestVersion,
+          cloudEnvironment: "ready",
           sourceOptions: buildSourceOptions(datasets),
           datasets,
         });
@@ -516,6 +554,7 @@ export function useGitRepository(options: {
             workspaceKey,
             loading: false,
             error: message,
+            cloudEnvironment,
             revision: current.revision,
           }),
         }));
@@ -525,6 +564,7 @@ export function useGitRepository(options: {
       disposed = true;
     };
   }, [
+    cloudEnvironment,
     gitService,
     includeExtendedData,
     refreshToken,
@@ -540,7 +580,10 @@ export function useGitRepository(options: {
     const currentRepositoryState =
       repositoryState.workspaceKey === workspaceKey
         ? repositoryState
-        : createInitialState(workspacePath, { workspaceKey });
+        : createInitialState(workspacePath, {
+            workspaceKey,
+            cloudEnvironment,
+          });
     const datasets = {
       ...currentRepositoryState.datasets,
     };
@@ -560,5 +603,12 @@ export function useGitRepository(options: {
       sourceOptions: buildSourceOptions(datasets),
       datasets,
     };
-  }, [lastFileChangeEntry, lastSummaryEntry, repositoryState, workspaceKey, workspacePath]);
+  }, [
+    cloudEnvironment,
+    lastFileChangeEntry,
+    lastSummaryEntry,
+    repositoryState,
+    workspaceKey,
+    workspacePath,
+  ]);
 }

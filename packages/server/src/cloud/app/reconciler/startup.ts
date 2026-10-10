@@ -21,6 +21,8 @@ export interface ReconcileSummary {
   unknown: number;
   inputsUncertain: number;
   unsettledOperations: number;
+  /** stop-pending 守卫跳过收口的 run 数（终态交停止推进通路收口 stopped，03 修订审计第二批）。 */
+  stopPending: number;
 }
 
 export interface StartupReconciler {
@@ -42,6 +44,7 @@ export function createStartupReconciler(
         unknown: 0,
         inputsUncertain: 0,
         unsettledOperations: 0,
+        stopPending: 0,
       };
       const runs = await storage.runs.listNonTerminal();
       for (const run of runs) {
@@ -139,6 +142,47 @@ export function createStartupReconciler(
             continue;
           }
           if (observation.status === "stopped" || observation.status === "notFound") {
+            // stop-pending 守卫（03 修订审计第二批，与 keepalive liveness keepalive.ts
+            // 同一口径）：已受理停止但未在停止推进中的 run（paused/ready/disconnected）
+            // 不以 expired 落账——「用户显式停止的 run 以过期终态落账」与停止屏障打架，
+            // 且迁移表没有 paused→stopped 边。终态由停止推进通路收口 stopped：
+            // paused → pauseResume sweep（advancePausedStop）；ready/disconnected →
+            // drain sweep 重试 beginDrain；draining 无 op → keepalive 兜底认领。
+            // provisioning 例外：notFound → stopped 本就遵循停止意图（行为不变）。
+            if (
+              run.stopRequested === true &&
+              run.status !== "draining" &&
+              run.status !== "provisioning"
+            ) {
+              summary.stopPending += 1;
+              cloudCoreLogger.info(
+                undefined,
+                "cloud startup defers terminal settlement to stop path",
+                {
+                  taskId: run.taskId,
+                  runId: run.runId,
+                  runStatus: run.status,
+                  instanceStatus: observation.status,
+                },
+              );
+              continue;
+            }
+            // 消费侧调停（01 §4.1 修订审计第二批）：run=paused（控制面持久事实）时
+            // driver 的 stopped 观测按 disk-pause 保留态处理（Daytona stop 只停不删，
+            // pause 后每次 inspect 都返回 stopped）——保持 paused 不收口；notFound 才是
+            // 真终局。若实例确被外部移除，暂停预算宽限兜底（keepalive）保证有界收口。
+            if (observation.status === "stopped" && run.status === "paused") {
+              summary.alive += 1;
+              cloudCoreLogger.info(
+                undefined,
+                "cloud run paused after restart (stop-state retained)",
+                {
+                  taskId: run.taskId,
+                  runId: run.runId,
+                },
+              );
+              continue;
+            }
             // provider 确认终止：写终态、释放配额，并记录保存风险不可知（01 §5.3）。
             const settled = await orchestrator.settleTerminal({
               runId: run.runId,

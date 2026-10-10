@@ -120,6 +120,14 @@ export interface OperationOutboxPort {
     errorCode?: CloudErrorCode;
     now: number;
   }): Promise<boolean>;
+  /**
+   * 失败重排队（08 §8.1 修订 2026-10-09，生命周期 v2 审计）：**仅 `failed → pending` 的
+   * CAS**——租约只领 pending/到期 leased/ambiguous，failed 行永不重领，而 enqueue 幂等
+   * 返回既有行不改状态；provider 明确拒绝的 terminate 必须由调用方按退避显式重排队，
+   * 否则非终态 run 永久卡 draining/paused。attempt/幂等键/错误码保持不变（退避与封顶
+   * 按 attempt 判定，最后一次失败证据保留可查）。
+   */
+  requeueFailed(request: { operationId: string; now: number }): Promise<boolean>;
   /** 启动恢复扫描：所有未结算 operation（03 §8）。 */
   listUnsettled(): Promise<ExternalOperationRecord[]>;
 }

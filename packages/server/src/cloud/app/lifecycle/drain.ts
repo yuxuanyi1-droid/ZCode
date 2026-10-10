@@ -14,6 +14,7 @@
  */
 import type { BridgeDrainFrame, CloudRunRecord } from "@zcode/shared";
 import { checkpointOperationKey } from "../../domain/idempotency.js";
+import { occupiesWorkspaceByInput } from "../../domain/deliveryStatus.js";
 import {
   isIdleArchiveEligible,
   resolveEffectiveDeadline,
@@ -190,8 +191,10 @@ export function createDrainLoop(deps: CloudCoreDeps, gitGrants: CloudGitGrantSer
           continue;
         }
         const pendingInputs = await storage.inputs.listDeliverable(run.taskId);
-        const pendingInputCount = pendingInputs.filter(
-          (input) => input.deliveryStatus === "accepted" || input.deliveryStatus === "delivering",
+        // pending 输入事实含 uncertain（08 §7 修订 2026-10-09 审计第一批，domain 唯一谓词）：
+        // 与空闲 pause/resume 触发同口径（08 §7「保守口径，多处同改」）。
+        const pendingInputCount = pendingInputs.filter((input) =>
+          occupiesWorkspaceByInput(input.deliveryStatus),
         ).length;
         const checkpoints = await storage.projections.listCheckpoints(run.taskId);
         const idle = isIdleArchiveEligible({

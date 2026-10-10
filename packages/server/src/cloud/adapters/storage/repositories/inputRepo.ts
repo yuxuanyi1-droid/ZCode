@@ -8,7 +8,7 @@
 import type { CloudTaskInputRecord } from "@zcode/shared";
 import { inputDeliveryStatusSchema } from "@zcode/shared";
 import type { InputDeliveryStatus } from "@zcode/shared";
-import { INPUT_DELIVERY_TRANSITIONS } from "../../../domain/deliveryStatus.js";
+import { canAdvanceDeliveryStatus } from "../../../domain/deliveryStatus.js";
 import { withWriteTransaction } from "../sqlite/database.js";
 import type { StorageContext } from "../sqlite/database.js";
 import { decodeCursor, encodeCursor, normalizeLimit } from "../sqlite/cursor.js";
@@ -55,10 +55,12 @@ export const inputRepoHandlers = {
       const current = selectInput(context, params.taskId, params.commandId);
       if (!current) return null;
       const from = String(current["delivery_status"]) as InputDeliveryStatus;
-      // 统一使用 domain 唯一边表（修复 2026-10-07 P1：storage 侧曾有第二份边表，
-      // accepted→admitted/uncertain、uncertain→accepted/cancelled 在真实存储上被拒，
-      // 导致 ACK 静默丢弃与 CP-14 决定取消路径失败）；02 §6.3 为准。
-      if (!INPUT_DELIVERY_TRANSITIONS[from].includes(to)) return null;
+      // 与 app 层、内存 fake 共用 domain 唯一裁决 `canAdvanceDeliveryStatus`（修复
+      // 2026-10-07 P1 的同一份边表 + 同态幂等例外）：此前这里直接查边表，缺「同态
+      // 幂等改写」例外，与 fake 语义不一致——预算耗尽闭环降级要把已按 run-ended 落
+      // cancelled 的触发输入补注可读 last_error（03 修订审计第二批）就被 CAS 拒掉。
+      // 同态改写只覆盖 COALESCE 字段（last_error 等），状态不回退、不越级。
+      if (!canAdvanceDeliveryStatus(from, to)) return null;
       const changes = context.db
         .prepare(
           `UPDATE task_inputs SET

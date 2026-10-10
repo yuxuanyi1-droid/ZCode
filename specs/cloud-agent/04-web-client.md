@@ -195,6 +195,11 @@ stopRequested 是优先于 Run 状态的持久门控：收到受理后显示“�
 
 2026-10-09 修订二（用户实测缺陷：切换模型后 composer 选择器仍显示旧模型，直接发送把模型切回）：选择器的显示来源是 per-scope 持久草稿（`composerDraftStore` 的 `draft.modelSelection`），而 runtime 应用切换后经 ModelSelected → v4 投影 `config.modelSelection`（state.updated 帧，云 attachment 与本机 Host 同一条投影协议）只有时间线消费，草稿没有权威消费者——本机/云同断。规则：投影 `config.modelSelection` 是会话权威选择，composer 草稿必须跟随（`resolveComposerModelAuthoritySync`，node:test 覆盖）；本端显式选择（选择器/档位点击，草稿 `modelSelectionExplicit` 标记）作为 pending 意图优先于权威事件保持显示，直到被发送消费（ACK 写回或 runtime 回发同选型事件）即收敛清标记；无标记草稿（首帧种子/陈旧同步/空草稿）一律跟随权威，权威未变化的重复帧（恢复/历史重放）不写草稿。发送后草稿回到运行时最新选择，不得携带陈旧值随下一条 Submission 下发。
 
+2026-10-10 修订（用户实测缺陷：审查（Git）侧栏面板在 ready 与 paused run 都呈现「当前环境没有可用的 Git——请先安装 Git」）：
+
+- **Git 面板取数门控认 attachment，不认 remote session（P1）**：服务路由本身无缺陷——`gitService` 已按 W8 绑定表经当前 Run attachment 通道代理（allowlist 含 Git/GitCheckpoint），缺陷在数据面开关：`useGitRepository` 沿用的 `shouldEnableWorkspaceRpc` 要求「remote 目标必须已注册 remote session」，而云任务工作区（identity = `cloud-task:<taskId>`）没有、也不会有 remote session 登记，于是面板永远停在空摘要态（`isGitAvailable=false`）、从未发起 Git 查询，ready run 也呈现 install 文案。规则：云身份的 Git 面板 RPC 开关只由 `selectCloudAttachmentForTask` 的真实结果决定（attachment ready 且归属该任务 → 取数；判定收口 `resolveCloudGitPaneScope` 纯函数，node:test 覆盖）；非云身份（本地 / SSH / 已配对远控）沿用既有判据，语义不变。
+- **paused/unavailable 呈现环境引导，不是 install 文案（P2）**：`paused`（attachment 已 detach）等无 attachment 场景下 Git 不可达是环境事实，面板空态按环境呈现——paused 复用状态横幅同款文案语义（「运行环境已暂停」+「发送消息即可恢复运行」，恢复后 Git 随 attachment 重开自动取数），其余无 attachment 场景（provisioning / 终态 / 非选中任务）呈现「运行环境当前不可用」中性引导；判定依据是 attachment 真实状态 + 详情投影 `activeRun.status`（与状态横幅同源），不得呈现「请先安装 Git」。「Git is not available / install」文案只留给环境 ready 后的真实结论（本机无 Git 等）。
+
 ### 3.4 输入层次与多端
 
 | 层次                          | 所有者                     | 恢复/呈现                                      |

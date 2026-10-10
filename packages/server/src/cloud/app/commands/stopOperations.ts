@@ -10,7 +10,7 @@
  * 普通 stop 失败**不得**自动升级成 force-stop。
  */
 import type { TaskDetailResponse } from "@zcode/shared";
-import { FORCE_STOP_END_REASON } from "../../domain/taskRunState.js";
+import { FORCE_STOP_END_REASON, isTerminalRunStatus } from "../../domain/taskRunState.js";
 import { drainRetryAllowed, resolveEffectiveDeadline } from "../../domain/savePolicy.js";
 import type { CloudCoreDeps } from "../deps.js";
 import { cloudCoreLogger } from "../logger.js";
@@ -130,7 +130,10 @@ export function createStopOperations(
         // paused 同样先推进 draining（行为表：force-stop=屏障+直接 terminate；paused→draining
         // 边 2026-10-09 修订）——否则暂停态直接 terminate 后 settleTerminal(stopped) 会被
         // 迁移表拒绝（无 paused→stopped 边），run 卡死在 paused。
-        await storage.runs.transitionStatus({
+        // 生命周期 v2 审计 P3：必须检查 CAS 结果——与 resume sweep/停止推进并发时按
+        // **重读后的新状态**分支，不得按过期快照 terminate 后把 run 滞留
+        // ready+stopRequested 拖到硬期限（08 §8.1 修订 2026-10-09）。
+        const transitioned = await storage.runs.transitionStatus({
           runId: run.runId,
           runGeneration: run.runGeneration,
           from: ["ready", "disconnected", "paused"],
@@ -138,6 +141,48 @@ export function createStopOperations(
           endReason: FORCE_STOP_END_REASON,
           now: clock.now(),
         });
+        if (!transitioned) {
+          const fresh = await storage.runs.get(run.runId);
+          if (!fresh || fresh.runGeneration !== run.runGeneration) {
+            // 已换代：本代 force-stop 到此为止，终态归新一代 run 的生命周期。
+            return await taskDetail.getDetail({
+              principalId: input.principalId,
+              taskId: input.taskId,
+            });
+          }
+          if (isTerminalRunStatus(fresh.status)) {
+            // 并发通路已收口终态：幂等返回（不重复 terminate）。
+            return await taskDetail.getDetail({
+              principalId: input.principalId,
+              taskId: input.taskId,
+            });
+          }
+          if (fresh.status === "paused" || fresh.status === "draining") {
+            // 停止推进（stopTask/pauseResume sweep）赢得竞争：共用同一推进实现
+            // （含 dataAtRisk 按 op 证据判定的收口语义）。
+            await pauseResume.advancePausedStop(fresh, clock.now());
+          } else if (fresh.status === "ready" || fresh.status === "disconnected") {
+            // resume 赢得竞争（paused→ready，沙箱已在运行）：屏障仍在（stopRequested），
+            // 重试 draining CAS 补 force-stop 标注（endReason/dataAtRisk 语义与 CAS 成功
+            // 路径一致）；再失败则不动——stopRequested 的 ready run 由 drain/stop sweep
+            // 下一拍重驱动收口（08 §8.1）。
+            const retried = await storage.runs.transitionStatus({
+              runId: fresh.runId,
+              runGeneration: fresh.runGeneration,
+              from: ["ready", "disconnected"],
+              to: "draining",
+              endReason: FORCE_STOP_END_REASON,
+              now: clock.now(),
+            });
+            if (retried) {
+              await compensation.terminateRun({
+                runId: fresh.runId,
+                runGeneration: fresh.runGeneration,
+                reason: FORCE_STOP_END_REASON,
+              });
+            }
+          }
+        }
       }
       cloudCoreLogger.warn(undefined, "cloud force stop requested", {
         taskId: input.taskId,
@@ -177,10 +222,33 @@ export function createStopOperations(
           : null;
         if (!stopOperation) {
           // 定稿附录 C-1/D4-4：屏障存在但查不到 op——force-stop 的 operationId 由客户端
-          // 提供且从不入队（跳过保存前置是它的语义）。这里**不得**对 stopRequested 的 run
-          // 重启保存通路（beginDrain 会给 force-stop 硬塞一次保存）；直接跳过，等待
-          // terminate op 由 compensation 循环收口。
-          report.waitingSave += 1;
+          // 提供且从不入队（跳过保存前置是它的语义）；paused 起源的 drain 同样只有屏障
+          // （暂停态无保存前置，03 §6 修订）。这里**不得**对 stopRequested 的 run 重启
+          // 保存通路（beginDrain 会给这些形态硬塞一次永不执行的保存）。生命周期 v2 审计
+          // P1：终止核验由 terminate op 驱动——terminateRun 幂等补齐缺失的 op、对 failed
+          // op 按退避重排队（compensation 内），provider 确认即收口，不再 waitingSave
+          // 死循环；退避未到/结果未知时保持等待（下一拍重评）。
+          const terminated = await compensation.terminateRun({
+            runId: run.runId,
+            runGeneration: run.runGeneration,
+            reason: run.endReason === FORCE_STOP_END_REASON ? FORCE_STOP_END_REASON : "stop",
+          });
+          if (terminated.ok && terminated.value.verdict === "terminated") {
+            // 该形态没有可结算的 checkpoint 证据：无「已保存」事实，如实补标 dataAtRisk
+            // （08 §8.2；force-stop 的显式丢失确认已由 settleTerminated 标注，此处为幂等补齐）。
+            const current = await storage.runs.get(run.runId);
+            if (current && current.runGeneration === run.runGeneration && !current.dataAtRisk) {
+              await storage.runs.setRunDataAtRisk({
+                runId: run.runId,
+                runGeneration: run.runGeneration,
+                dataAtRisk: true,
+                now,
+              });
+            }
+            report.advanced += 1;
+          } else {
+            report.waitingSave += 1;
+          }
           continue;
         }
         // 最新保存状态（重试成功不再假 dataAtRisk，见 resolveLatestStopOperation）。

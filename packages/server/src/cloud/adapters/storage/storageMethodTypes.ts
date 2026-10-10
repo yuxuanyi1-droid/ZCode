@@ -167,6 +167,7 @@ export interface StorageMethodTable {
   "operations.leaseNext": MethodSignature<OperationOutboxPort["leaseNext"]>;
   "operations.renewLease": MethodSignature<OperationOutboxPort["renewLease"]>;
   "operations.settle": MethodSignature<OperationOutboxPort["settle"]>;
+  "operations.requeueFailed": MethodSignature<OperationOutboxPort["requeueFailed"]>;
   "operations.listUnsettled": {
     params: undefined;
     result: Awaited<ReturnType<OperationOutboxPort["listUnsettled"]>>;

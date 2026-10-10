@@ -11,7 +11,7 @@ import { cloudCheckpointRecordSchema, cloudProjectionRecordSchema } from "@zcode
 import type { CloudCheckpointRecord, CloudStreamCursor } from "@zcode/shared";
 import { withWriteTransaction } from "../sqlite/database.js";
 import type { StorageContext } from "../sqlite/database.js";
-import { decodeCursor, encodeCursor, normalizeLimit } from "../sqlite/cursor.js";
+import { decodeHistoryCursor, encodeHistoryCursor, normalizeLimit } from "../sqlite/cursor.js";
 import { mapCheckpointRow, mapProjectionRow, readText } from "../sqlite/rowMapping.js";
 import type { SqlRow } from "../sqlite/rowMapping.js";
 import type { ProjectionAppendResult } from "../../../app/ports/storagePort.js";
@@ -213,8 +213,10 @@ export const projectionRepoHandlers = {
         : params.topic.includes("/")
           ? [params.taskId, params.topic]
           : [params.taskId, params.topic, params.topic];
-    const after = params.cursor ? decodeCursor(params.cursor)[0] : 0;
-    const afterSeq = typeof after === "number" ? after : 0;
+    // 修复依据（2026-10-09 实测缺陷）：history 的查询/响应游标在 shared 是冻结 wire
+    // 格式 `<logEpoch>:<seq>`（cloudHistoryCursorSchema），不是通用 base64url 游标。
+    // seq 槽位是控制面 ingest 位置 event_seq（族名前缀跨流分页的唯一全序，见 cursor.ts）。
+    const afterSeq = params.cursor === undefined ? 0 : decodeHistoryCursor(params.cursor);
     const rows = context.db
       .prepare(
         `SELECT * FROM projection_events WHERE ${filter} AND event_seq > ?
@@ -239,7 +241,13 @@ export const projectionRepoHandlers = {
     const last = rows.length > limit && items.length > 0 ? rows[limit - 1] : undefined;
     return {
       items,
-      ...(last ? { nextCursor: encodeCursor([Number(last["event_seq"])]) } : {}),
+      // nextCursor 用 wire 冻结格式：末行 logEpoch + 末行 event_seq（02 §7.4/03 §6）。
+      // 通用 base64url 游标会被客户端 strict schema 整页拒绝（protocol_incompatible）。
+      ...(last
+        ? {
+            nextCursor: encodeHistoryCursor(readText(last, "log_epoch"), Number(last["event_seq"])),
+          }
+        : {}),
       ...(gapBelow || aheadOfData ? { resyncRequired: true } : {}),
     };
   },

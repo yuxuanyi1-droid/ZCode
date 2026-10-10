@@ -92,6 +92,8 @@ stateDiagram-v2
 
 **修订（2026-10-09 第二批，暂停预算耗尽的用户意图闭环）**：暂停预算耗尽的 paused run 上，用户显式发消息（accepted append 存在）即继续工作意图——自驱 resume 不再无限重试被拒后让输入永远挂 accepted，而是控制面在同一 sweep 通路内自动「停止旧 run（复用暂停中停止推进，屏障+terminate+终态如实标 dataAtRisk）→ 以该消息为 prompt 串联 reopen（checkpoint 恢复语义：有 lastCheckpointSha 选 checkpoint、否则 restart-from-base；requestedConfig 随行；走同一 durable gateway，revision CAS 与 08 §9 重开核验原样生效）」。串联失败不自动重试：run 已终态时由既有 reopenable 投影 + 用户手动重开接管；多条排队输入只携带首条 append，其余由终态扫口如实收口 cancelled。无用户输入的 budget-exhausted run 维持原终局（保留期尽 → expired）。此闭环属用户意图的承接，不是自动续期暂停预算。
 
+**修订（2026-10-10 用户产品决议，archive on paused run）**：归档是用户结束任务的显式意图——对 Run=paused 的任务直接归档不再 409，而是复用暂停中停止推进的同一实现（屏障复用 `run.stopOperationId` → `paused → draining` → 直接 terminate → `stopped` 收口，dataAtRisk 按停止 op 未结算如实标注）后完成归档；归档 HTTP 响应返回归档完成后的任务详情（同步收口）。terminate 未当场确认时 run 留在 draining（既有 stop/compensation sweep 按证据收口），归档按既有语义返回 409 `not_ready/task-has-active-run` 让 UI 重试。其余未终态（ready/provisioning/draining/disconnected）仍 409 引导先停止。actions 投影同表：paused run 投影 `archive`（`complete` 拒绝不变，仍须先 resume 或完成停止收口）。
+
 ### 3.3 Execution / 保存 / 产物投影
 
 - Execution：unknown / idle / running / awaiting-input；更新必须有runtime来源、epoch与revision。
@@ -176,9 +178,12 @@ provider续期失败或到期时间未知时保留上一次已确认expiresAt；
 **修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）**：闲置规则改**按能力单轨**——`pauseResume=memory` 的 provider：满足闲置条件（execution idle、无 pending input/interaction、无 checkpoint、无业务写入）且无客户端连接、持续达到空闲 pause 阈值（默认 10 分钟，可配）→ **pause（替换原 idle drain）**；其余 provider 维持 idle drain 不变。有客户端连接时不直接暂停：先广播「即将暂停」并顺延。暂停前若存在未保存变更，先走既有 checkpoint 保存（同一保存通道）再暂停——boot 失败路径绝不成为恢复点。硬期限到期强制动作的能力分叉见上段；pause 保留期上限需实测核实（01 §4.3），暂停预算到期由 keepalive liveness 收口为 expired。
 
 **修订（2026-10-09，终验缺陷 B：业务活动事实源收窄与保存失败退避）**：
+
 - 业务活动事实源收窄：投影 ingest 只在批次**实际新增**记录（按 run 计 appendedRunIds 非空）时推进 lastBusinessActivityAt；执行节点 WAL 重投/补发（同键去重、0 新增）是恢复面流量，不是业务活动——重投循环不得制造「running」假象、不得阻塞空闲 pause。checkpoint/grant 尝试（兑换请求、checkpoint.request/result、op 租约与结算）都不是业务活动。
 - 周期保存失败退避：连续失败按 30s→2min→5min 阶梯放大重试间隔（且不低于周期档），封顶 5 分钟；保存成功即清零。结果帧缺失（op attempt 封顶结算 failed）同样计入连续失败，不无限重建 op。
 - checkpoint 在途占用有界：`saving/pending` 记录只在窗口内（2 分钟）算在途；超窗无更新的记录是僵尸事实，不再阻塞周期保存与空闲 pause，数据风险由 run.dataAtRisk 如实承载。「上次周期保存已 failed」不永久阻塞空闲 pause——v1 空闲 pause 无前置 checkpoint（见 QUIESCE_BOUNDARY），failed 的风险已在 run.dataAtRisk 标注，按事实暂停。
+
+**修订（2026-10-09，生命周期 v2 审计第一批：空闲占用的输入事实含 uncertain）**：空闲判定（空闲 pause 拍与 idle drain 共用口径）的「无 pending input」事实必须计入 `uncertain` 投递状态——uncertain 输入可能已在沙箱执行（投递结果未知，03 §8 对账通路负责收敛），不是可安全暂停/归档的空闲事实；只数 accepted/delivering 会让带 uncertain 输入的 run 被空闲暂停且无法自驱恢复（与 resume 触发放宽配套，03 §6）。
 
 ## 8. 统一 checkpoint / stop 通路
 
@@ -211,8 +216,16 @@ create未发出时取消意图并确认无资源；已在途时保留资源/配�
 正常stop操作具有依赖：stop intent → quiesce → checkpoint及远端SHA确认 → terminate →物理终止确认/配额释放。worker不能先领取terminate绕过保存前置。无运行时写入且已核验无需保存、用户明确force-stop或provider硬期限可采用对应分支，并记录证据和风险。保存失败允许剩余预算内重试；只有用户明确选择继续并CAS撤销停止意图才恢复输入，不能checkpoint失败就自动解除屏障。
 
 **修订（2026-10-09，终验缺陷 B：结果帧必达与保存通路凭据）**：
+
 - 沙箱对 `checkpoint.request` 的处理无论成败**必须回 `checkpoint.result`**（异常按 `failed` + `checkpoint_failed` 如实上报，02 §4）。不回帧时 op 只能靠 attempt 封顶结算 failed，且周期保存 sweep 因「无 checkpoint 记录」每拍重建新 op（终验实证：30 分钟 90 个 failed op、309 次 attempt 空转，并拖慢 stop drain 80-90s）。
 - 周期保存与 stop/drain 同属保存通路：发 `checkpoint.request` 前由唯一签发点成组签发 push+fetch grant（01 §7.2 签发时机修订）；draining 下的 fetch 是 push 后远端 SHA 对账的规格内只读动作。
+
+**修订（2026-10-09，生命周期 v2 审计第一批：terminate 明确拒绝后的持久重试）**：`terminate` op 结算 `failed`（provider 明确拒绝，如 403/402）不是终局——outbox 租约只领 pending/到期 leased/ambiguous，failed 行永不重领，而 `enqueue` 幂等返回既有行不改状态，非终态 run 会永久卡 draining/paused。规则：
+
+- **重排队**：非终态 run 的 failed terminate op，由停止编排（stop sweep 对屏障指针不入队/无 op 的形态直接驱动 `terminateRun`）与补偿入口（`terminateRun` 内）按 attempt 退避重置回 `pending`（新增 `operations.requeueFailed` CAS：仅 `failed → pending`，attempt/幂等键/runGeneration 不变），由既有补偿循环重试 provider 终止。退避阶梯 30s→2min→5min 封顶（对齐周期保存退避风格），锚点为 op 的 failed 结算时刻（updatedAt）。
+- **封顶告警**：attempt 达上限（10 次）后不再重排队，保持 failed 并升级结构化告警（error 日志）；终局兜底是 keepalive liveness（provider 实例消失 → draining 收口 stopped / paused 收口 expired）。
+- **边界**：旧代际 terminate op（run 已换代）维持 failed 不重排队（08 §4.2 迟到操作不得作用于新 run）；`cleanup` op 不在本通路（对账窗口语义不变）；paused 停止推进与预算耗尽闭环复用同一 `terminateOperationKey` 幂等键，重排队不改键、不改写屏障指针。
+- **force-stop 的 CAS 复核**：`force-stop` 写屏障后的 `paused/ready/disconnected → draining` CAS 必须检查结果——CAS 失败（与 resume sweep/停止推进并发）时重读状态分支处理：已是 `paused/draining` → 走暂停中停止推进（同一实现收口终态与 dataAtRisk）；已是 `ready/disconnected`（resume 赢得竞争）→ 重试 draining CAS 补 force-stop 标注后核验 terminate（再失败则由 drain/stop sweep 下一拍按 stopRequested 重驱动）；已终态/已换代 → 幂等返回。不得在 CAS 失败后仍按过期快照 terminate 而把 run 滞留在 `ready+stopRequested` 拖到硬期限。
 
 首命令取消/拒绝阻断该Run继续启动或执行并清理；已经创建的会话仍记录真实结果，后续未投递输入不得被提拔；生命周期对确定未执行输入收口，unknown保留对账。环境清理未核验不释放资源槽。
 
@@ -223,6 +236,8 @@ quiesce是明确协议能力，不是“sleep几秒等Agent写完”。范围包
 文件策略：尊重gitignore与显式排除；禁止自动把.env、token文件、私钥、runtime缓存和用户未授权的大文件提交。清点未跟踪/ignored文件，无法保存的内容要显示；不能以“push成功”宣称所有工作都已保存。Git LFS、submodule和大二进制在首provider试验中确认支持范围，未支持时明确拒绝/风险提示。
 
 stop默认checkpoint后终止；无变化但已有未push commit也必须push并核验。local commit成功、remote push失败状态是failed/dataAtRisk。可以在剩余租期内保留资源并重试保存；继续新工作须用户明确撤销停止意图，不能无限保活超硬期限。
+
+**修订（2026-10-10 用户产品决议，归档驱动的暂停中停止）**：归档（archive on paused run）触发的停止属同一停止链路的例外分支——暂停态无运行时写入、无 checkpoint 前置可执行，直接 terminate 后收口 `stopped`；因为没有可结算的保存事实，dataAtRisk 必须如实标注（08 §8.2「不得宣称工作全部保住」），与 force-stop/keepalive 兜底认领同一诚实口径。归档与停止推进之间不复刻第二套状态裁决：屏障与 `paused → draining` 由既有 beginDrain 写入，terminate 与终态收口复用 advancePausedStop 同一实现，归档命令只在其返回终止已确认后才推进 Task → archived。
 
 force stop是单独显式动作，返回预期丢失信息，需要用户选择；不得用普通stop失败后悄悄force。terminal/projection断线时operation仍持久恢复，不依赖某个页面确认才能继续。
 

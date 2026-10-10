@@ -266,6 +266,35 @@ test("archive admission falls back to server adjudication when detail is unavail
   assert.deepEqual(unknown, { kind: "unknown" });
 });
 
+// 08 §3.2/§8.2 修订 2026-10-10（archive on paused run）：归档是用户结束任务的显式意图，
+// 服务端对 paused run 投影 archive 并在执行时自动推进暂停中停止后完成归档。UI 三处入口
+// （侧栏行/Header/准入预检）都只认 actions 投影——paused run 的归档不再被预检拦截，
+// UI 不按「存在活动 run」本地猜测（与服务端裁决同表）。
+test("archive admission allows a paused run when the projection offers archive", async () => {
+  const pausedDetail = detail({ runStatus: "paused", actions: ["send-input", "stop", "archive"] });
+  assert.equal(isCloudTaskArchiveActionAvailable(pausedDetail), true);
+  const cached = await resolveCloudTaskArchiveAdmission({
+    cachedDetail: pausedDetail,
+    loadDetail: () => {
+      throw new Error("cached detail must short-circuit the fetch");
+    },
+  });
+  assert.deepEqual(cached, { kind: "allowed" });
+  // 无缓存详情的行：点击时拉一次详情，投影放行即发归档请求。
+  const fetched = await resolveCloudTaskArchiveAdmission({
+    cachedDetail: null,
+    loadDetail: () =>
+      Promise.resolve(detail({ runStatus: "paused", actions: ["send-input", "archive"] })),
+  });
+  assert.deepEqual(fetched, { kind: "allowed" });
+  // 对照：投影不含 archive 的 paused run（理论不可达，防御旧缓存）仍拦截引导。
+  const stale = await resolveCloudTaskArchiveAdmission({
+    cachedDetail: detail({ runStatus: "paused", actions: ["stop", "force-stop"] }),
+    loadDetail: () => Promise.resolve(null),
+  });
+  assert.deepEqual(stale, { kind: "blocked-active-run" });
+});
+
 test("restore availability comes only from the server actions projection", () => {
   // 巡检修订：恢复入口与归档对称（03 §6：restore 对 active 返回
   // task-not-restorable，服务端裁决），不按「status === archived」本地猜。

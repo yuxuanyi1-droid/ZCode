@@ -186,7 +186,19 @@ interface InputReceipt {
 
 **修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）——append 准入按 Run 状态分派**：`ready` 维持现状直接投递；**`paused` 接受（同一 202 持久接收语义）并由控制面循环自驱 resume**——先 `driver.resume(handle, requestedDeadline)` → 沙箱 bridge 出站回连（connectionEpoch 接管）→ run 回 `ready` → 按既有 durable 通路投递；**同 run 同 generation，不换代、不重开**。`provisioning`/`disconnected` 维持现状（只保留客户端下一条草稿，不接受新 append）。边界重申：上条修订（2026-10-08）的「自动触发路径（草稿恢复、unknown attempt 对账、投递重试、dispatcher）仍禁止触发重开」不变——**paused 的自驱 resume 是同一 run 的恢复，不属于重开**：等待环境的已接受输入由控制面循环自驱恢复（resume），重开仍只由用户主动发送触发。
 
+**修订（2026-10-09，生命周期 v2 审计第一批：自驱 resume 的触发输入含 delivering/uncertain）**：paused 自驱 resume 与预算耗尽闭环（用户显式输入判定）的触发输入是交付状态 ∈ {`accepted`, `delivering`, `uncertain`} 的 deliverable 输入，不只 `accepted`——idle pause 与投递并发的 TOCTOU、控制面重启把 `delivering` 归为 `uncertain` 都会让输入停在非 accepted 态；只认 accepted 时 paused run 成僵尸（有用户意图却无人恢复）。resume 落地后，delivering/uncertain 输入由既有 reconcile/同 commandId 重投通路收敛（03 §8、02 §6.3），resume 通路不直接投递。
+
 **修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）——paused 的生命周期动作**（Run=paused 时对上表 stop/force-stop/complete/archive/reopen 各行的补充）：`stop` = 写持久屏障（复用 `run.stopOperationId`，已有屏障时不新建、不改写）→ `paused → draining` → 直接 terminate（暂停态无运行时写入，无 checkpoint 前置可执行）；`force-stop` = 屏障 + 直接 terminate；`complete` = 拒绝（须先 resume 或完成 stop 终态收口，才能进入验收）；`archive` = 409（存在未终态的有效 run）；`reopen` = 拒绝 `recovery_required`（旧 run 未终态，不创建新 generation）；resume × 暂停预算耗尽 = 拒绝 `budget_exhausted`，此后停接受 resume，直至 provider 保留期尽、keepalive liveness 确认实例不存在 → `expired` 并释放占槽（终局：预算耗尽 → 保留期尽 → expired）。
+
+**修订（2026-10-10 用户产品决议，archive on paused run）**：上条 `archive` = 409 的裁决按用户决议修订——归档是用户结束任务的显式意图，Run=paused 时归档端点直接受理：复用暂停中停止推进同一实现（beginDrain 写屏障并推进 `paused → draining` → advancePausedStop 直接 terminate → `stopped` 收口，dataAtRisk 按停止 op 未结算如实标注）后继续既有归档路径，HTTP 响应返回归档完成后的任务详情；terminate 未当场确认（run 留在 draining）时按既有语义返回 409 `not_ready/task-has-active-run` 让 UI 重试，由 stop/compensation sweep 按证据收口。ready/provisioning/draining/disconnected 仍 409 引导先停止。actions 投影同表：paused run 投影 `archive`，`complete` 拒绝不变。reopen 前置（旧 run 须终态）不受影响——归档后的任务恢复走 restore，不复活旧 run。
+
+**修订（2026-10-09，生命周期 v2 审计第二批：停止链路崩溃窗口自愈）**：paused 停止推进存在崩溃窗口——beginDrain 已写屏障并推进 `paused → draining`、advancePausedStop 尚未执行时控制面崩溃，run 停在 draining 且 stop 指针无对应 operation 行（paused 分支不走保存通道，checkpoint op 从未入队）；stop sweep 对无 op 行只跳过、pauseResume sweep 只认 paused，run 将占槽卡到 provider 保留期尽。兜底规则：`draining + stopRequested + stop 指针无对应 operation 行`且停止推进已停摆（超过 drain 预算无进展）的 run，由 keepalive sweep 认领——复用 advancePausedStop 同一实现直接 terminate 收口 `stopped`（该 run 从未开始保存，跳过保存前置；dataAtRisk 按 op 未结算如实为 true）。就绪态停止「屏障已写、checkpoint op 未入队」的微窗口同被该兜底覆盖：屏障即用户停止意图，收口后如实标 dataAtRisk；指向存在 op（pending/failed 等）的 run 不认领——保存重试与预算内重试仍归 stop sweep（不得绕过保存前置）。
+
+**修订（2026-10-09，生命周期 v2 审计第二批：启动对账 stop-pending 守卫）**：启动对账对 stopped/notFound 观测补 stop-pending 守卫（与 keepalive liveness 同一口径）：`stopRequested 且非 draining/provisioning` 的 run 不得以 `expired` 落账（用户显式停止的 run 以过期终态落账与停止屏障打架）——跳过收口（summary.stopPending 计数），终态由停止推进通路收口 `stopped`；provisioning 行为不变（notFound → stopped 本就遵循停止意图）。
+
+**修订（2026-10-09，生命周期 v2 审计第二批：暂停预算耗尽的时间兜底）**：预算耗尽只拒 resume、终局只等 provider 保留期尽时，若 provider 保留期无界，run 将永久 paused 占槽（并发上限内 3 个即满）。keepalive 增加**收口拍**：`paused` 且 `now ≥ hardDeadlineAt + PAUSED_BUDGET_TERMINATION_GRACE_MS`（部署常量 24h：跨一个完整工作日周期，覆盖预算耗尽闭环与手动重开的用户窗口，同时保证占槽有界）的 run 经既有终止入口主动终止——provider 确认终止为证据（不违反「结果未知不收口」）后收口 `expired`、释放占槽、dataAtRisk 如实为 true（暂停态无已确认保存事实）；终止未确认保持 paused，下一拍按幂等 op 键重试。
+
+**修订（2026-10-09，生命周期 v2 审计第二批：预算耗尽闭环降级的用户反馈）**：闭环两条降级路径（terminate 未确认 / reopen 被拒）下，触发输入的 cancelled 收口必须带明确 lastError（「运行预算已耗尽，消息未能随重开发出，请重新发送」，落 `task_inputs.last_error`，UI receipt/历史自然可见）并记结构化 warn，不得让已 202 的消息无反馈地消失。`markDelivery` 的 CAS 与 domain `canAdvanceDeliveryStatus` 同一口径（同态幂等改写允许），使已按 `run-ended` 落账的触发输入可补注可读原因。
 
 PATCH Task 只接受标题与 draftStartConfig 及 expectedRevision，启动配置只在 draft 可改；不能任意 PATCH status/activeRunId/baseSha。Project 创建由当前主体选择 repositoryId，服务端按09取得权威 installation/owner/name/defaultBranch；显示名是可编辑元数据，不接受请求字段自证授权。
 

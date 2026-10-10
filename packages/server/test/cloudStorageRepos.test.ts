@@ -430,13 +430,16 @@ test("输入投递状态机只允许前进，acceptanceSeq 在 Task 内唯一递
     if (accepted.status !== "accepted") throw new Error("unreachable");
     const commandId = accepted.receipt.commandId;
 
-    const backward = await storage.storage.inputs.markDelivery({
+    // 同态幂等改写合法（domain canAdvanceDeliveryStatus 的 from===to 例外，与内存 fake
+    // 同一口径；03 修订审计第二批：预算闭环降级靠它为已收口输入补注 last_error）——
+    // 只覆盖 COALESCE 字段，状态不回退、不越级。
+    const sameState = await storage.storage.inputs.markDelivery({
       taskId: seeded.taskId,
       commandId,
       to: "accepted",
       now: TEST_NOW + 1,
     });
-    assert.equal(backward, null, "已 delivering/admitted 的输入不得回退");
+    assert.equal(sameState?.deliveryStatus, "accepted", "同态改写是幂等 no-op，不是回退");
 
     const delivering = await storage.storage.inputs.markDelivery({
       taskId: seeded.taskId,
@@ -446,11 +449,23 @@ test("输入投递状态机只允许前进，acceptanceSeq 在 Task 内唯一递
     });
     assert.equal(delivering?.deliveryStatus, "delivering");
 
+    // 真正的回退边（delivering → accepted）仍被拒：状态机只允许前进（02 §6.3）。
+    assert.equal(
+      await storage.storage.inputs.markDelivery({
+        taskId: seeded.taskId,
+        commandId,
+        to: "accepted",
+        now: TEST_NOW + 3,
+      }),
+      null,
+      "已 delivering/admitted 的输入不得回退",
+    );
+
     const uncertain = await storage.storage.inputs.markDelivery({
       taskId: seeded.taskId,
       commandId,
       to: "uncertain",
-      now: TEST_NOW + 3,
+      now: TEST_NOW + 4,
     });
     assert.equal(uncertain?.deliveryStatus, "uncertain");
 
@@ -459,7 +474,7 @@ test("输入投递状态机只允许前进，acceptanceSeq 在 Task 内唯一递
       await storage.storage.inputs.cancelPending({
         taskId: seeded.taskId,
         commandId,
-        now: TEST_NOW + 4,
+        now: TEST_NOW + 5,
       }),
       null,
     );
@@ -470,7 +485,7 @@ test("输入投递状态机只允许前进，acceptanceSeq 在 Task 内唯一递
           taskId: seeded.taskId,
           commandId,
           to: "delivering",
-          now: TEST_NOW + 5,
+          now: TEST_NOW + 6,
         })
       )?.deliveryStatus,
       "delivering",
@@ -479,7 +494,7 @@ test("输入投递状态机只允许前进，acceptanceSeq 在 Task 内唯一递
       taskId: seeded.taskId,
       commandId,
       to: "admitted",
-      now: TEST_NOW + 6,
+      now: TEST_NOW + 7,
     });
     assert.equal(admitted?.deliveryStatus, "admitted");
     assert.equal(
@@ -487,7 +502,7 @@ test("输入投递状态机只允许前进，acceptanceSeq 在 Task 内唯一递
         taskId: seeded.taskId,
         commandId,
         to: "uncertain",
-        now: TEST_NOW + 7,
+        now: TEST_NOW + 8,
       }),
       null,
       "admitted 是 runtime 裁决事实，不得再改为 uncertain",

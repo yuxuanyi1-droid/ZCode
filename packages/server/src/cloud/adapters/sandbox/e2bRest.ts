@@ -48,17 +48,24 @@ export {
  * E2B 状态 → 归一观测状态（01 §4.1，含 2026-10-09 修订）：running 类含创建/启动中
  * （资源已在提供方存在并计费）；**paused 是独立的观测态**——暂停保留期的实例被
  * provider 保留（仍计存储/保留费），不得归入 stopped，否则 keepalive liveness 会把
- * 暂停中的 run 误收口为 expired；stopped 类含其余停态；其余不猜测，返回 undefined
- * 由调用方判 unknown。E2B 的 SandboxState 枚举只有 "running" | "paused"。
+ * 暂停中的 run 误收口为 expired；stopped 类含确定的停态（archived）；**过渡态
+ * （suspending = 暂停进行中）与未映射状态都返回 undefined**（调用方判 unknown）——
+ * 生命周期 v2 审计第二批：suspending 曾被归 stopped，暂停进行中的实例会被
+ * startup/keepalive 当终局误收 expired（孤儿实例计费）；三个消费者对 unknown 都是
+ * 安全的「不收口」，过渡态必须留在可重试的未知里。
  */
 const E2B_RUNNING_STATES = new Set(["running", "creating", "started", "active", "provisioning"]);
 const E2B_PAUSED_STATES = new Set(["paused"]);
-const E2B_STOPPED_STATES = new Set(["stopped", "archived", "suspending"]);
+const E2B_STOPPED_STATES = new Set(["stopped", "archived"]);
+/** 过渡态：非终局、也非运行/暂停的确定事实（如 suspending = 暂停进行中），归 unknown。 */
+const E2B_TRANSITIONAL_STATES = new Set(["suspending"]);
 
 export function mapE2bSandboxState(state: string): "running" | "paused" | "stopped" | undefined {
   if (E2B_RUNNING_STATES.has(state)) return "running";
   if (E2B_PAUSED_STATES.has(state)) return "paused";
   if (E2B_STOPPED_STATES.has(state)) return "stopped";
+  // 过渡态与未映射状态一致：undefined → 调用方判 unknown（不猜测、不收口）。
+  if (E2B_TRANSITIONAL_STATES.has(state)) return undefined;
   return undefined;
 }
 

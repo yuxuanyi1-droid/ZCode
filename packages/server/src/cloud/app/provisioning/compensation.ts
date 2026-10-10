@@ -24,6 +24,7 @@ import { cloudCoreLogger } from "../logger.js";
 import { fail, ok, type CloudAppResult } from "../result.js";
 import type { LeasedOperation } from "../ports/operationOutboxPort.js";
 import type { RunOrchestrator } from "../runOrchestrator.js";
+import { createTerminateRetry } from "./terminateRetry.js";
 
 export type TerminationVerdict = "terminated" | "notTerminated" | "unknown";
 
@@ -82,6 +83,9 @@ export function createRunCompensation(
   orchestrator: RunOrchestrator,
 ): RunCompensation {
   const { storage, operations, drivers, clock } = deps;
+  // 失败重排队（08 §8.1 修订，生命周期 v2 审计 P1）：实现拆在 terminateRetry.ts，
+  // 终止入口每次调用时检查 failed op 是否到期重试（单一实现，不写两份）。
+  const requeueFailedTermination = createTerminateRetry(deps);
 
   /**
    * 本次 `terminateRun` 内的补偿文本：`runCompensationOnce` 在 `terminateRun` 里同步执行，
@@ -302,6 +306,13 @@ export function createRunCompensation(
     async terminateRun(input) {
       const requested = await requestTermination(input);
       if (!requested.ok) return requested;
+      // 失败重排队（08 §8.1 修订，生命周期 v2 审计 P1）：enqueue 幂等返回既有行不改状态，
+      // failed 的 terminate op 必须显式重排队才会被租约重领；放在 runCompensationOnce 之前，
+      // 退避到期时同一次调用即可完成「重排队 → 领取 → provider 重试」。
+      const run = await storage.runs.get(input.runId);
+      if (run && run.runGeneration === input.runGeneration) {
+        await requeueFailedTermination(run);
+      }
       pendingLastError = input.lastError;
       pendingReason = input.reason;
       try {

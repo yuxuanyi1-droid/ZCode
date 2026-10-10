@@ -1111,6 +1111,10 @@ const zhCN: Record<string, string> = {
   "git.error.description": "Git 返回错误：{message}",
   "git.empty.gitUnavailableTitle": "当前环境没有可用的 Git",
   "git.empty.gitUnavailableDescription": "请先安装 Git，或确认当前运行环境里可以执行 git 命令。",
+  "git.cloud.pausedDescription":
+    "发送消息即可恢复运行（同一运行，不会重新开始），恢复后即可在此查看 Git 变更。",
+  "git.cloud.environmentUnavailableTitle": "运行环境当前不可用",
+  "git.cloud.environmentUnavailableDescription": "运行环境就绪后即可在此查看 Git 变更。",
   "git.empty.notRepositoryTitle": "当前 workspace 不在 Git 仓库中",
   "git.empty.notRepositoryDescription":
     "打开一个 Git 仓库目录后，这里会展示当前 workspace 作用域内的改动。",
@@ -6555,6 +6559,7 @@ const zhCN: Record<string, string> = {
   "cloud.errors.provider_unreachable": "云服务提供商暂时不可达",
   "cloud.errors.bridge_disconnected": "与运行环境的连接已断开",
   "cloud.errors.recovery_required": "该任务需要先完成恢复操作",
+  "cloud.errors.protocol_incompatible": "客户端与服务端版本不兼容，请刷新页面后重试",
   "cloud.run.statusWaitingForRun": "输入已提交，正在等待云环境…",
   "cloud.run.statusPaused": "运行环境已暂停",
   "cloud.run.statusPausedHint": "发送消息即可恢复运行（同一运行，不会重新开始）",
@@ -6590,8 +6595,7 @@ const zhCN: Record<string, string> = {
   "cloud.run.liveReconnectFailed": "实时连接已断开，历史仍可查看。可点击重连恢复增量。",
   "cloud.run.error.validationRejected":
     "无法建立会话连接：服务端校验拒绝了请求参数。可以重试或反馈问题。",
-  "cloud.run.error.environmentUnavailable":
-    "运行环境暂不可用，稍后会自动重试；也可以点击重连。",
+  "cloud.run.error.environmentUnavailable": "运行环境暂不可用，稍后会自动重试；也可以点击重连。",
   "cloud.run.error.technicalDetail": "查看技术细节",
   "cloud.run.settings.timeoutClamped": "已按部署上限收敛到 {seconds} 秒。",
   "chat.attachments.cloud.uploadUnavailable":

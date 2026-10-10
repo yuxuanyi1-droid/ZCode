@@ -152,18 +152,15 @@ test("已终态/已释放槽位的 run 不被重复处理（幂等）", async ()
 test("drain 停摆且实例已消失 → 收口为 stopped 并释放槽位；未停摆不打 provider（08 §8.1）", async () => {
   const context = buildTestPlane();
   const session = await readyRun(context);
-  await context.storage.runs.requestStop({
+  // 保存通路在途的 drain（checkpoint op 已入队、pending）：liveness 仍负责停摆核对——
+  // 「屏障无 op」的 draining run 由停止兜底通路认领（keepalive 兜底 / stop sweep），
+  // 不经过本分支（cloudLifecycleBatch7）。
+  const drained = await context.plane.lifecycle.drain.beginDrain({
     taskId: session.taskId,
-    operationId: "00000000-0000-4000-8000-0000000000ff",
-    now: context.clock.now(),
-  });
-  await context.storage.runs.transitionStatus({
     runId: session.runId,
-    runGeneration: session.runGeneration,
-    from: ["ready"],
-    to: "draining",
-    now: context.clock.now(),
+    reason: "hard-deadline",
   });
+  assert.ok(drained.ok);
   context.driver.inspectStatus = "notFound";
 
   // 仍在 drain 预算内：可能只是保存慢，不核对也不收口（"慢"不是收口依据）。

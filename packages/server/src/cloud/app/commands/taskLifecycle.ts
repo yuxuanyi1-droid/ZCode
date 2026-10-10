@@ -8,7 +8,10 @@
  *   cancelled、delivering/uncertain→uncertain 保留为「结果不明」事实）不再阻塞——
  *   已 admitted 的在途执行也须达到可信安全点；最终 completed 需保存策略/产物核验及
  *   活动 Run 终止确认，不把写 outbox 等同完成（08 §9）。
- * - archive：无活动写 run 时归档；历史仍可读（03 §6、CP-12）。
+ * - archive：无活动写 run 时归档；例外（08 §3.2/§8.2 修订 2026-10-10，用户决议）：
+ *   Run=paused 时归档是用户结束任务的显式意图——自动推进暂停中停止（复用
+ *   pausedStop 的 advancePausedStop 同一实现，terminate 后 dataAtRisk 如实标注）
+ *   再完成归档；ready/provisioning/draining/disconnected 仍 409 引导先停止（03 §6、CP-12）。
  * - reactivate：completed 且 PR 未 merged 时显式转 active，不自动建 run；merged 时新建
  *   follow-up Task（08 §3.1）。
  * - restore：从 archived 恢复 archivedFromStatus；仍需显式 reopen 才有新 run（03 §6）。
@@ -24,6 +27,7 @@ import { cloudCoreLogger } from "../logger.js";
 import { fail, type CloudAppResult } from "../result.js";
 import type { TaskDetailService } from "../taskDetail.js";
 import type { DrainLoop } from "../lifecycle/drain.js";
+import type { PauseResumeControl } from "../lifecycle/pauseResume.js";
 
 export interface TaskLifecycleCommands {
   completeTask(input: {
@@ -67,6 +71,8 @@ export function createTaskLifecycleCommands(
   deps: CloudCoreDeps,
   taskDetail: TaskDetailService,
   drain: DrainLoop,
+  /** 暂停中停止推进（pausedStop.ts 共享实现）：归档驱动的停止复用同一实现，不写两份。 */
+  pauseResume: Pick<PauseResumeControl, "advancePausedStop">,
 ): TaskLifecycleCommands {
   const { storage, clock } = deps;
 
@@ -159,9 +165,39 @@ export function createTaskLifecycleCommands(
       const task = current.value.task;
       if (task.status === "archived") return current;
       const run = current.value.activeRun;
-      if (run && run.status !== "stopped" && run.status !== "expired" && run.status !== "failed") {
-        // 归档前置：无活动写 run（03 §6、CP-12）。paused 也是未终态的有效 run
-        // （2026-10-09 生命周期 v2 行为表：archive = 409），归一 not_ready（409）。
+      if (run && run.status === "paused") {
+        // 归档 on paused run（08 §3.2/§8.2 修订 2026-10-10，用户决议）：归档是用户结束
+        // 任务的显式意图，自动推进暂停中停止后完成归档——与 stopTask 的 paused 分支同一
+        // 序列：beginDrain 写持久屏障（复用 stopOperationId）并推进 paused→draining
+        // （不走保存通路，暂停态无 checkpoint 前置），再复用 pauseResume.advancePausedStop
+        // 直接 terminate + stopped 收口（dataAtRisk 按停止 op 结算事实如实标注）。
+        const started = await drain.beginDrain({
+          taskId: task.taskId,
+          runId: run.runId,
+          reason: "user-stop",
+        });
+        if (!started.ok) return started;
+        const fresh = await storage.runs.get(run.runId);
+        if (fresh && (fresh.status === "paused" || fresh.status === "draining")) {
+          const advanced = await pauseResume.advancePausedStop(fresh, clock.now());
+          if (!advanced) {
+            // terminate 未当场确认：run 留在 draining（占槽），由 stop/compensation sweep
+            // 按证据收口；归档未完成，按既有语义 409 让 UI 重试（重试时 run 已终态或
+            // draining 仍 409，直至停止收口后归档成功）。
+            return fail("not_ready", "task-has-active-run", { runId: run.runId });
+          }
+        }
+        // 停止已收口（run 终态，fresh 已终态或推进返回 true）：继续下方既有归档路径。
+        // 不复检过期 run 快照——transitionStatus 的 `revision < ?` CAS 自行兜底并发。
+      } else if (
+        run &&
+        run.status !== "stopped" &&
+        run.status !== "expired" &&
+        run.status !== "failed"
+      ) {
+        // 归档前置：无活动写 run（03 §6、CP-12）。ready/provisioning/draining/
+        // disconnected 仍归一 not_ready（409）引导先停止（03 §6 修订 2026-10-10：
+        // 仅 paused 由上方分支自动推进停止后放行）。
         return fail("not_ready", "task-has-active-run", { runId: run.runId });
       }
       const updated = await storage.tasks.transitionStatus({

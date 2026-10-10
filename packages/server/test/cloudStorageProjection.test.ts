@@ -8,7 +8,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { CloudProjectionRecord } from "@zcode/shared";
-import { cloudBridgeControlFrameSchema } from "@zcode/shared";
+import {
+  cloudBridgeControlFrameSchema,
+  cloudHistoryCursorSchema,
+  cloudHistoryPageSchema,
+} from "@zcode/shared";
 import {
   newUuid,
   nextNow,
@@ -218,8 +222,8 @@ test("游标越过已存范围：空页不带 nextCursor，且要求 resync", as
       limit: 2,
     });
     assert.ok(page1.nextCursor);
-    // 构造越界游标：指向超出当前最大 event_seq 的位置（比末条 event_seq 大 1）。
-    const beyond = Buffer.from(JSON.stringify([10_000]), "utf8").toString("base64url");
+    // 构造越界游标：指向超出当前最大 event_seq 的位置（wire 格式 <logEpoch>:<seq>）。
+    const beyond = "epoch-1:10000";
     const empty = await handle.storage.storage.projections.readHistory({
       taskId,
       cursor: beyond,
@@ -278,10 +282,70 @@ test("readHistory 分页与 retention 越界返回 resync", async () => {
     // 游标超前于已有数据（例如从备份恢复后客户端仍持有旧游标）：要求 resync。
     const ahead = await handle.storage.storage.projections.readHistory({
       taskId,
-      cursor: Buffer.from(JSON.stringify([9999]), "utf8").toString("base64url"),
+      cursor: "epoch-1:9999",
       limit: 10,
     });
     assert.equal(ahead.resyncRequired, true);
+  });
+});
+
+// 实测缺陷回归（2026-10-09）：history 发出的 nextCursor 必须是 shared 冻结 wire 格式
+// `<logEpoch>:<seq>`（cloudHistoryCursorSchema）。旧实现回通用 base64url 游标（如
+// `WzU5N10`），客户端 cloudHistoryPageSchema strict 校验把整页拒绝成
+// protocol_incompatible，任务详情页历史时间线无法加载。这里按客户端视角做整体
+// safeParse 回归，并用 wire 游标真实走通翻页。
+test("history 游标为 wire 冻结格式：客户端 schema 通过且可翻页走通", async () => {
+  await withSeededRun(async ({ handle, taskId, runId }) => {
+    await handle.storage.storage.projections.appendBatch(
+      [0, 1, 2, 3].map((sourceSeq) =>
+        projectionRecord({ taskId, runId, sourceSeq, contentHash: String(sourceSeq).repeat(64) }),
+      ),
+    );
+
+    const page1 = await handle.storage.storage.projections.readHistory({ taskId, limit: 2 });
+    assert.ok(page1.nextCursor);
+    // 游标形状 = shared cloudHistoryCursorSchema（客户端对 cursor 的冻结校验）。
+    assert.equal(
+      cloudHistoryCursorSchema.safeParse(page1.nextCursor).success,
+      true,
+      "nextCursor 必须匹配 <logEpoch>:<seq> wire 格式",
+    );
+
+    // 客户端视角：响应整体（items + nextCursor）通过 cloudHistoryPageSchema。
+    const clientView = {
+      items: page1.items.map((record) => ({
+        topic: record.topic,
+        logEpoch: record.logEpoch,
+        seq: record.sourceSeq,
+        kind: record.kind,
+        payload: record.payload,
+        ts: 0,
+      })),
+      nextCursor: page1.nextCursor,
+    };
+    assert.equal(
+      cloudHistoryPageSchema.safeParse(clientView).success,
+      true,
+      "history 响应形状必须通过客户端冻结 schema",
+    );
+
+    // 用 wire 游标真实翻页：下一页恰好续接，读尽后不带 cursor。
+    const page2 = await handle.storage.storage.projections.readHistory({
+      taskId,
+      cursor: page1.nextCursor,
+      limit: 2,
+    });
+    assert.deepEqual(
+      page2.items.map((item) => item.sourceSeq),
+      [2, 3],
+    );
+    assert.equal(page2.nextCursor, undefined, "数据读尽后 hasMore=false");
+
+    // 非法形状（含旧 base64url 形状）在存储层拒绝且不静默从头分页（validation_failed）。
+    await assert.rejects(
+      handle.storage.storage.projections.readHistory({ taskId, cursor: "WzU5N10", limit: 2 }),
+      (error: unknown) => isCloudStorageError(error) && error.code === "validation_failed",
+    );
   });
 });
 

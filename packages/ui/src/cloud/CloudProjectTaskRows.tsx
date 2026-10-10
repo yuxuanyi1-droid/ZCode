@@ -42,12 +42,14 @@ export function CloudTaskRow({ task, selected, onOpen }: CloudTaskRowProps) {
     taskId: task.taskId,
     autoLoad: false,
   });
-  // 服务端规则（03 §6）：draft/completed/failed 与「active + 终态 run」可归档；已归档
-  // 不重复归档。归档入口可用性与 Header 更多菜单对齐——按 actions 投影门控：
-  // 该行有缓存详情（打开过/归档过）而投影不含 archive 时预禁用并说明原因；没有缓存
-  // 详情的行保持入口（不为预禁用整列发 GET），点击时先按投影预检
-  // （resolveCloudTaskArchiveAdmission），活动 run 未终态时不再发出必被 409 拒绝的
-  // 归档请求，而是直接给出「先停止再归档」引导（2026-10-07 终验缺陷 E）。
+  // 服务端规则（03 §6；08 §3.2 修订 2026-10-10）：draft/completed/failed、「active +
+  // 终态 run」与「active + paused run」（归档 = 用户结束任务的显式意图，服务端自动推进
+  // 暂停中停止后归档）可归档；已归档不重复归档。归档入口可用性与 Header 更多菜单对齐
+  // ——按 actions 投影门控：该行有缓存详情（打开过/归档过）而投影不含 archive 时预禁用
+  // 并说明原因；没有缓存详情的行保持入口（不为预禁用整列发 GET），点击时先按投影预检
+  // （resolveCloudTaskArchiveAdmission），投影不含 archive（存在 ready/draining 等未终态
+  // run）时不再发出必被服务端 409 拒绝的归档请求，而是直接给出「先停止再归档」引导
+  // （2026-10-07 终验缺陷 E）。
   const archiveVisible = task.status !== "archived";
   const archiveUnavailable =
     archiveVisible && detail !== null && !isCloudTaskArchiveActionAvailable(detail);
@@ -65,8 +67,9 @@ export function CloudTaskRow({ task, selected, onOpen }: CloudTaskRowProps) {
       if (!confirmed) {
         return;
       }
-      // 无缓存详情时先拉一次详情做准入预检：投影不含 archive（存在未终态 run 的
-      // 唯一非归档情形）就直接引导「先停止」，不发必被服务端 409 拒绝的请求；
+      // 无缓存详情时先拉一次详情做准入预检：投影不含 archive（存在 ready/draining 等
+      // 非 paused 的未终态 run；paused 由服务端投影放行并自动推进停止后归档）就直接
+      // 引导「先停止」，不发必被服务端 409 拒绝的请求；
       // 详情拉不到（unknown）回落服务端裁决，错误经归一文案呈现。
       const admission = await resolveCloudTaskArchiveAdmission({
         cachedDetail: detail,

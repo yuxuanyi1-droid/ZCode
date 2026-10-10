@@ -35,6 +35,10 @@ const TASK_ACTION_ERROR_MESSAGE_KEYS: Readonly<Partial<Record<string, string>>> 
   provider_unreachable: "cloud.errors.provider_unreachable",
   bridge_disconnected: "cloud.errors.bridge_disconnected",
   recovery_required: "cloud.errors.recovery_required",
+  // 2026-10-09 实测缺陷（历史时间线）：history 响应 wire 校验失败时 SDK 归一为
+  // protocol_incompatible，原始码直出对用户不可行动；归一为「版本不兼容」提示
+  // （web cloudBoot 同码已按 incompatible-bundle 分面，04 §6 文案表补齐同一语义）。
+  protocol_incompatible: "cloud.errors.protocol_incompatible",
 };
 
 /**

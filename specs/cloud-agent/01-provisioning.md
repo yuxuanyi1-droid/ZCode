@@ -133,6 +133,8 @@ interface SandboxDriver {
 
 **修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）**：`SandboxDriver` 增加分级能力位 `pauseResume: "memory" | "disk" | "none"` 与 `pause(handle)` / `resume(handle, requestedDeadline)` 方法（签名见上接口）。`memory` 表示暂停保留进程态（resume 后沙箱内运行态继续）；`disk` 表示仅保留文件系统、resume 为冷启动——进程态丢失必须如实向用户披露；`none` 表示不支持，生命周期行为与现状完全一致（终态收口 + reopen）。`resume` 恢复的是同一 run：不换代、不重开，恢复通路同时续展凭据有效期与 run 租期（`requestedDeadline` 收敛于能力上限）。`ProviderObservation` 相应增加 `paused` 观察态：keepalive liveness 对 paused 实例不得按 stopped/notFound 收口，暂停保留期的存在性核对走 paused 态。
 
+**修订（2026-10-09，生命周期 v2 审计第二批：stopped 观测的消费侧调停与过渡态归 unknown）**：run.status=`paused`（控制面持久事实）时，driver.inspect 的 `stopped` 观测按 disk-pause 保留态处理——Daytona disk 级暂停的 provider 落点就是 stop 系停态（stop 只停不删、文件系统保留），pause 当场一次性改写为 paused 观测后，每次 liveness inspect 都会返回 stopped；消费侧（keepalive liveness 与启动对账）对 paused run 的 stopped 观测一律视为存活不收口，`notFound` 才是真终局（expired）。若实例确被外部移除，暂停预算宽限兜底（03 修订）保证有界收口。调停放在消费侧而非 driver 层：driver 不携带 run 状态、不维护 pause 后状态记忆（无隐藏状态，可测试）。E2B 过渡态 `suspending`（暂停进行中）与未知过渡态归 `unknown` 观测（映射函数返回未映射）——三个消费者（startup/keepalive/compensation）对 unknown 都是安全的「不收口」，暂停进行中的实例不再被误判终局（防孤儿实例计费）。
+
 ### 4.2 Provider 差异
 
 首期同时实现 E2B、Modal、Daytona 三家 adapter（2026-10-05 拍板，见 00 §9）。各家以真实账号实测后解禁：实测覆盖能力声明、期限语义、停止语义与启动开销；验证完成前 capability 门控不显示可选。共同接口不抹平期限、资源和停止语义。

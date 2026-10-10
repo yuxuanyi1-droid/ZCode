@@ -186,6 +186,22 @@ export const operationOutboxHandlers = {
   },
 
   /**
+   * 失败重排队（08 §8.1 修订 2026-10-09，生命周期 v2 审计）：仅 `failed → pending` 的
+   * CAS；清掉租约字段，attempt/error_code 保持（退避与封顶按 attempt 判定，失败证据
+   * 保留可查）。已迁移到 settled/ambiguous/pending/leased 的行不可重排队。
+   */
+  "operations.requeueFailed": (context, params): boolean => {
+    const changes = context.db
+      .prepare(
+        `UPDATE external_operations SET
+           state = 'pending', lease_token = NULL, lease_expires_at = NULL, updated_at = ?
+         WHERE operation_id = ? AND state = 'failed'`,
+      )
+      .run(params.now, params.operationId);
+    return Number(changes.changes) > 0;
+  },
+
+  /**
    * 启动恢复扫描（03 §8）：pending/leased/ambiguous 都还没结算。
    * **只覆盖 provider/生命周期分面**（`business_key IS NULL`）：GitHub effect 由
    * `GitHubEffectStore` 自己的恢复扫描处理，混进来会被 provider 对账逻辑误领。
@@ -207,6 +223,7 @@ export const operationOutboxHandlers = {
   | "operations.leaseNext"
   | "operations.renewLease"
   | "operations.settle"
+  | "operations.requeueFailed"
   | "operations.listUnsettled"
 >;
 
