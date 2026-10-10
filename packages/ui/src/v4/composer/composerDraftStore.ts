@@ -24,6 +24,12 @@ export interface V4ComposerDraft {
   lastPlanTransitionId?: string;
   lastPermissionGrantId?: string;
   modelSelection?: ModelSelection;
+  /**
+   * modelSelection 来自本端显式操作且尚未被权威事实消费（权威同步据此保留
+   * pending 意图，见 composerModelAuthority.ts）；被 runtime 回发同选型事件
+   * 确认后清除。无标记的选择是种子/陈旧同步，权威变化时直接跟随。
+   */
+  modelSelectionExplicit?: true;
   /** 首次分享导入等待公共新任务初始化；不能由空 Session snapshot 抢先填充。 */
   initializeFromNewTask?: true;
   updatedAt: number;
@@ -133,6 +139,10 @@ function readDraft(value: unknown): V4ComposerDraft | null {
       ? { lastPlanTransitionId: value.lastPlanTransitionId }
       : {}),
     ...(modelSelection ? { modelSelection } : {}),
+    // 显式标记依附于选择存在；坏选择被丢弃时标记一并失效，不让孤儿标记挡住权威同步。
+    ...(modelSelection && value.modelSelectionExplicit === true
+      ? { modelSelectionExplicit: true as const }
+      : {}),
     ...(value.initializeFromNewTask === true && !mode.success
       ? { initializeFromNewTask: true as const }
       : {}),

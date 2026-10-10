@@ -193,6 +193,8 @@ stopRequested 是优先于 Run 状态的持久门控：收到受理后显示“�
 
 2026-10-09 修订（用户实测缺陷：云任务运行中 composer 切换模型不生效）：模型/模式选择属「随消息参数走」的执行配置，不是账号 provisioning 代际——composer 在发送点击冻结的 Submission（modelSelection/mode/planEnabled，`createComposerSubmissionConfig`）必须经云发送适配层映射为控制面 input 的 `requestedConfig`（`buildCloudRequestedConfig`，node:test 覆盖），随 start/append/reopen 请求落进 input record，控制面投递信封（03 §6.1、02 §6.2）把它携带进 createSession（firstInput+config）/sendText payload，沙箱 runtime admission（`resolveSubmittedExecutionState`/`applyRequestedSessionConfig`）据此更新 Session Selection。运行中切换模型后，下一条消息即用新模型执行，选择器状态经既有 ModelSelected 投影回读保持一致；禁止改为 provisioning 代际或第二套配置命令通路。Submission 未完成（null）时省略 `requestedConfig`，回落 runtime Session Selection，不阻断发送。
 
+2026-10-09 修订二（用户实测缺陷：切换模型后 composer 选择器仍显示旧模型，直接发送把模型切回）：选择器的显示来源是 per-scope 持久草稿（`composerDraftStore` 的 `draft.modelSelection`），而 runtime 应用切换后经 ModelSelected → v4 投影 `config.modelSelection`（state.updated 帧，云 attachment 与本机 Host 同一条投影协议）只有时间线消费，草稿没有权威消费者——本机/云同断。规则：投影 `config.modelSelection` 是会话权威选择，composer 草稿必须跟随（`resolveComposerModelAuthoritySync`，node:test 覆盖）；本端显式选择（选择器/档位点击，草稿 `modelSelectionExplicit` 标记）作为 pending 意图优先于权威事件保持显示，直到被发送消费（ACK 写回或 runtime 回发同选型事件）即收敛清标记；无标记草稿（首帧种子/陈旧同步/空草稿）一律跟随权威，权威未变化的重复帧（恢复/历史重放）不写草稿。发送后草稿回到运行时最新选择，不得携带陈旧值随下一条 Submission 下发。
+
 ### 3.4 输入层次与多端
 
 | 层次                          | 所有者                     | 恢复/呈现                                      |

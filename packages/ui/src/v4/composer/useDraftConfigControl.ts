@@ -27,6 +27,7 @@ import { useZCodeSessionService } from "@/hooks/useZCodeSessionService.js";
 import { useSettings } from "@/hooks/useSettingService.js";
 import { parseModelPickerValue } from "@/lib/zcodeSessionProjection.js";
 import { initializeNewTaskDraft } from "@/v4/composer/newTaskDraft.js";
+import { resolveComposerModelAuthoritySync } from "@/v4/composer/composerModelAuthority.js";
 import {
   clearV4ComposerDraft,
   persistV4ComposerDraft,
@@ -238,6 +239,9 @@ export function useDraftConfigControl(params: {
         ...current,
         mode: mode.success ? mode.data : current.mode,
         modelSelection: next.modelSelection,
+        // 选择器/档位点击是本端显式意图：打 explicit 标记，权威同步据此把它作为
+        // pending 草稿保持显示，直到被发送消费（见 composerModelAuthority.ts）。
+        modelSelectionExplicit: next.modelSelection ? true : current.modelSelectionExplicit,
         // 用户已经显式改选，不能再由导入时等待的默认初始化覆盖。
         ...(current.initializeFromNewTask
           ? { mode: mode.success ? mode.data : "build", initializeFromNewTask: undefined }
@@ -246,6 +250,43 @@ export function useDraftConfigControl(params: {
     },
     [updateComposerDraft],
   );
+  // ── 会话权威模型同步（ModelSelected → 投影 config → 草稿，2026-10-09 实测缺陷）──
+  // runtime 应用切换后经 v4 投影把 config.modelSelection 作为 state.updated 帧推给
+  // 客户端（云 attachment 与本机 Host 同一条投影协议，时间线的 modelChange marker
+  // 即来源于此）；但草稿此前没有权威消费者，选择器停在陈旧值，用户直接发送会把旧
+  // 模型随 Submission 下发、把 runtime 切回去。这里把投影 config 作为会话权威事实
+  // 喂给草稿：无显式标记的草稿跟随权威；显式 pending（explicit 标记）优先保持，
+  // 直到发送消费。决断规则见 composerModelAuthority.ts（纯函数，node:test 覆盖）。
+  const modelAuthorityRef = useRef<{ scopeKey: string; previousAuthority: ModelSelection | null }>({
+    scopeKey,
+    previousAuthority: null,
+  });
+  const sessionAuthoritySelection = sessionConfig?.modelSelection ?? null;
+  useEffect(() => {
+    if (!sessionAuthoritySelection) return;
+    const tracked =
+      modelAuthorityRef.current.scopeKey === scopeKey ? modelAuthorityRef.current : null;
+    const decision = resolveComposerModelAuthoritySync({
+      previousAuthority: tracked?.previousAuthority ?? null,
+      authority: sessionAuthoritySelection,
+      draftSelection: stateRef.current.draft.modelSelection,
+      draftExplicit: stateRef.current.draft.modelSelectionExplicit === true,
+    });
+    modelAuthorityRef.current = { scopeKey, previousAuthority: sessionAuthoritySelection };
+    if (!decision) return;
+    const adopted = decision.adopt;
+    if (adopted) {
+      // 跟随权威：写回运行时最新选择并清除显式标记（跟随结果不再是 pending 意图）。
+      updateComposerDraft((current) => ({
+        ...current,
+        modelSelection: adopted,
+        modelSelectionExplicit: undefined,
+      }));
+    } else if (!decision.pending && stateRef.current.draft.modelSelectionExplicit) {
+      // 草稿已与权威一致：pending 已被 runtime 确认，只清标记不改选择。
+      updateComposerDraft((current) => ({ ...current, modelSelectionExplicit: undefined }));
+    }
+  }, [scopeKey, sessionAuthoritySelection, updateComposerDraft]);
   const captureAcceptedModelSelection = useCallback(
     (selection: ModelSelection, expectedSelection: ModelSelection = selection): (() => void) => {
       const original = stateRef.current.draft.modelSelection;
@@ -264,7 +305,13 @@ export function useDraftConfigControl(params: {
           stateRef.current.draft.modelSelection !== original
         )
           return;
-        updateComposerDraft((current) => ({ ...current, modelSelection: selection }));
+        // ACK 证明该选型已被 runtime 接纳执行：pending 意图随发送消费，显式标记
+        // 一并清除；后续权威同步由 ModelSelected 投影帧收敛（同选型不会再发事件）。
+        updateComposerDraft((current) => ({
+          ...current,
+          modelSelection: selection,
+          modelSelectionExplicit: undefined,
+        }));
       };
     },
     [scopeKey, updateComposerDraft],
