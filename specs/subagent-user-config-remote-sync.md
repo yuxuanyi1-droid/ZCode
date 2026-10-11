@@ -53,6 +53,11 @@ SSH 模式下，桌面端设置页始终读写本机（`useBaseWorkspaceServices
 - 远端 agent 不参与同步链路，只在下一个 session/create 时读取结果。
 - 两个方向都用同一份 `ISubagentSyncService` 接口；「本地/远端」由调用实例所在进程决定，
   与 skill / MCP 同步一致（renderer 拿 base 实例做候选与导出，拿会话实例做状态与导入）。
+- 远端链路（桌面 SSH/WSL/Docker）：renderer 会话服务合并（`remoteWorkspaceSessionServices`）
+  → window host 远端集合把 `subagent-sync` channel **转发**到 `connectionServices`
+  （远端 zcode-server 的 `createLocalServices` 实例）→ 读写远端 HOME。
+  window host 集合若漏注册该转发，renderer 会打回本机磁盘并出现「同步成功但远端不生效」；
+  `legacyRemoteWorkspaceRpcContract` 已把该 channel 纳入连接时校验。
 
 ## 接口
 

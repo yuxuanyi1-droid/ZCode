@@ -26,6 +26,7 @@ import {
   ISkillsService,
   ISkillSyncService,
   IMcpSyncService,
+  ISubagentSyncService,
   IPluginSyncService,
   IPluginsService,
   IPluginManagementService,
@@ -372,6 +373,11 @@ export function createRemoteWorkspaceServiceCollection(params: {
     .register(IPluginManagementService, params.connectionServices.pluginManagementService)
     .register(ICommandsService, params.connectionServices.commandsService)
     .register(ISubagentsService, createSubagentsService({ isDesktopRuntime: true }))
+    // 用户级子智能体配置的远端副本在 SSH/Docker 目标机器上：状态判定与导入必须
+    // 转发到远端 server（storage root 是远端 HOME）。这里若沿用本机实例，
+    // renderer 的 remoteServices.subagentSyncService 会打回本机磁盘，同步结果看起来
+    // 成功但远端 agent 永远读不到。subagentsService 本身保持本机实例：设置页只读本机权威。
+    .register(ISubagentSyncService, params.connectionServices.subagentSyncService)
     .register(IHooksService, params.connectionServices.hooksService)
     .register(IMemoryService, createMemoryService())
     .register(
