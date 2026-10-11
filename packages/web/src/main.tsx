@@ -1305,6 +1305,9 @@ export function createHomeOnlyWebRemoteControlServices(): RootServices {
     subagentsService: createEmptyHomeOnlyService<RootServices["subagentsService"]>({
       list: async () => ({ agents: [], capability: { supported: false } }),
     }),
+    // 子智能体同步只在桌面本机 HOME 与远端 bridge 之间工作，Web 首页 fallback 明确报不可用。
+    subagentSyncService:
+      createUnsupportedHomeOnlyService<RootServices["subagentSyncService"]>("subagentSyncService"),
     commandsService: createEmptyHomeOnlyService<RootServices["commandsService"]>({
       list: async () => ({
         commands: [],
