@@ -31,17 +31,17 @@ function emptyAgentsState(): AgentsStateFile {
   };
 }
 
-/** Host 启动 Agent 前的一次性存储导入：CLI 会独立读同一文件，迁移必须先完成。 */
-export async function migrateSubagentStateStorage(options?: SubagentStorageOptions): Promise<void> {
-  await migrateSubagentStateFile(await resolveSubagentStateFile(options));
-}
-
 export async function readAgentsStateFile(
   options?: SubagentStorageOptions,
 ): Promise<AgentsStateFile> {
-  await migrateSubagentStateFile(await resolveSubagentStateFile(options));
+  return readAgentsStateAtPath(await resolveSubagentStateFile(options));
+}
+
+/** 按绝对路径读取：runtime config 缓存要为多个 workspace 复用同一份解析。 */
+export async function readAgentsStateAtPath(stateFile: string): Promise<AgentsStateFile> {
+  await migrateSubagentStateFile(stateFile);
   try {
-    const raw = await readFile(await resolveSubagentStateFile(options), "utf-8");
+    const raw = await readFile(stateFile, "utf-8");
     const parsed = JSON.parse(raw) as {
       builtInModelSelectionOverrides?: unknown;
       pluginAgentModelSelectionOverrides?: unknown;
@@ -62,8 +62,11 @@ export async function readAgentsStateFile(
           )
         : [],
     };
-  } catch {
-    return emptyAgentsState();
+  } catch (error) {
+    // 文件缺失/损坏沿用既有空覆盖语义；IO 失败不能伪装为空配置并重新启用已禁用 agent。
+    if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === "ENOENT")
+      return emptyAgentsState();
+    throw error;
   }
 }
 
