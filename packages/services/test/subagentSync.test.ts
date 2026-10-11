@@ -225,10 +225,7 @@ test("import writes files and merges state without touching other remote fields"
     assert.deepEqual(remoteState.disabledAgentIds, ["user:user:beta"]);
     assert.deepEqual(remoteState.builtInModelOverrides, { legacy: true });
     assert.equal(await readFile(agentFilePath(remoteHome, "alpha.md"), "utf-8"), ALPHA_MARKDOWN);
-    assert.equal(
-      await readFile(agentFilePath(remoteHome, "beta.md"), "utf-8"),
-      BETA_MARKDOWN,
-    );
+    assert.equal(await readFile(agentFilePath(remoteHome, "beta.md"), "utf-8"), BETA_MARKDOWN);
 
     // 幂等：同内容重复导入不产生写入，状态一致时报 skipped。
     const alphaBefore = await stat(agentFilePath(remoteHome, "alpha.md"));
