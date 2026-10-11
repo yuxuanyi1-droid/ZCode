@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import { test } from "vitest";
 import {
   createFsFaultInjector,
   resetProcessFsFaultInjectorForTests,
@@ -81,7 +81,9 @@ test("local candidates cover built-in overrides and user agents with hashes", as
   const home = await createHome("zcode-subagent-sync-candidates-");
   try {
     await writeAgentMarkdown(home, "alpha.md", ALPHA_MARKDOWN);
-    await writeAgentMarkdown(home, join("nested", "beta.md"), BETA_MARKDOWN);
+    await writeAgentMarkdown(home, "beta.md", BETA_MARKDOWN);
+    // 嵌套目录不在用户级 profile 的发现范围内，候选必须与运行时发现保持一致。
+    await writeAgentMarkdown(home, join("nested", "shadowed.md"), BETA_MARKDOWN);
     await writeStateFile(home, {
       builtInModelSelectionOverrides: { "general-purpose": GENERAL_PURPOSE_SELECTION },
       pluginAgentModelSelectionOverrides: {},
@@ -93,7 +95,7 @@ test("local candidates cover built-in overrides and user agents with hashes", as
 
     assert.deepEqual(
       result.candidates.map((candidate) => candidate.id),
-      ["builtin:general-purpose", "user:alpha.md", "user:nested/beta.md"],
+      ["builtin:general-purpose", "user:alpha.md", "user:beta.md"],
     );
     assert.equal(result.localRoot, join(home, ".zcode"));
 
@@ -111,7 +113,7 @@ test("local candidates cover built-in overrides and user agents with hashes", as
 
     const beta = result.candidates[2]!;
     assert.equal(beta.name, "beta");
-    assert.equal(beta.relativePath, "nested/beta.md");
+    assert.equal(beta.relativePath, "beta.md");
     assert.equal(beta.enabled, false);
     assert.equal(beta.contentHash, sha256(BETA_MARKDOWN));
   } finally {
@@ -169,7 +171,7 @@ test("import writes files and merges state without touching other remote fields"
   const remoteHome = await createHome("zcode-subagent-sync-import-");
   try {
     await writeAgentMarkdown(localHome, "alpha.md", ALPHA_MARKDOWN);
-    await writeAgentMarkdown(localHome, join("nested", "beta.md"), BETA_MARKDOWN);
+    await writeAgentMarkdown(localHome, "beta.md", BETA_MARKDOWN);
     await writeStateFile(localHome, {
       builtInModelSelectionOverrides: { "general-purpose": GENERAL_PURPOSE_SELECTION },
       pluginAgentModelSelectionOverrides: {},
@@ -188,11 +190,11 @@ test("import writes files and merges state without touching other remote fields"
     const local = createSubagentSyncService({ homeDir: localHome });
     const remote = createSubagentSyncService({ homeDir: remoteHome });
     const exported = await local.exportSubagentConfig({
-      ids: ["builtin:general-purpose", "user:alpha.md", "user:nested/beta.md"],
+      ids: ["builtin:general-purpose", "user:alpha.md", "user:beta.md"],
     });
     assert.deepEqual(
       exported.entries.map((entry) => entry.id),
-      ["builtin:general-purpose", "user:alpha.md", "user:nested/beta.md"],
+      ["builtin:general-purpose", "user:alpha.md", "user:beta.md"],
     );
     assert.equal(exported.entries[1]!.content, ALPHA_MARKDOWN);
     assert.equal(exported.entries[2]!.enabled, false);
@@ -203,7 +205,7 @@ test("import writes files and merges state without touching other remote fields"
       [
         ["builtin:general-purpose", "synced"],
         ["user:alpha.md", "synced"],
-        ["user:nested/beta.md", "synced"],
+        ["user:beta.md", "synced"],
       ],
     );
     assert.equal(first.rolledBack, false);
@@ -224,7 +226,7 @@ test("import writes files and merges state without touching other remote fields"
     assert.deepEqual(remoteState.builtInModelOverrides, { legacy: true });
     assert.equal(await readFile(agentFilePath(remoteHome, "alpha.md"), "utf-8"), ALPHA_MARKDOWN);
     assert.equal(
-      await readFile(agentFilePath(remoteHome, join("nested", "beta.md")), "utf-8"),
+      await readFile(agentFilePath(remoteHome, "beta.md"), "utf-8"),
       BETA_MARKDOWN,
     );
 

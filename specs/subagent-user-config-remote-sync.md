@@ -3,7 +3,7 @@
 ## 背景与问题
 
 子智能体的用户级配置（内置 `general-purpose` / `Explore` 的模型覆盖、用户级 agent Markdown、
-启用/停用状态）存在本机 `<storageRoot>/v2/agents-state.json` 与 `<storageRoot>/agents/**.md`。
+启用/停用状态）存在本机 `<storageRoot>/v2/agents-state.json` 与 `<storageRoot>/agents/*.md`。
 SSH 模式下，桌面端设置页始终读写本机（`useBaseWorkspaceServices()`），而执行子任务的 agent
 运行在远端主机、只读远端自己的同一组文件。远端文件缺失时，内置子智能体没有 `modelSelection`，
 按 `resolveSubagentSelection` 回退到父会话模型——表现为「配置了子智能体模型但实际继承主智能体」。
@@ -19,10 +19,12 @@ SSH 模式下，桌面端设置页始终读写本机（`useBaseWorkspaceServices
    由用户勾选要同步的项并确认。不做自动同步、不做连接时后台同步。
 3. **同步范围**（仅用户级，且只在用户勾选后写入）：
    - 内置子智能体模型覆盖（`builtInModelSelectionOverrides` 的 `general-purpose` / `Explore`）；
-   - 用户级 agent Markdown（`agents/**.md`，含子目录）；
+   - 用户级 agent Markdown（`agents/*.md`，只收根目录直接文件——自定义 profile 的发现范围）；
    - 被同步 agent 的启用/停用状态（`disabledAgentIds` 中该 agent 的条目）。
 4. **不做的事**：
    - 不删除远端文件（非破坏性，`skills` / MCP 同步同理）；
+   - 不同步 `agents/` 子目录内的 Markdown：运行时只发现根目录直接文件，同步子目录会产生
+     「已同步但运行时不可见」的文件；
    - 不同步项目级 `.zcode/agents/*.md`（属于仓库内容，远端 agent 直接读远端工作区）；
    - 不同步插件自身与插件 agent Markdown（走 plugin 同步）；插件 agent 的模型覆盖
      在 v1 不进入候选，避免出现「覆盖已同步但插件未装」的假象；
@@ -38,8 +40,8 @@ SSH 模式下，桌面端设置页始终读写本机（`useBaseWorkspaceServices
  [本机 Local Host]                     [远端 Host（SSH 目标）]
  设置页(IBaseWorkspaceServices)
    └ ISubagentSyncService ──候选/导出──┐         ┌──状态判定/导入── ISubagentSyncService
-      读 agents-state.json             │         │   写 agents-state.json + agents/**.md
-      读 agents/**.md                  │         │
+      读 agents-state.json             │         │   写 agents-state.json + agents/*.md
+      读 agents/*.md                  │         │
                                        ▼         ▼
                             同步弹窗（renderer，manual）
                               本地候选 + 本地 hash/选择
@@ -186,14 +188,15 @@ export interface ISubagentSyncService {
 
 ## 验收场景
 
-单测（`packages/services/test/subagentSync.test.ts`，`node:test` + 临时 HOME）：
+单测（`packages/services/test/subagentSync.test.ts`，vitest + 临时 HOME）：
 
-1. 候选扫描：只收 `agents/**.md`，给出 posix 相对路径、hash、名称与启用状态；
+1. 候选扫描：只收 `agents/` 根目录的直接 Markdown（子目录文件即使存在也不进候选，
+   与运行时发现共用同一实现），给出 posix 相对路径、hash、名称与启用状态；
    `agents-state.json` 中的内置覆盖各成一项；未配置覆盖的内置 agent 不出现。
 2. 状态判定：文件不存在 → `missing`；内容相同 → `same`；内容不同 → `different`；
    内置覆盖同值 → `same`，异值 → `different`。
 3. 导出：只导出被选 id，携带 userAgent 的完整内容与 `enabled`。
-4. 导入成功：写入文件（含子目录）、合并内置覆盖、按 `enabled` 增删 `disabledAgentIds`，
+4. 导入成功：写入文件、合并内置覆盖、按 `enabled` 增删 `disabledAgentIds`，
    其它状态字段与远端既有文件保持不变；重复导入同一内容不产生写入（mtime 不变）。
 5. 导入失败回滚：注入一次写失败，断言已写入的文件与状态恢复原样、结果标记 `rolledBack`。
 6. 路径校验：`../x.md`、`/etc/x.md`、`C:\x.md`、空路径全部拒绝。

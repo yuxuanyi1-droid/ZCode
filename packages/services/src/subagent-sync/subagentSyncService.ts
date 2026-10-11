@@ -1,8 +1,8 @@
 /* eslint-disable max-lines -- 同步服务集中维护候选扫描、远端判定、整批导入与回滚，拆分会让一次同步的原子性边界散落多处。 */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, stat } from "node:fs/promises";
-import { dirname, join, posix, relative, sep } from "node:path";
+import { mkdir, readFile, rm } from "node:fs/promises";
+import { dirname, posix, relative, sep } from "node:path";
 import {
   createAgentStateId,
   modelSelectionSchema,
@@ -39,6 +39,7 @@ import {
   resolveZCodeStorageRoot,
   type SubagentStorageOptions,
 } from "../subagents/subagentStorage.js";
+import { collectAgentMarkdownPaths } from "../subagents/subagentsService.js";
 import type { ISubagentSyncService } from "./subagentSync.js";
 
 const subagentSyncLogger = createServiceLogger("subagent-sync");
@@ -46,7 +47,6 @@ const subagentSyncLogger = createServiceLogger("subagent-sync");
 const BUILT_IN_AGENT_NAMES: readonly BuiltInSubagentName[] = ["general-purpose", "Explore"];
 const BUILT_IN_ID_PREFIX = "builtin:";
 const USER_ID_PREFIX = "user:";
-const MARKDOWN_FILE_PATTERN = /\.(md|markdown)$/iu;
 
 export function createSubagentSyncService(options?: SubagentStorageOptions): ISubagentSyncService {
   const storageOptions: SubagentStorageOptions = { homeDir: options?.homeDir };
@@ -319,7 +319,8 @@ async function collectUserAgentCandidates(
 ): Promise<SubagentSyncCandidate[]> {
   const disabledIds = new Set(state.disabledAgentIds);
   const candidates: SubagentSyncCandidate[] = [];
-  for (const filePath of await listMarkdownFiles(userRoot)) {
+  // 候选枚举必须与运行时发现共用同一实现：自定义 profile 只认 agents 根目录的直接文件。
+  for (const filePath of await collectAgentMarkdownPaths(userRoot)) {
     const content = await readFile(filePath, "utf-8");
     const relativePath = toPosixRelativePath(userRoot, filePath);
     const parsed = parseSubagentMarkdown({ content, path: filePath, scope: "user" });
@@ -514,21 +515,4 @@ function hashContent(content: string): string {
 
 function toPosixRelativePath(root: string, filePath: string): string {
   return relative(root, filePath).split(sep).join("/");
-}
-
-async function listMarkdownFiles(root: string): Promise<string[]> {
-  if (!existsSync(root)) return [];
-  if (!(await stat(root)).isDirectory()) return [];
-  const result: string[] = [];
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    const path = join(root, entry.name);
-    if (entry.isDirectory()) {
-      result.push(...(await listMarkdownFiles(path)));
-      continue;
-    }
-    if (entry.isFile() && MARKDOWN_FILE_PATTERN.test(entry.name)) {
-      result.push(path);
-    }
-  }
-  return result.sort((left, right) => left.localeCompare(right));
 }

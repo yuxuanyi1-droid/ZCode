@@ -193,7 +193,11 @@ async function discoverFileAgents(params: {
   return agents;
 }
 
-async function collectAgentMarkdownPaths(rootPath: string, recursive = false): Promise<string[]> {
+/** 自定义 profile 只发现第一层文件；插件传入 recursive 保留原有递归规则。 */
+export async function collectAgentMarkdownPaths(
+  rootPath: string,
+  recursive = false,
+): Promise<string[]> {
   if (!(await exists(rootPath))) {
     return [];
   }
