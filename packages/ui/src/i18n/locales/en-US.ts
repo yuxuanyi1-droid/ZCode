@@ -3860,6 +3860,7 @@ const enUS: Record<string, string> = {
     "Workspace-level creation or editing is unsupported",
   "settings.subagents.searchPlaceholder": "Search subagents...",
   "settings.subagents.empty": "No subagents found",
+  "settings.subagents.remoteContext": "Current remote workspace: {target}",
   "settings.subagents.remoteSync.open": "Sync subagents",
   "settings.subagents.remoteSync.title": "Sync user subagent config to remote target",
   "settings.subagents.remoteSync.warningTitle": "What gets synced and when it applies",

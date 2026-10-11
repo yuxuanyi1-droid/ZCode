@@ -3612,6 +3612,7 @@ const zhCN: Record<string, string> = {
   "settings.subagents.workspaceScopeUnsupported": "暂不支持工作区级创建或编辑",
   "settings.subagents.searchPlaceholder": "搜索子智能体...",
   "settings.subagents.empty": "没有找到子智能体",
+  "settings.subagents.remoteContext": "当前远端工作区：{target}",
   "settings.subagents.remoteSync.open": "同步子智能体",
   "settings.subagents.remoteSync.title": "同步用户级子智能体配置到远端目标",
   "settings.subagents.remoteSync.warningTitle": "同步内容与生效时机",

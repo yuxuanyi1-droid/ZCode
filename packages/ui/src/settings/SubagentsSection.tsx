@@ -2,7 +2,7 @@
 import { useStartPlanRecommendation } from "@/hooks/useStartPlanRecommendation.js";
 import { hasExplicitModelChanged } from "@/lib/startPlanRecommendation.js";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { Bot, Check, Plus, Trash2 } from "lucide-react";
+import { Bot, Check, Plus, Trash2, UploadCloud } from "lucide-react";
 import { completeNewModelSelection } from "@zcode/provider";
 import {
   TID_SUBAGENT_BUILT_IN_MODEL_TRIGGER,
@@ -62,10 +62,11 @@ import { SettingsBreadcrumbReporter } from "@/settings/SettingsHeaderBreadcrumb.
 import { SettingsFormTextarea } from "@/settings/SettingsFormTextarea.js";
 import {
   RemoteSyncDialogs,
-  RemoteSyncDropdownButton,
   shouldShowRemoteSyncActions,
   useRemoteSyncDialogIntent,
 } from "@/settings/RemoteSyncActions.js";
+import { formatRemoteSkillSyncTarget } from "@/settings/RemoteSkillSyncDialog.js";
+import { ControlHintTooltip } from "@/ControlHintTooltip.js";
 import {
   SubagentReasoningField,
   type SubagentReasoningFieldState,
@@ -1316,6 +1317,10 @@ export function SubagentsSection({
       rpcReady: remoteServiceResolution.rpcReady,
       targetKey: connectedRemoteSyncTarget ? (workspacePath ?? "") : "",
     });
+  // 与插件/MCP/技能页同一提示：让用户确认子智能体同步的目标是哪个远端。
+  const remoteSubagentSyncTargetLabel = connectedRemoteSyncTarget
+    ? formatRemoteSkillSyncTarget(connectedRemoteSyncTarget, workspacePath ?? "")
+    : "";
   const modelSelectionRead = useModelSelectionServiceView(localHostServices.modelSelectionService);
   const modelSelectionView =
     modelSelectionRead.state.status === "ready" ? modelSelectionRead.state.view : null;
@@ -1773,31 +1778,45 @@ export function SubagentsSection({
             <span className="text-ui-sm text-foreground-subtle">{filteredAgentCount}</span>
           </div>
         </div>
-        <div className="flex w-full min-w-0 items-center justify-end gap-2 sm:ml-auto sm:w-auto">
-          {connectedRemoteSyncTarget ? (
-            <span className="contents" data-testid={TID_SUBAGENT_REMOTE_SYNC_ENTRY}>
-              <RemoteSyncDropdownButton
-                canSyncSkills={false}
-                canSyncMcp={false}
-                canSyncSubagents
-                onOpenSkillSync={() => {}}
-                onOpenMcpSync={() => {}}
-                onOpenSubagentSync={() => setRemoteSubagentSyncOpen(true)}
-              />
-            </span>
-          ) : null}
-          <SettingsSearchInput
-            containerClassName="w-full sm:w-64"
-            clearLabel={intl.formatMessage({ id: "settings.search.clear" })}
-            value={query}
-            onClear={() => setQuery("")}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={intl.formatMessage({
-              id: "settings.subagents.searchPlaceholder",
-            })}
-          />
-        </div>
+        <SettingsSearchInput
+          containerClassName="w-full sm:ml-auto sm:w-64"
+          clearLabel={intl.formatMessage({ id: "settings.search.clear" })}
+          value={query}
+          onClear={() => setQuery("")}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={intl.formatMessage({
+            id: "settings.subagents.searchPlaceholder",
+          })}
+        />
       </div>
+
+      {connectedRemoteSyncTarget ? (
+        <div className="flex justify-end">
+          <ControlHintTooltip
+            title={intl.formatMessage({ id: "settings.subagents.remoteSync.open" })}
+          >
+            <Button
+              type="button"
+              variant="outline"
+              size="icon-lg"
+              aria-label={intl.formatMessage({ id: "settings.subagents.remoteSync.open" })}
+              data-testid={TID_SUBAGENT_REMOTE_SYNC_ENTRY}
+              onClick={() => setRemoteSubagentSyncOpen(true)}
+            >
+              <UploadCloud className="size-3.5" aria-hidden="true" />
+            </Button>
+          </ControlHintTooltip>
+        </div>
+      ) : null}
+
+      {connectedRemoteSyncTarget ? (
+        <div className="rounded-lg border border-border bg-card px-3 py-2 text-ui-base text-foreground-subtle">
+          {intl.formatMessage(
+            { id: "settings.subagents.remoteContext" },
+            { target: remoteSubagentSyncTargetLabel },
+          )}
+        </div>
+      ) : null}
 
       {error ? (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-ui-base text-destructive">
