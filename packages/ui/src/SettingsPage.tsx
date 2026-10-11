@@ -1895,6 +1895,8 @@ export function SettingsPage({
                             onManageModels={handleOpenModelProviderSettings}
                             workspacePath={activeWorkspacePath}
                             workspaceIdentity={activeWorkspaceIdentity}
+                            remoteSessionId={activeWorkspaceTab?.remoteSessionId}
+                            remoteTarget={activeWorkspaceTab?.remoteTarget}
                           />
                         ) : activeSection === "automations" ? (
                           <AutomationsSection

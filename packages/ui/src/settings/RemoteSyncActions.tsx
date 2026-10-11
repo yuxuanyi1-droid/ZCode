@@ -5,6 +5,7 @@ import type {
   IMcpSyncService,
   IPluginSyncService,
   ISkillSyncService,
+  ISubagentSyncService,
   IZCodeAgentService,
 } from "@zcode/services";
 import { Button } from "@/components/ui/button.js";
@@ -18,6 +19,7 @@ import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { RemoteMcpSyncDialog } from "@/settings/RemoteMcpSyncDialog.js";
 import { RemotePluginSyncDialog } from "@/settings/RemotePluginSyncDialog.js";
 import { RemoteSkillSyncDialog } from "@/settings/RemoteSkillSyncDialog.js";
+import { RemoteSubagentSyncDialog } from "@/settings/RemoteSubagentSyncDialog.js";
 
 type RemoteSyncClientMode = "desktop-continuous" | "web-remote-replayable";
 const REMOTE_SYNC_PREFLIGHT_TIMEOUT_MS = 15_000;
@@ -115,18 +117,22 @@ export function RemoteSyncMenuItems({
   canSyncSkills,
   canSyncMcp,
   canSyncPlugins = false,
+  canSyncSubagents = false,
   onOpenSkillSync,
   onOpenMcpSync,
   onOpenPluginSync,
+  onOpenSubagentSync,
   stopMouseDownPropagation = false,
   mcpDisabled = false,
 }: {
   canSyncSkills: boolean;
   canSyncMcp: boolean;
   canSyncPlugins?: boolean;
+  canSyncSubagents?: boolean;
   onOpenSkillSync: () => void;
   onOpenMcpSync: () => void;
   onOpenPluginSync?: () => void;
+  onOpenSubagentSync?: () => void;
   stopMouseDownPropagation?: boolean;
   mcpDisabled?: boolean;
 }) {
@@ -161,6 +167,12 @@ export function RemoteSyncMenuItems({
           {intl.formatMessage({ id: "settings.plugins.remoteSync.open" })}
         </DropdownMenuItem>
       ) : null}
+      {canSyncSubagents ? (
+        <DropdownMenuItem onMouseDown={handleMouseDown} onSelect={onOpenSubagentSync}>
+          <UploadCloud className="size-3.5" />
+          {intl.formatMessage({ id: "settings.subagents.remoteSync.open" })}
+        </DropdownMenuItem>
+      ) : null}
     </>
   );
 }
@@ -169,22 +181,26 @@ export function RemoteSyncDropdownButton({
   canSyncSkills,
   canSyncMcp,
   canSyncPlugins = false,
+  canSyncSubagents = false,
   mcpDisabled = false,
   onOpenSkillSync,
   onOpenMcpSync,
   onOpenPluginSync,
+  onOpenSubagentSync,
 }: {
   canSyncSkills: boolean;
   canSyncMcp: boolean;
   canSyncPlugins?: boolean;
+  canSyncSubagents?: boolean;
   mcpDisabled?: boolean;
   onOpenSkillSync: () => void;
   onOpenMcpSync: () => void;
   onOpenPluginSync?: () => void;
+  onOpenSubagentSync?: () => void;
 }) {
   const { intl } = useZCodeIntl();
 
-  if (!canSyncSkills && !canSyncMcp && !canSyncPlugins) {
+  if (!canSyncSkills && !canSyncMcp && !canSyncPlugins && !canSyncSubagents) {
     return null;
   }
 
@@ -202,10 +218,12 @@ export function RemoteSyncDropdownButton({
           canSyncSkills={canSyncSkills}
           canSyncMcp={canSyncMcp}
           canSyncPlugins={canSyncPlugins}
+          canSyncSubagents={canSyncSubagents}
           mcpDisabled={mcpDisabled}
           onOpenSkillSync={onOpenSkillSync}
           onOpenMcpSync={onOpenMcpSync}
           onOpenPluginSync={onOpenPluginSync}
+          onOpenSubagentSync={onOpenSubagentSync}
         />
       </DropdownMenuContent>
     </DropdownMenu>
@@ -216,58 +234,72 @@ export function RemoteSyncDialogs({
   canSyncSkills,
   canSyncMcp,
   canSyncPlugins = false,
+  canSyncSubagents = false,
   skillOpen,
   mcpOpen,
   pluginOpen = false,
+  subagentOpen = false,
   onSkillOpenChange,
   onMcpOpenChange,
   onPluginOpenChange,
+  onSubagentOpenChange,
   localSkillSyncService,
   remoteSkillSyncService,
   localMcpSyncService,
   remoteMcpSyncService,
   localPluginSyncService,
   remotePluginSyncService,
+  localSubagentSyncService,
+  remoteSubagentSyncService,
   localZCodeAgentService,
   remoteZCodeAgentService,
   remoteTarget,
   skillWorkspacePath,
   mcpWorkspacePath,
   pluginWorkspacePath,
+  subagentWorkspacePath,
   pluginLocalWorkspacePath,
   mcpLocalWorkspacePath,
   workspaceIdentity,
   onSkillsSynced,
   onMcpSynced,
   onPluginsSynced,
+  onSubagentsSynced,
 }: {
   canSyncSkills: boolean;
   canSyncMcp: boolean;
   canSyncPlugins?: boolean;
+  canSyncSubagents?: boolean;
   skillOpen: boolean;
   mcpOpen: boolean;
   pluginOpen?: boolean;
+  subagentOpen?: boolean;
   onSkillOpenChange: (open: boolean) => void;
   onMcpOpenChange: (open: boolean) => void;
   onPluginOpenChange?: (open: boolean) => void;
+  onSubagentOpenChange?: (open: boolean) => void;
   localSkillSyncService?: ISkillSyncService | null;
   remoteSkillSyncService?: ISkillSyncService | null;
   localMcpSyncService?: IMcpSyncService | null;
   remoteMcpSyncService?: IMcpSyncService | null;
   localPluginSyncService?: IPluginSyncService | null;
   remotePluginSyncService?: IPluginSyncService | null;
+  localSubagentSyncService?: ISubagentSyncService | null;
+  remoteSubagentSyncService?: ISubagentSyncService | null;
   localZCodeAgentService?: IZCodeAgentService | null;
   remoteZCodeAgentService?: IZCodeAgentService | null;
   remoteTarget?: RemoteTarget | null;
   skillWorkspacePath: string;
   mcpWorkspacePath: string;
   pluginWorkspacePath?: string;
+  subagentWorkspacePath?: string;
   pluginLocalWorkspacePath?: string;
   mcpLocalWorkspacePath?: string;
   workspaceIdentity?: string;
   onSkillsSynced: () => Promise<void> | void;
   onMcpSynced: () => Promise<void> | void;
   onPluginsSynced?: () => Promise<void> | void;
+  onSubagentsSynced?: () => Promise<void> | void;
 }) {
   const skillDialogProps =
     canSyncSkills && skillOpen && remoteTarget && localSkillSyncService && remoteSkillSyncService
@@ -294,6 +326,18 @@ export function RemoteSyncDialogs({
       ? {
           localPluginSyncService,
           remotePluginSyncService,
+          remoteTarget,
+        }
+      : null;
+  const subagentDialogProps =
+    canSyncSubagents &&
+    subagentOpen &&
+    remoteTarget &&
+    localSubagentSyncService &&
+    remoteSubagentSyncService
+      ? {
+          localSubagentSyncService,
+          remoteSubagentSyncService,
           remoteTarget,
         }
       : null;
@@ -337,6 +381,17 @@ export function RemoteSyncDialogs({
           workspacePath={pluginWorkspacePath ?? mcpWorkspacePath}
           workspaceIdentity={workspaceIdentity}
           onSynced={onPluginsSynced ?? (() => {})}
+        />
+      ) : null}
+      {subagentDialogProps ? (
+        <RemoteSubagentSyncDialog
+          open={subagentOpen}
+          onOpenChange={onSubagentOpenChange ?? (() => {})}
+          localSubagentSyncService={subagentDialogProps.localSubagentSyncService}
+          remoteSubagentSyncService={subagentDialogProps.remoteSubagentSyncService}
+          remoteTarget={subagentDialogProps.remoteTarget}
+          workspacePath={subagentWorkspacePath ?? mcpWorkspacePath}
+          onSynced={onSubagentsSynced ?? (() => {})}
         />
       ) : null}
     </>

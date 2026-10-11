@@ -417,6 +417,10 @@ export const TID_MCP_OPEN_AUTHORIZATION_BUTTON = "mcp-open-authorization-button"
 export const TID_SUBAGENT_ROW = "subagent-row";
 /** 内置子智能体模型选择控件（动态后缀为子智能体名称） */
 export const TID_SUBAGENT_BUILT_IN_MODEL_TRIGGER = "subagent-built-in-model-trigger";
+/** 子智能体设置页的远端同步入口 */
+export const TID_SUBAGENT_REMOTE_SYNC_ENTRY = "subagent-remote-sync-entry";
+/** 远端子智能体同步弹窗的同步按钮 */
+export const TID_SUBAGENT_REMOTE_SYNC_START = "subagent-remote-sync-start";
 /** 设置页使用统计顶层 tab（动态后缀为 usage tab id） */
 export const TID_SETTINGS_USAGE_TAB = "settings-usage-tab";
 /** 侧边栏头像菜单剩余额度子菜单入口 */

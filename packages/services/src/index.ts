@@ -276,6 +276,7 @@ export { IPluginManagementService } from "./plugins/pluginManagement.js";
 
 // Subagents service — ISubagentsService is both a type (interface) and value (descriptor)
 export { ISubagentsService } from "./subagents/subagents.js";
+export { ISubagentSyncService } from "./subagent-sync/subagentSync.js";
 
 // Commands service — ICommandsService is both a type (interface) and value (descriptor)
 export { ICommandsService } from "./commands/commands.js";

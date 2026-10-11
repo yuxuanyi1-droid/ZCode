@@ -27,6 +27,7 @@ import type { ISkillsService } from "./skills/skills.js";
 import type { ISkillSyncService } from "./skill-sync/skillSync.js";
 import type { IMcpSyncService } from "./mcp-sync/mcpSync.js";
 import type { IPluginSyncService } from "./plugin-sync/pluginSync.js";
+import type { ISubagentSyncService } from "./subagent-sync/subagentSync.js";
 import type { IPluginsService } from "./plugins/plugins.js";
 import type { IPluginManagementService } from "./plugins/pluginManagement.js";
 import type { ISubagentsService } from "./subagents/subagents.js";
@@ -82,6 +83,8 @@ export interface IServiceAccessor {
   /** 设置页插件管理（UI 不再直触 zcodeAgentService 的 plugins/* 面） */
   readonly pluginManagementService: IPluginManagementService;
   readonly subagentsService: ISubagentsService;
+  /** 用户级子智能体配置的远端同步（本机实例读源，远端实例写副本） */
+  readonly subagentSyncService: ISubagentSyncService;
   readonly commandsService: ICommandsService;
   readonly hooksService: IHooksService;
   readonly memoryService: IMemoryService;

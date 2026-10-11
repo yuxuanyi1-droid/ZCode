@@ -48,5 +48,8 @@ export function buildRemoteWorkspaceSessionServices(
     // 无法读取远端待审 Hook。
     // hooks 读写（loadHooks/saveHooks）与 grantWorkspaceHookTrust 授权都必须打到远端 host。
     hooksService: remoteServices.hooksService,
+    // 用户级子智能体配置的远端副本位于 SSH 主机：状态判定与导入必须打到远端 host，
+    // 否则会用远端路径读本机文件、把同步结果显示成成功但远端配置没变。
+    subagentSyncService: remoteServices.subagentSyncService,
   };
 }

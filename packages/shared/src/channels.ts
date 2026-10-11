@@ -125,6 +125,8 @@ export const ServiceChannels = {
   McpSync: "mcp-sync",
   /** SSH 远程 plugin 同步服务 */
   PluginSync: "plugin-sync",
+  /** SSH 远程用户级子智能体配置同步服务 */
+  SubagentSync: "subagent-sync",
   /** 插件管理服务 */
   Plugins: "plugins",
   /** 设置页插件管理服务（UI 平台能力面收敛，不再直触 zcodeAgentService） */

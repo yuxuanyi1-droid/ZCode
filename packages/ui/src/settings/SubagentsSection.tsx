@@ -6,6 +6,7 @@ import { Bot, Check, Plus, Trash2 } from "lucide-react";
 import { completeNewModelSelection } from "@zcode/provider";
 import {
   TID_SUBAGENT_BUILT_IN_MODEL_TRIGGER,
+  TID_SUBAGENT_REMOTE_SYNC_ENTRY,
   TID_SUBAGENT_ROW,
   ZCODE_AGENT_PROVIDER,
   testId,
@@ -15,6 +16,7 @@ import {
   type AgentSummary,
   type BuiltInSubagentName,
   type ModelSelection,
+  type RemoteTarget,
   type SubAgentConfig,
 } from "@zcode/shared";
 import type { ModelSelectionView } from "@zcode/services";
@@ -41,7 +43,10 @@ import { logger } from "@/logger.js";
 import { settingsResourceRowInteraction } from "@/settings/settingsResourceRowInteraction.js";
 import { useConfirmDialog } from "@/hooks/useConfirmDialog.js";
 import { useModelSelectionServiceView } from "@/hooks/useModelSelectionView.js";
-import { useBaseWorkspaceServices } from "@/hooks/useWorkspaceServices.js";
+import {
+  useBaseWorkspaceServices,
+  useWorkspaceServicesResolution,
+} from "@/hooks/useWorkspaceServices.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import {
   buildRegistryModelSelectGroups,
@@ -55,6 +60,12 @@ import { SettingsResourceGroupHeader } from "@/settings/SettingsResourceGroupHea
 import { SettingsResourceHeaderActions } from "@/settings/SettingsResourceHeaderActions.js";
 import { SettingsBreadcrumbReporter } from "@/settings/SettingsHeaderBreadcrumb.js";
 import { SettingsFormTextarea } from "@/settings/SettingsFormTextarea.js";
+import {
+  RemoteSyncDialogs,
+  RemoteSyncDropdownButton,
+  shouldShowRemoteSyncActions,
+  useRemoteSyncDialogIntent,
+} from "@/settings/RemoteSyncActions.js";
 import {
   SubagentReasoningField,
   type SubagentReasoningFieldState,
@@ -127,6 +138,9 @@ interface SubagentsSectionProps {
   onManageModels?: () => void;
   workspacePath?: string | null;
   workspaceIdentity?: string;
+  /** 激活远端工作区的连接信息；用户级子智能体配置的手动同步目标由它决定。 */
+  remoteSessionId?: string | null;
+  remoteTarget?: RemoteTarget | null;
 }
 
 function isEditableUserAgent(agent: AgentSummary): boolean {
@@ -1263,13 +1277,45 @@ function SubagentForm({
   );
 }
 
-export function SubagentsSection({ onManageModels }: SubagentsSectionProps) {
+export function SubagentsSection({
+  onManageModels,
+  remoteSessionId,
+  remoteTarget,
+  workspacePath,
+  workspaceIdentity,
+}: SubagentsSectionProps) {
   const { intl, locale } = useZCodeIntl();
   const confirmDialog = useConfirmDialog();
   const plugins = usePluginManagementStore((state) => state.plugins);
   const availablePlugins = usePluginManagementStore((state) => state.availablePlugins);
   const initializePlugins = usePluginManagementStore((state) => state.initialize);
   const localHostServices = useBaseWorkspaceServices();
+  // 本机用户级配置是权威，因此列表继续读本机；同步是一个独立动作，
+  // 只有激活 workspace 是远端目标时才显示入口，远端副本的读写走该目标的 host。
+  const remoteServiceResolution = useWorkspaceServicesResolution(
+    workspacePath,
+    remoteSessionId,
+    workspaceIdentity,
+    remoteTarget,
+  );
+  const connectedRemoteSyncTarget =
+    // 与设置页其它远端同步入口同一判据：只有目标 host 的 RPC 就绪后才允许发起同步，
+    // 否则弹窗会在断连代理上拿到不可恢复的错误。
+    remoteServiceResolution.rpcReady &&
+    shouldShowRemoteSyncActions({
+      remoteSessionId,
+      remoteTarget,
+      clientMode: "desktop-continuous" as const,
+      hasLocalSourceService: Boolean(localHostServices.subagentSyncService),
+    }) &&
+    workspacePath
+      ? remoteTarget
+      : null;
+  const { open: remoteSubagentSyncOpen, setOpen: setRemoteSubagentSyncOpen } =
+    useRemoteSyncDialogIntent({
+      rpcReady: remoteServiceResolution.rpcReady,
+      targetKey: connectedRemoteSyncTarget ? (workspacePath ?? "") : "",
+    });
   const modelSelectionRead = useModelSelectionServiceView(localHostServices.modelSelectionService);
   const modelSelectionView =
     modelSelectionRead.state.status === "ready" ? modelSelectionRead.state.view : null;
@@ -1727,16 +1773,30 @@ export function SubagentsSection({ onManageModels }: SubagentsSectionProps) {
             <span className="text-ui-sm text-foreground-subtle">{filteredAgentCount}</span>
           </div>
         </div>
-        <SettingsSearchInput
-          containerClassName="w-full sm:ml-auto sm:w-64"
-          clearLabel={intl.formatMessage({ id: "settings.search.clear" })}
-          value={query}
-          onClear={() => setQuery("")}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder={intl.formatMessage({
-            id: "settings.subagents.searchPlaceholder",
-          })}
-        />
+        <div className="flex w-full min-w-0 items-center justify-end gap-2 sm:ml-auto sm:w-auto">
+          {connectedRemoteSyncTarget ? (
+            <span className="contents" data-testid={TID_SUBAGENT_REMOTE_SYNC_ENTRY}>
+              <RemoteSyncDropdownButton
+                canSyncSkills={false}
+                canSyncMcp={false}
+                canSyncSubagents
+                onOpenSkillSync={() => {}}
+                onOpenMcpSync={() => {}}
+                onOpenSubagentSync={() => setRemoteSubagentSyncOpen(true)}
+              />
+            </span>
+          ) : null}
+          <SettingsSearchInput
+            containerClassName="w-full sm:w-64"
+            clearLabel={intl.formatMessage({ id: "settings.search.clear" })}
+            value={query}
+            onClear={() => setQuery("")}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={intl.formatMessage({
+              id: "settings.subagents.searchPlaceholder",
+            })}
+          />
+        </div>
       </div>
 
       {error ? (
@@ -1836,6 +1896,30 @@ export function SubagentsSection({ onManageModels }: SubagentsSectionProps) {
           ) : null}
         </div>
       )}
+
+      <RemoteSyncDialogs
+        canSyncSkills={false}
+        canSyncMcp={false}
+        canSyncSubagents={Boolean(connectedRemoteSyncTarget)}
+        skillOpen={false}
+        mcpOpen={false}
+        subagentOpen={remoteSubagentSyncOpen}
+        onSkillOpenChange={() => {}}
+        onMcpOpenChange={() => {}}
+        onSubagentOpenChange={setRemoteSubagentSyncOpen}
+        localSubagentSyncService={localHostServices.subagentSyncService}
+        remoteSubagentSyncService={remoteServiceResolution.services.subagentSyncService}
+        remoteTarget={connectedRemoteSyncTarget}
+        skillWorkspacePath=""
+        mcpWorkspacePath=""
+        subagentWorkspacePath={workspacePath ?? ""}
+        onSkillsSynced={() => {}}
+        onMcpSynced={() => {}}
+        onSubagentsSynced={async () => {
+          // 本机列表不因同步变化，但重读一次可确认权威来源未被远端写入影响。
+          await Promise.all([refresh(), refreshMentionStore()]);
+        }}
+      />
     </div>
   );
 }
