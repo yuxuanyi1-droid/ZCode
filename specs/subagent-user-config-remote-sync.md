@@ -176,6 +176,8 @@ export interface ISubagentSyncService {
 
 - 入口显示条件：目标 host 的 RPC 就绪、目标为 ssh / wsl、`desktop-continuous`、
   且本机存在同步服务；`web-remote-replayable` 不显示（与 skills / MCP / plugin 同步一致）。
+- 入口位置与 skills / MCP / plugin 同步对齐，共三处：侧边栏 workspace 「...」菜单、
+  SSH/WSL 连接成功后的目录选择页「同步」下拉、设置 → 子智能体页头。
 - 结果页提示「对远端新会话生效」；导入失败并回滚时提示未落任何部分配置。
 - 同步成功后刷新设置页列表与 `@` 提及列表（本机列表仍为权威，仅远端副本被更新）。
 - 远端 host 必须运行注册了 `subagent-sync` channel 的版本；旧版远端会在状态判定阶段

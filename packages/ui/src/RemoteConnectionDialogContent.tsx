@@ -14,6 +14,7 @@ import type {
   IPluginSyncService,
   IServiceAccessor,
   ISkillSyncService,
+  ISubagentSyncService,
   IZCodeAgentService,
 } from "@zcode/services";
 import {
@@ -327,6 +328,8 @@ export function RemoteConnectionDirectoryStep({
   remoteMcpSyncService,
   localPluginSyncService,
   remotePluginSyncService,
+  localSubagentSyncService,
+  remoteSubagentSyncService,
   localZCodeAgentService,
   remoteZCodeAgentService,
   localWorkspacePath,
@@ -346,6 +349,8 @@ export function RemoteConnectionDirectoryStep({
   remoteMcpSyncService?: IMcpSyncService | null;
   localPluginSyncService?: IPluginSyncService;
   remotePluginSyncService?: IPluginSyncService | null;
+  localSubagentSyncService?: ISubagentSyncService;
+  remoteSubagentSyncService?: ISubagentSyncService | null;
   localZCodeAgentService?: IZCodeAgentService;
   remoteZCodeAgentService?: IZCodeAgentService | null;
   localWorkspacePath?: string;
@@ -362,6 +367,7 @@ export function RemoteConnectionDirectoryStep({
   const [remoteSkillSyncOpen, setRemoteSkillSyncOpen] = useState(false);
   const [remoteMcpSyncOpen, setRemoteMcpSyncOpen] = useState(false);
   const [remotePluginSyncOpen, setRemotePluginSyncOpen] = useState(false);
+  const [remoteSubagentSyncOpen, setRemoteSubagentSyncOpen] = useState(false);
   const canShowRemoteSyncActions = shouldShowRemoteSyncActions({
     remoteSessionId: remoteTarget ? "directory-step" : null,
     remoteTarget,
@@ -378,6 +384,9 @@ export function RemoteConnectionDirectoryStep({
   );
   const canSyncRemotePlugins = Boolean(
     canShowRemoteSyncActions && localPluginSyncService && remotePluginSyncService,
+  );
+  const canSyncRemoteSubagents = Boolean(
+    canShowRemoteSyncActions && localSubagentSyncService && remoteSubagentSyncService,
   );
 
   if (!services) {
@@ -411,10 +420,12 @@ export function RemoteConnectionDirectoryStep({
             canSyncSkills={canSyncRemoteSkills}
             canSyncMcp={canSyncRemoteMcp}
             canSyncPlugins={canSyncRemotePlugins}
+            canSyncSubagents={canSyncRemoteSubagents}
             mcpDisabled={!selectedPath.trim()}
             onOpenSkillSync={() => setRemoteSkillSyncOpen(true)}
             onOpenMcpSync={() => setRemoteMcpSyncOpen(true)}
             onOpenPluginSync={() => setRemotePluginSyncOpen(true)}
+            onOpenSubagentSync={() => setRemoteSubagentSyncOpen(true)}
           />
         </div>
         {/* 该容器之前不是 flex，导致子级 DirectoryBrowser 的 flex-1 无法拿到有效高度，
@@ -466,24 +477,30 @@ export function RemoteConnectionDirectoryStep({
         canSyncSkills={canSyncRemoteSkills}
         canSyncMcp={canSyncRemoteMcp}
         canSyncPlugins={canSyncRemotePlugins}
+        canSyncSubagents={canSyncRemoteSubagents}
         skillOpen={remoteSkillSyncOpen}
         mcpOpen={remoteMcpSyncOpen}
         pluginOpen={remotePluginSyncOpen}
+        subagentOpen={remoteSubagentSyncOpen}
         onSkillOpenChange={setRemoteSkillSyncOpen}
         onMcpOpenChange={setRemoteMcpSyncOpen}
         onPluginOpenChange={setRemotePluginSyncOpen}
+        onSubagentOpenChange={setRemoteSubagentSyncOpen}
         localSkillSyncService={localSkillSyncService}
         remoteSkillSyncService={remoteSkillSyncService}
         localMcpSyncService={localMcpSyncService}
         remoteMcpSyncService={remoteMcpSyncService}
         localPluginSyncService={localPluginSyncService}
         remotePluginSyncService={remotePluginSyncService}
+        localSubagentSyncService={localSubagentSyncService}
+        remoteSubagentSyncService={remoteSubagentSyncService}
         localZCodeAgentService={localZCodeAgentService}
         remoteZCodeAgentService={remoteZCodeAgentService}
         remoteTarget={remoteTarget}
         skillWorkspacePath=""
         mcpWorkspacePath={selectedPath.trim()}
         pluginWorkspacePath={selectedPath.trim()}
+        subagentWorkspacePath={selectedPath.trim()}
         pluginLocalWorkspacePath={localWorkspacePath}
         mcpLocalWorkspacePath={localWorkspacePath}
         onSkillsSynced={async () => {
@@ -495,6 +512,7 @@ export function RemoteConnectionDirectoryStep({
         onPluginsSynced={async () => {
           await onPluginsSynced?.();
         }}
+        onSubagentsSynced={async () => undefined}
       />
     </div>
   );

@@ -259,6 +259,7 @@ export const WorkspaceSidebarItem = memo(function WorkspaceSidebarItem({
   const [remoteSkillSyncOpen, setRemoteSkillSyncOpen] = useState(false);
   const [remoteMcpSyncOpen, setRemoteMcpSyncOpen] = useState(false);
   const [remotePluginSyncOpen, setRemotePluginSyncOpen] = useState(false);
+  const [remoteSubagentSyncOpen, setRemoteSubagentSyncOpen] = useState(false);
   const [workspaceRowHovered, setWorkspaceRowHovered] = useState(false);
   const [workspaceRowFocusWithin, setWorkspaceRowFocusWithin] = useState(false);
   const [workspaceActionMenuOpen, setWorkspaceActionMenuOpen] = useState(false);
@@ -925,10 +926,12 @@ export const WorkspaceSidebarItem = memo(function WorkspaceSidebarItem({
                             canSyncSkills={showRemoteSkillSyncAction}
                             canSyncMcp={showRemoteSkillSyncAction}
                             canSyncPlugins={showRemoteSkillSyncAction}
+                            canSyncSubagents={showRemoteSkillSyncAction}
                             stopMouseDownPropagation
                             onOpenSkillSync={() => setRemoteSkillSyncOpen(true)}
                             onOpenMcpSync={() => setRemoteMcpSyncOpen(true)}
                             onOpenPluginSync={() => setRemotePluginSyncOpen(true)}
+                            onOpenSubagentSync={() => setRemoteSubagentSyncOpen(true)}
                           />
                           <DropdownMenuItem
                             data-testid={testId(TID_WORKSPACE_CLOSE, tab.workspacePath)}
@@ -1140,24 +1143,30 @@ export const WorkspaceSidebarItem = memo(function WorkspaceSidebarItem({
         canSyncSkills={showRemoteSkillSyncAction}
         canSyncMcp={showRemoteSkillSyncAction}
         canSyncPlugins={showRemoteSkillSyncAction}
+        canSyncSubagents={showRemoteSkillSyncAction}
         skillOpen={remoteSkillSyncOpen}
         mcpOpen={remoteMcpSyncOpen}
         pluginOpen={remotePluginSyncOpen}
+        subagentOpen={remoteSubagentSyncOpen}
         onSkillOpenChange={setRemoteSkillSyncOpen}
         onMcpOpenChange={setRemoteMcpSyncOpen}
         onPluginOpenChange={setRemotePluginSyncOpen}
+        onSubagentOpenChange={setRemoteSubagentSyncOpen}
         localSkillSyncService={baseServices.skillSyncService}
         remoteSkillSyncService={services.skillSyncService}
         localMcpSyncService={baseServices.mcpSyncService}
         remoteMcpSyncService={services.mcpSyncService}
         localPluginSyncService={baseServices.pluginSyncService}
         remotePluginSyncService={services.pluginSyncService}
+        localSubagentSyncService={baseServices.subagentSyncService}
+        remoteSubagentSyncService={services.subagentSyncService}
         localZCodeAgentService={baseServices.zcodeAgentService}
         remoteZCodeAgentService={services.zcodeAgentService}
         remoteTarget={tab.remoteTarget}
         skillWorkspacePath={tab.workspacePath}
         mcpWorkspacePath={tab.workspacePath}
         pluginWorkspacePath={tab.workspacePath}
+        subagentWorkspacePath={tab.workspacePath}
         pluginLocalWorkspacePath={tab.localWorkspacePath}
         mcpLocalWorkspacePath={tab.localWorkspacePath}
         workspaceIdentity={tab.workspaceIdentity}
@@ -1195,6 +1204,9 @@ export const WorkspaceSidebarItem = memo(function WorkspaceSidebarItem({
             zcodeSessionService: services.zcodeSessionService,
           });
         }}
+        // 用户级子智能体配置只影响远端新会话的 runtime profile；
+        // 本机列表与 @ 面板读取本机权威，远端副本更新后无需刷新本地 store。
+        onSubagentsSynced={async () => undefined}
       />
     </li>
   );
