@@ -5,6 +5,9 @@ const REQUIRED_SERVER_BUNDLE_MARKERS = [
   "skill-sync",
   "mcp-sync",
   "plugin-sync",
+  // 用户级子智能体配置同步：远端 zcode-server 必须已注册 subagent-sync channel，
+  // 否则设置页同步弹窗会在状态判定阶段收到 Unknown channel。
+  "subagent-sync",
   "__zcode_rpc_nested_uint8array_v1",
   "exportMarketplaceSourceArchive",
   "importMarketplaceSourceArchive",
