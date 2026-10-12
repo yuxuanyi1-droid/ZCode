@@ -20,18 +20,24 @@ import type {
   SettingsSyncSourceScope,
   SettingsSyncSourceRootSummary,
   SettingsSyncTaskImportResult,
+  SettingsSyncUserAgentsFileWriteResult,
 } from "@zcode/shared";
+import { SETTINGS_SYNC_USER_AGENTS_FILE_MAX_BYTES } from "@zcode/shared";
 import {
   copyFile,
+  chmod,
   cp,
   link,
   lstat,
   mkdir,
   readFile,
   readdir,
+  rename,
+  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -43,6 +49,9 @@ import { walkSkillMarkdownPaths } from "../skills/skillDiscoveryWalk.js";
 import type { ISettingsSyncService } from "./settingsSync.js";
 
 const log = createServiceLogger("settings-sync");
+
+/** 用户级 `~/.zcode/AGENTS.md` 的落盘模式：与凭据/配置文件同口径（14 §4.5）。 */
+const USER_AGENTS_FILE_MODE = 0o600;
 
 interface SettingsSyncServiceDependencies {
   settingService: ISettingService;
@@ -2257,6 +2266,46 @@ async function copyClaudeAgentsFileToZcodeAgentsFile(params: {
   };
 }
 
+/**
+ * 用户级 `~/.zcode/AGENTS.md` 整文件覆盖写（14 §4.5）。
+ *
+ * 原子写：临时文件与目标同目录（跨卷 rename 会失败）+ rename 替换；权限 0600 在 rename
+ * **之前**显式落定，避免"先写后 chmod"的可见窗口，也不依赖进程 umask（与 mcp-sync/plugin-sync
+ * 的凭据/配置文件同款理由：`~/.zcode/cli/config.json` 是 0600）。父目录不存在时自动创建。
+ *
+ * 超限拒绝（fail-closed，不截断）；错误只带字节数，正文不进日志（14 §5）。
+ */
+async function writeUserZcodeAgentsFile(
+  content: string,
+): Promise<SettingsSyncUserAgentsFileWriteResult> {
+  const bytes = Buffer.byteLength(content, "utf8");
+  if (bytes > SETTINGS_SYNC_USER_AGENTS_FILE_MAX_BYTES) {
+    throw new Error(
+      `user AGENTS.md content exceeds ${SETTINGS_SYNC_USER_AGENTS_FILE_MAX_BYTES} bytes: ${bytes}`,
+    );
+  }
+  const targetPath = getUserZcodeAgentsFilePath();
+  const targetDirectory = dirname(targetPath);
+  await mkdir(targetDirectory, { recursive: true });
+  const tempPath = join(
+    targetDirectory,
+    `${basename(targetPath)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  try {
+    await writeFile(tempPath, content, { encoding: "utf8", mode: USER_AGENTS_FILE_MODE });
+    await chmod(tempPath, USER_AGENTS_FILE_MODE);
+    await rename(tempPath, targetPath);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+  return {
+    path: targetPath,
+    bytes,
+    sha256: createHash("sha256").update(Buffer.from(content, "utf8")).digest("hex"),
+  };
+}
+
 export function createSettingsSyncService(
   dependencies: SettingsSyncServiceDependencies,
 ): ISettingsSyncService {
@@ -2289,6 +2338,17 @@ export function createSettingsSyncService(
         status: result.status,
         overwritten: result.overwritten,
         skippedReason: result.skippedReason,
+      });
+      return result;
+    },
+
+    async writeUserAgentsFile(request): Promise<SettingsSyncUserAgentsFileWriteResult> {
+      const result = await writeUserZcodeAgentsFile(request.content);
+      // 诊断只记落点/字节数/sha256，不记正文（14 §5 凭据/内容边界）。
+      log.info("[settings-sync] user AGENTS.md written", {
+        path: result.path,
+        bytes: result.bytes,
+        sha256: result.sha256,
       });
       return result;
     },

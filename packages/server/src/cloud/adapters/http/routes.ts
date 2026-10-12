@@ -30,12 +30,15 @@ import {
   type CloudHttpRouteDeps,
 } from "./support.js";
 import { registerCloudRepositoryRoutes } from "./repositoryRoutes.js";
+import { registerCloudUserProfileRoutes } from "./userProfileRoutes.js";
 
 export function registerCloudHttpRoutes(app: Hono, deps: CloudHttpRouteDeps): void {
   const { plane, principalId } = deps;
 
   // 仓库目录端点单独成文件（保持单文件职责与行数预算）：先注册。
   registerCloudRepositoryRoutes(app, deps);
+  // 用户资源 profile 端点（M8；14 §9.2⑦）：同样单独成文件（含 80MiB body-limit 中间件）。
+  registerCloudUserProfileRoutes(app, deps);
 
   // ── capabilities（03 §6）──
   app.get("/api/cloud/capabilities", async (c) => {

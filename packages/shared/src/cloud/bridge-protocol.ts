@@ -1,13 +1,20 @@
 /**
  * Cloud Bridge 控制协议契约（specs/cloud-agent/02 §4 地址与网络帧、§5 握手、
- * §7.1 结构化投影记录）。
+ * §7.1 结构化投影记录；14 §6 偏好快照）。
  *
  * 控制面（`packages/server/src/cloud`）与沙箱 bridge（`cloud/execution`）之间的
  * WSS 控制帧带版本化 discriminator；未知版本必须整帧拒绝（fail-closed），不得
  * 按旧字段猜测解析（02 §4 尾段）。所有帧 `.strict()`：未知字段、越界尺寸一律拒。
  * 时间戳统一 epoch 毫秒（对齐 zcode-protocol-v4 Timestamp）。
+ *
+ * 2026-10-11 简化定调（14 §4.8）：`bootstrap.resources` 帧（自举期资源下发）随沙箱
+ * 自研安装器整体退役——用户资源同步改走**连接期**控制面经 bridge relay 调用沙箱
+ * 既有 sync 服务（14 §4），本文件不再定义资源帧；偏好快照块
+ * （`bootstrap.config.preferences`）保留不动。
  */
 import { z } from "zod";
+import { integratedTerminalShellSelectionSchema } from "../validationAppSettings.js";
+import { zcodeModelContextBudgetStrategySchema } from "../zcode-protocol/index.js";
 import { cloudErrorCodeSchema } from "./errors.js";
 import {
   cloudTaskIdSchema,
@@ -187,6 +194,36 @@ export const bootstrapCloneFactsSchema = z
 export type BootstrapCloneFacts = z.infer<typeof bootstrapCloneFactsSchema>;
 
 /**
+ * 行为偏好实值快照（14 §6、§9.1③：帧归属冻结为扩展 `bootstrap.config`）。
+ *
+ * 值类型复用源码既有 schema，不在此复制枚举（P18 核实）：
+ * - `modelContextBudgetStrategy` = `zcodeModelContextBudgetStrategySchema`（`"legacy" | "preflight-v1"`，
+ *   zcode-protocol 3.12.2；沙箱 responder 侧默认策略见 `DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY`）；
+ * - `integratedTerminalShell` = `integratedTerminalShellSelectionSchema`（`mode: "auto" | "shell"` 判别联合）；
+ * - 其余三个键是 boolean（来源 `packages/services/src/node.ts` 的 `resolveSessionRuntimePreferences`，
+ *   `user-execution` scope）。
+ *
+ * `values` 全可选：缺席键由沙箱 responder 经 `zcodeSessionRuntimePreferencesResultSchema` 的既有
+ * 默认值收敛（不新增第二套默认值规则）。凭据与用户数据禁止进本块。
+ */
+export const cloudBootstrapPreferencesSchema = z
+  .object({
+    /** 已签发的配置版本；沙箱经 `bridge.ready.configVersion` 回执"已应用版本"（14 §6）。 */
+    configVersion: nonEmptyString.max(64),
+    values: z
+      .object({
+        askUserQuestionAutoResolutionEnabled: z.boolean().optional(),
+        nativeSearchEnhancementsEnabled: z.boolean().optional(),
+        memoryEnabled: z.boolean().optional(),
+        modelContextBudgetStrategy: zcodeModelContextBudgetStrategySchema.optional(),
+        integratedTerminalShell: integratedTerminalShellSelectionSchema.optional(),
+      })
+      .strict(),
+  })
+  .strict();
+export type CloudBootstrapPreferences = z.infer<typeof cloudBootstrapPreferencesSchema>;
+
+/**
  * 控制面 → Bridge：welcome 之后、ready 之前下发运行配置、clone 事实与 provisioning
  * envelope（02 §4、01 §6.2、12 §6）。
  *
@@ -196,6 +233,9 @@ export type BootstrapCloneFacts = z.infer<typeof bootstrapCloneFactsSchema>;
  *
  * `provisioningEnvelopeJson` 只冻结为有界字符串：envelope 内部结构归 provisioning
  * 契约所有，shared 不复刻其 schema。凭据正文禁止进日志。
+ *
+ * `preferences` 是 M8 追加快照块（可选）：账号行为偏好实值快照，与用户资源同步是两条
+ * 独立通路（资源同步不经本帧，见 14 §4/§9.5）。
  */
 export const bootstrapConfigFrameSchema = z
   .object({
@@ -209,6 +249,8 @@ export const bootstrapConfigFrameSchema = z
     /** 账号/app 凭据代际：供 A-08 核对，bridge 发现落后于本地已安装代际时按 fault 上报（12 §6）。 */
     credentialGeneration: z.number().int().nonnegative(),
     policyVersion: nonEmptyString.max(64),
+    /** 行为偏好实值快照（M8；缺席表示本次未下发，按旧版 bootstrap.config 语义处理）。 */
+    preferences: cloudBootstrapPreferencesSchema.optional(),
   })
   .strict();
 export type BootstrapConfigFrame = z.infer<typeof bootstrapConfigFrameSchema>;

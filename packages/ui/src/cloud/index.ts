@@ -153,3 +153,16 @@ export {
   describeCloudInputRejection,
   describeCloudTaskActionError,
 } from "./cloudTaskErrorText.js";
+export {
+  CLOUD_TERMINAL_RUN_STATUSES,
+  CLOUD_USER_PROFILE_SYNC_MAX_LISTED_FAILURES,
+  cloudUserProfileSyncErrorMessageKey,
+  describeCloudUserProfileSyncError,
+  resolveCloudUserProfileSyncEntry,
+  summarizeCloudUserProfileSync,
+  type CloudUserProfileSyncEntryView,
+  type CloudUserProfileSyncFailure,
+  type CloudUserProfileSyncHiddenReason,
+  type CloudUserProfileSyncSummary,
+  type ResolveCloudUserProfileSyncEntryInput,
+} from "./cloudTaskUserProfileSync.js";

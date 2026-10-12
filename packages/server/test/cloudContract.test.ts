@@ -39,6 +39,8 @@ test("architecture policy registers both cloud modules with expected shape", asy
   assert.equal(controlPlane.managed, true);
   assert.deepEqual(controlPlane.layers, { domain: "domain", app: "app", adapters: "adapters" });
   assert.deepEqual(controlPlane.layerOrder, ["domain", "app", "adapters"]);
+  // 2026-10-11 简化定调（14 §4.8）：`bootstrap.resources` 退役，曾经的窄入口
+  // userProfileBundleContract.ts 随 bundle schema 一并删除，公开面只剩单一 contract.ts。
   assert.deepEqual(controlPlane.publicEntrypoints, ["packages/server/src/cloud/contract.ts"]);
 
   assert.ok(execution, "cloud-execution must be registered");

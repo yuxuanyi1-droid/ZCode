@@ -98,4 +98,31 @@ export const CLOUD_SDK_INVOCATIONS: readonly CloudSdkInvocation[] = [
     endpointId: "uploadAttachment",
     invoke: (client) => client.uploadAttachment(new Blob(["fixture"])),
   },
+  { endpointId: "userProfile", invoke: (client) => client.listUserProfile() },
+  { endpointId: "userProfileVersion", invoke: (client) => client.getUserProfileVersion() },
+  {
+    endpointId: "putUserProfileEntry",
+    invoke: (client) =>
+      client.putUserProfileEntry("mcp", "primary", {
+        category: "mcp",
+        config: { command: "npx", args: ["-y", "server"] },
+      }),
+  },
+  {
+    endpointId: "deleteUserProfileEntry",
+    invoke: (client) => client.deleteUserProfileEntry("mcp", "primary"),
+  },
+  {
+    endpointId: "readUserProfileEntry",
+    invoke: (client) => client.getUserProfileEntry("mcp", "primary"),
+  },
+  {
+    endpointId: "patchUserProfileEntryEnabled",
+    invoke: (client) => client.setUserProfileEntryEnabled("mcp", "primary", false),
+  },
+  // B 批（14 §4.6）：连接期手动同步端点（task-scoped 动作，无请求体）。
+  {
+    endpointId: "syncTaskUserProfile",
+    invoke: (client) => client.syncTaskUserProfile(TASK_ID),
+  },
 ];

@@ -27,6 +27,7 @@ packages/ui/src/hooks/cloud/   useCloudProjects/useCloudTasks/useCloudTask/useCl
                               useCloudCapabilities/useCloudWorkspaceController
 packages/ui/src/store/cloud/   cloudProjectsStore/cloudTasksStore/cloudTaskHistoryStore/cloudConversationFold
 packages/ui/src/settings/CloudRuntimeSection.tsx   设置页 Cloud 运行时分组的视图
+packages/ui/src/settings/CloudUserResourcesSection.tsx  设置页「用户资源」分区（M8 P20；挂进上面的云分组，只在云模式渲染；见 [W11 §12](./W11-user-profile-sync.md) 与 [14 §9.4](../14-user-profile-sync.md)）
 原组件接入点（改造，不新增页面）：Root、root/RootWorkspaceContent、App、app-shell/WorkspaceShellLayout、
                               WorkspaceSidebar/WorkspaceSidebarItem、v4/SessionPane、composer contextHeader 区域
 ```

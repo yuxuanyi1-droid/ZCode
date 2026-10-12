@@ -21,6 +21,11 @@ export const CLOUD_ERROR_CODES = [
   "invalid_ref",
   "unsupported_template",
   "resource_unsupported",
+  // 用户资源 profile 上传校验（14 §9.1 追加冻结；错误信息必须定位到 category/entryId，U-11）
+  "payload_too_large",
+  "invalid_entry",
+  "profile_total_exceeded",
+  "profile_entries_exceeded",
   // 配额与预算（01 §4.3、§9）
   "quota_exceeded",
   "budget_exceeded",
@@ -85,6 +90,11 @@ export const CLOUD_ERROR_RETRYABLE: Readonly<Record<CloudErrorCode, boolean>> = 
   invalid_ref: false,
   unsupported_template: false,
   resource_unsupported: false,
+  // 上传校验类都不可自动重试：同一二进制重复提交会重复失败，须先改条目（14 §5 fail-closed）。
+  payload_too_large: false,
+  invalid_entry: false,
+  profile_total_exceeded: false,
+  profile_entries_exceeded: false,
   quota_exceeded: false,
   budget_exceeded: false,
   provider_create_unknown: false,

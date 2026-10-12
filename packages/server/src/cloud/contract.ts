@@ -97,6 +97,25 @@ export type {
   AttachmentSendResult,
   ProjectionIngestResult,
 } from "./app/ports/attachmentPort.js";
+export type {
+  ControlPlaneRpcCallRequest,
+  ControlPlaneRpcCallResult,
+  ControlPlaneRpcFailureReason,
+  ControlPlaneRpcPort,
+} from "./app/ports/controlPlaneRpcPort.js";
+
+// ── M8 用户资源 profile 与连接期同步（14 §4/§9.2；W11 §10/§13B）──
+export type {
+  UserProfileDeleteResult,
+  UserProfileEntryRecord,
+  UserProfileStorePort,
+  UserProfileUpsertRequest,
+  UserProfileUpsertResult,
+  UserProfileWriteRejectionCode,
+} from "./app/ports/userProfileStorePort.js";
+export type { UserPreferencesPort } from "./app/ports/userPreferencesPort.js";
+export type { UserProfileService } from "./app/userProfile/userProfileService.js";
+export type { ProfileSyncService } from "./app/userProfile/profileSyncService.js";
 
 // ── W1 追加端口（类型）──
 export type { ClockPort } from "./app/ports/clockPort.js";

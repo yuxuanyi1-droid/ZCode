@@ -42,6 +42,7 @@ import {
 } from "./entry-cloud-drivers.js";
 import { SANDBOX_DRIVER_SECRET_NAMES, type SandboxDriverBinding } from "./sandbox/providers.js";
 import { createHostSandboxRuntimeSettings } from "./sandbox/sandboxRuntimeSettings.js";
+import { createHostUserPreferences } from "./sandbox/hostUserPreferences.js";
 import { startCloudHostBody, type CloudHostBody } from "./entry-cloud-host-body.js";
 import {
   createCloudHostChannelServices,
@@ -167,6 +168,11 @@ export async function startCloudServer(
   // ——本步骤先于 host 本体启动（03 §8 顺序），端口在 hostBody 就绪后才接上服务图；
   // 装配校验（env 秘密齐备）仍在此处以 env 完成，账号设置不解除 fail-closed 装配语义。
   const hostServicesRef: { current: ServiceCollection | undefined } = { current: undefined };
+  // 行为偏好快照来源（M8；14 §6/§9.2⑥）：同一惰性取用模式；未就绪时回空对象（不带块）。
+  const userPreferences = createHostUserPreferences({
+    getServices: () => hostServicesRef.current,
+    logger,
+  });
   const sandboxRuntimeSettings = createHostSandboxRuntimeSettings({
     getServices: () => hostServicesRef.current,
     ...(config.sandboxMaxLifetimeSeconds
@@ -259,6 +265,7 @@ export async function startCloudServer(
           hostChannelServices,
           drivers,
           sandboxRuntimeSettings,
+          userPreferences,
           ...(hostProvisioningSource ? { hostProvisioningSource } : {}),
           storage: storageSource,
           loopScheduler,

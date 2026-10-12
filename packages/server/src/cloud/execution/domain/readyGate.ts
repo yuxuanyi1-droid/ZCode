@@ -4,6 +4,7 @@
  * 纯决策：welcome 只证明认证；ready 必须按 02 §5.3 的顺序逐条满足，不能靠加长超时或
  * 页面 responder 兜底。本文件只回答「当前卡在哪一步」，执行由 app/bootstrap 承担。
  */
+import type { BridgePhaseFrame } from "@zcode/shared";
 
 export const READY_CONDITIONS = [
   "local-runtime-handshake",
@@ -15,14 +16,12 @@ export const READY_CONDITIONS = [
 
 export type ReadyCondition = (typeof READY_CONDITIONS)[number];
 
-/** bootstrap 阶段（`bridge.phase.phase` 的合法取值，来自 shared 冻结帧 schema）。 */
-export type BootstrapPhase =
-  | "registering"
-  | "cloning"
-  | "handshaking"
-  | "installing-config"
-  | "exporter-starting"
-  | "reconciling";
+/**
+ * bootstrap 阶段（`bridge.phase.phase` 的合法取值）。**类型唯一来源是 shared 冻结帧 schema**
+ * （`BridgePhaseFrame["phase"]`；2026-10-11 简化改造移除 `installing-resources`，14 §4.8/§9.5）；
+ * 本文件不再手写第二份枚举，`PHASE_ORDER_EXHAUSTIVE` 保证 shared 增删相位时这里立刻编译失败。
+ */
+export type BootstrapPhase = BridgePhaseFrame["phase"];
 
 export interface ReadyChecklist {
   localRuntimeHandshake: boolean;
@@ -31,7 +30,7 @@ export interface ReadyChecklist {
   exporterReady: boolean;
   walReady: boolean;
   reconciliationDone: boolean;
-  /** 旧网络 facade 已释放（02 §5.3 第 5 条）；未释放时不允许 ready。 */
+  /** 旧网络 facade 已释放（02 §5.3 第 6 条）；未释放时不允许 ready。 */
   previousFacadeReleased: boolean;
 }
 
@@ -85,6 +84,17 @@ const PHASE_ORDER: readonly BootstrapPhase[] = [
   "exporter-starting",
   "reconciling",
 ];
+
+/** 编译期穷尽断言：shared 增删相位而 PHASE_ORDER 未跟进时这里立刻失败（不静默漂移）。 */
+const PHASE_ORDER_EXHAUSTIVE: Record<BootstrapPhase, true> = {
+  registering: true,
+  cloning: true,
+  handshaking: true,
+  "installing-config": true,
+  "exporter-starting": true,
+  reconciling: true,
+};
+void PHASE_ORDER_EXHAUSTIVE;
 
 /** 严格解析阶段名：只接受冻结枚举（未知阶段不上报，不猜）。 */
 export function parseBootstrapPhase(value: string): BootstrapPhase | null {

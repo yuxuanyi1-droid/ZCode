@@ -119,6 +119,8 @@ export interface BridgeRuntimeState {
   /** 节点自身 bootstrap 结论：跨网络连接保留（重连不重新 clone，B-02）。 */
   bootstrapped: boolean;
   config: BootstrapConfigFrame | null;
+  /** 已应用配置版本（bootstrap 报告；14 §6：有偏好快照时=快照 configVersion）；ready 帧据此上报。 */
+  configVersion: string | null;
   credentials: CredentialStateSnapshot | null;
   /** 本连接是否收到过显式拒绝（`bridge.fault` 鉴权类）。 */
   rejected: boolean;
@@ -139,6 +141,7 @@ export function createBridgeRuntimeState(): BridgeRuntimeState {
     connectionReady: false,
     bootstrapped: false,
     config: null,
+    configVersion: null,
     credentials: null,
     rejected: false,
     unconfirmed: false,

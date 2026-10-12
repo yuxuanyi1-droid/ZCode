@@ -1,5 +1,5 @@
-// Cloud RPC 帧用例（specs/cloud-agent/02 §0、§4 尾段）：round-trip、未知版本拒绝、
-// 非 base64/越界尺寸拒绝、反向帧 fail-closed。
+// Cloud RPC 帧用例（specs/cloud-agent/02 §0、§4 尾段；14 §4.2 `serviceScope` 分面）：
+// round-trip、未知版本拒绝、非 base64/越界尺寸拒绝、反向帧 fail-closed、会话分面必填。
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -7,6 +7,7 @@ import {
   CLOUD_RPC_PAYLOAD_MAX_BYTES,
   CLOUD_RPC_PROTOCOL_VERSION,
   cloudRpcFrameSchema,
+  cloudRpcServiceScopeSchema,
   isCloudRpcFrameInboundAllowed,
 } from "../src/index.js";
 import { RUN_ID, STREAM_ID } from "./cloudFixtures.js";
@@ -22,13 +23,50 @@ const address = {
 test("rpc frames round-trip for open / request / response / close", () => {
   const payload = Buffer.from("example-channel-frame").toString("base64");
   for (const frame of [
-    { ...address, type: "rpc.open" },
+    { ...address, type: "rpc.open", serviceScope: "client" },
     { ...address, type: "rpc.request", payload },
     { ...address, type: "rpc.response", payload },
     { ...address, type: "rpc.close" },
   ] as const) {
     const parsed = cloudRpcFrameSchema.parse(frame);
     assert.deepEqual(cloudRpcFrameSchema.parse(JSON.parse(JSON.stringify(parsed))), parsed);
+  }
+});
+
+test("rpc.open requires an explicit serviceScope facet (14 §4.2)", () => {
+  // 必填：缺席/非法枚举一律拒绝——浏览器字节不能被包装成"控制面 scope"。
+  assert.equal(cloudRpcFrameSchema.safeParse({ ...address, type: "rpc.open" }).success, false);
+  assert.equal(
+    cloudRpcFrameSchema.safeParse({ ...address, type: "rpc.open", serviceScope: "browser" })
+      .success,
+    false,
+  );
+  assert.equal(
+    cloudRpcFrameSchema.safeParse({ ...address, type: "rpc.open", serviceScope: null }).success,
+    false,
+  );
+  assert.deepEqual([...cloudRpcServiceScopeSchema.options], ["client", "control-plane"]);
+  const controlPlane = cloudRpcFrameSchema.parse({
+    ...address,
+    type: "rpc.open",
+    serviceScope: "control-plane",
+  });
+  assert.equal(controlPlane.type === "rpc.open" && controlPlane.serviceScope, "control-plane");
+  const client = cloudRpcFrameSchema.parse({
+    ...address,
+    type: "rpc.open",
+    serviceScope: "client",
+  });
+  assert.equal(client.type === "rpc.open" && client.serviceScope, "client");
+  // scope 只属于会话建立帧：request/response/close 不接受该字段（strict）。
+  for (const type of ["rpc.request", "rpc.response", "rpc.close"] as const) {
+    const payload = type === "rpc.close" ? {} : { payload: "AA==" };
+    assert.equal(
+      cloudRpcFrameSchema.safeParse({ ...address, type, serviceScope: "client", ...payload })
+        .success,
+      false,
+      `${type} must not carry serviceScope`,
+    );
   }
 });
 

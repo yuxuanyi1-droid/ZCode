@@ -12,6 +12,7 @@
  *   未装配 W2 的 store 时返回 not_implemented，不静默丢弃副作用。
  */
 import { createServiceLogger } from "@zcode/services/node";
+import { CloudControlPlaneAssemblyError } from "../controlPlaneAssemblyError.js";
 import type {
   BranchHead,
   EnqueueGitHubEffectRequest,
@@ -252,5 +253,33 @@ export function createGitHubAdapter(deps: {
         now: deps.now,
         logger,
       }),
+  };
+}
+
+/**
+ * 未配置 GitHub App 时的 fail-closed 端口（原在 entry-cloud-control-plane.ts）：所有读取
+ * 返回空、所有副作用拒绝。不伪造仓库、不在没有授权来源时创建 Project（11 §4.3）。
+ * 放在 GitHub 适配层：它是配置缺失分支的 GitHubPort 实现，与真实 adapter 同源维护。
+ */
+export function createFailClosedGitHubPort(): GitHubPort {
+  const denied = async (): Promise<never> => {
+    throw new CloudControlPlaneAssemblyError("not_configured", "github app not configured");
+  };
+  return {
+    async listRepositories() {
+      return { items: [] };
+    },
+    async getRepository() {
+      return null;
+    },
+    async getBranchHead() {
+      return null;
+    },
+    mintToken: denied,
+    async getPullRequest() {
+      return null;
+    },
+    publishDraftPullRequest: denied,
+    enqueueEffect: denied,
   };
 }

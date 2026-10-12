@@ -1,19 +1,19 @@
 /**
  * bridge 通道装配：连接表 + `AttachmentPort`（控制面 → 执行节点控制帧）+
- * `RuntimeCommandQueryPort`（命令事实查询，02 §6.3 对账）+ 浏览器 RPC 转发（03 §7.1）。
+ * `RuntimeCommandQueryPort`（命令事实查询，02 §6.3 对账）+ 浏览器 RPC 转发（03 §7.1）+
+ * 控制面 RPC 会话（M8 连接期同步，14 §4.2）。
  *
  * 帧通路（同一 socket，两个冻结的帧族）：
  * - `bridge.*` / `projection.*` / `checkpoint.*` 控制帧 → `handshake.ts` / `inbound.ts`；
  * - `rpc.*` 帧（02 §0）→ 由 W6 的 rpcRelay（沙箱侧）与会话另一端对接：
- *   控制面这一侧把沙箱回投的 `rpc.response` 分别交给命令传输（W6 的 ChannelClient）
- *   与浏览器流多路复用器（回投给原 ChannelClient）。
+ *   控制面这一侧把沙箱回投的 `rpc.response` 分别交给命令传输（W6 的 ChannelClient）、
+ *   控制面同步会话（`serviceScope:"control-plane"`）与浏览器流多路复用器（回投给原 ChannelClient）。
  *
  * 命令投递经 W6 的 `CloudCommandTransport`（`rpc.*` 帧 + 本地 workspace target）：
  * 未接线/未 ready 即 fail-closed，输入保持 accepted 等待重投，绝不伪造 sent。
  */
 import {
   cloudRpcFrameSchema,
-  isCloudErrorCode,
   isCloudRpcFrameInboundAllowed,
   type CloudRpcFrame,
 } from "@zcode/shared";
@@ -21,9 +21,6 @@ import { bridgeCloseDisconnectReason } from "../../domain/runtimeExit.js";
 import {
   bridgeLogger,
   parseBridgeFrame,
-  reject,
-  resolveConnection,
-  sendFrame,
   type BridgeSocket,
   type CloudBridgeChannel,
   type CloudBridgeContext,
@@ -33,6 +30,8 @@ import { handleBridgeHandshake } from "./handshake.js";
 import { routeInboundFrame } from "./inbound.js";
 import { createBrowserRpcMultiplexer, type OpenBrowserRpcStreamInput } from "./browserStreams.js";
 import { createControlPlaneCommandChannel } from "./commandChannel.js";
+import { createControlPlaneRpcChannel } from "./controlPlaneRpcChannel.js";
+import { createBridgeAttachmentPort } from "./attachmentPort.js";
 
 export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBridgeChannel {
   const { registry, storage, clock, ids } = context;
@@ -63,6 +62,13 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
     registry,
     sendFrame: sendRpcFrame,
     streamId: ids.newId(),
+  });
+  // 控制面 RPC 会话（M8 连接期同步；14 §4.2）：每 Run 一条 `serviceScope:"control-plane"` 流，
+  // 通道白名单由沙箱侧按 scope 选择；本层只做代际围栏与 streamId 路由。
+  const controlPlaneRpc = createControlPlaneRpcChannel({
+    registry,
+    sendFrame: sendRpcFrame,
+    newStreamId: () => ids.newId(),
   });
 
   /**
@@ -146,8 +152,10 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
           payloadChars: rpc.data.payload?.length ?? 0,
         });
       }
-      // 命令传输（控制面自发的命令）与浏览器流各自按 streamId 取用同一帧。
+      // 命令传输（控制面自发的命令）与浏览器流各自按 streamId 取用同一帧；
+      // 控制面同步会话（control-plane scope）同理按自己的 streamId 取用。
       commandChannel.handleResponse(rpc.data);
+      controlPlaneRpc.handleResponse(rpc.data);
       browserRpc.handleInbound(rpc.data);
       return;
     }
@@ -161,98 +169,12 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
   }
 
   return {
-    port: {
-      async sendCommand(request) {
-        const run = await storage.runs.activeOfTask(request.taskId);
-        if (!run) return reject("no-attachment", "not_ready");
-        const resolved = resolveConnection(connections, {
-          runId: run.runId,
-          runGeneration: run.runGeneration,
-          connectionEpoch: request.expectation?.connectionEpoch ?? run.connectionEpoch,
-        });
-        if ("rejected" in resolved) return resolved.rejected;
-        if (request.expectation?.requireReady && !registry.current(run.runId)?.ready) {
-          return reject("not-ready", "not_ready");
-        }
-        // 命令经 W6 的传输（rpc.* → 沙箱 ChannelServer）；失败语义由传输给出（sent 不是 admission）。
-        const result = await commandChannel.transport.sendCommand({
-          taskId: request.taskId,
-          runId: resolved.connection.runId,
-          runGeneration: resolved.connection.runGeneration,
-          commandId: request.commandId,
-          envelope: request.envelope,
-        });
-        if (result.status === "sent") return { status: "sent" };
-        const reason =
-          result.reason === "no-attachment" ||
-          result.reason === "stale" ||
-          result.reason === "closed"
-            ? result.reason
-            : "not-ready";
-        // 归一错误码目录是唯一事实源：传输回传的未知 code 收敛为 network_unknown（不伪造新码）。
-        return {
-          status: "rejected",
-          code: isCloudErrorCode(result.code) ? result.code : "network_unknown",
-          reason,
-        };
-      },
+    // 控制面 → 执行节点的单帧投递（命令/config/checkpoint/drain）在 attachmentPort.ts：
+    // 与连接表/注册表同层，逐帧代际校验语义集中一处。
+    port: createBridgeAttachmentPort({ connections, registry, storage, commandChannel }),
 
-      async sendBootstrapConfig(request) {
-        const connection = connections.get(request.runId);
-        if (!connection) return reject("no-attachment", "not_ready");
-        if (connection.runGeneration !== request.runGeneration) return reject("stale", "stale");
-        sendFrame(connection, {
-          protocolVersion: 1,
-          type: "bootstrap.config",
-          ...request.config,
-        });
-        return { status: "sent" };
-      },
-
-      async requestCheckpoint(request) {
-        const connection = connections.get(request.runId);
-        if (!connection) return reject("no-attachment", "not_ready");
-        if (connection.runGeneration !== request.runGeneration) return reject("stale", "stale");
-        if (
-          !registry.bootstrapConfigSent({
-            runId: request.runId,
-            runGeneration: request.runGeneration,
-            connectionEpoch: connection.connectionEpoch,
-          })
-        ) {
-          // ready 前置未完成：不发起保存（02 §5.3）。
-          return reject("not-ready", "not_ready");
-        }
-        sendFrame(connection, {
-          protocolVersion: 1,
-          type: "checkpoint.request",
-          operationId: request.operationId,
-          runId: request.runId,
-          runGeneration: request.runGeneration,
-          connectionEpoch: connection.connectionEpoch,
-          purpose: request.purpose,
-        });
-        return { status: "sent" };
-      },
-
-      async requestDrain(request) {
-        const connection = connections.get(request.runId);
-        if (!connection) return reject("no-attachment", "not_ready");
-        if (connection.runGeneration !== request.runGeneration) return reject("stale", "stale");
-        sendFrame(connection, {
-          protocolVersion: 1,
-          type: "bridge.drain",
-          operationId: request.operationId,
-          reason: request.reason,
-          connectionEpoch: connection.connectionEpoch,
-        });
-        return { status: "sent" };
-      },
-
-      async currentAddress(runId) {
-        return registry.current(runId)?.address ?? null;
-      },
-    },
+    // 控制面 RPC 会话端口（M8 连接期同步）：app 层只依赖端口类型，帧编码在本层。
+    controlPlaneRpc: controlPlaneRpc.port,
 
     runtimeCommands: {
       async queryCommand(request) {
@@ -363,6 +285,10 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
           runGeneration: connection.runGeneration,
           connectionEpoch: connection.connectionEpoch,
         });
+        controlPlaneRpc.release(disconnectReason, {
+          runId,
+          connectionEpoch: connection.connectionEpoch,
+        });
         browserRpc.closeRun(runId, disconnectReason);
         // 悬浮 Promise 必须自兜（2026-10-07 实测崩溃：进程关闭期 storage worker 先关，
         // 迟到的 socket close 事件走到这里抛 CloudStorageError，无人接的 rejection
@@ -387,6 +313,7 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
     async close() {
       browserRpc.closeAll("control-plane-shutdown");
       commandChannel.dispose();
+      controlPlaneRpc.dispose();
       for (const connection of connections.values()) {
         connection.socket.close(1001, "control-plane-shutdown");
       }

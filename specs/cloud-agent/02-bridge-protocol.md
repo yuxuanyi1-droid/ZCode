@@ -10,6 +10,8 @@
 
 增加严格校验的 `rpc.open` / `rpc.request` / `rpc.response` / `rpc.close` 帧，携带 runId/runGeneration/connectionEpoch 与有界 base64 RPC 字节。复用已有 Channel RPC 的序列化、事件和取消；不另建文件/Git/终端业务协议。控制面只转发已鉴权浏览器 streamId 的有界字节，在每一帧上验证当前 ready attachment；浏览器使用原 ChannelClient，沙箱用现有常驻 stdio client 的受控公开 channel 组成 ChannelServer，不重启 runtime。外网断开清网络侧 client/server 和订阅，保留 stdio/runtime；旧代际帧拒绝。浏览器任务 facade 鉴权后绑定 Task 当前 Run，白名单不含 secret read、provider provisioning target 或 Main 原生操作（该白名单只约束沙箱 attachment 通道；账号域经 host `/ws` 提供，分面见 [03 §7.1](./03-control-plane.md)）。沙箱 attachment 的**服务通道名、命令名与帧事件名沿用既有 V4 协议**（浏览器用原 ChannelClient 与既有会话 channel，不另造业务协议）；云侧只冻结"允许经 attachment 暴露哪些 channel"的白名单常量，供 UI 与 SDK 共用，禁止各端自行硬编码。
 
+**控制面发起的 RPC（2026-10-11 追加，M8 连接期同步）**：`rpc.open` 增加必填 `serviceScope: "client" | "control-plane"` 分面——`client` 走浏览器白名单（现状不变），`control-plane` 走**并集准入**（浏览器白名单 ∪ `CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST`；C 批定夺：控制面是受信基础设施，能力 ⊇ 浏览器；只约束控制面方向，浏览器白名单本身不变、denylist 对两面生效）。`serviceScope` 由控制面构造 rpc 信封时写入，浏览器字节只作为有界 payload 被包装、不能自报 scope。控制面用同一套 `rpc.*` 帧与沙箱 ChannelServer 调用沙箱 runtime 的既有服务（用户资源同步；帧上限与分块见 [14 §4](./14-user-profile-sync.md)），与浏览器面共用连接与 ready 校验，不新增帧类型。
+
 ## 1. 当前基线与目标
 
 云实现已撤销。`packages/control-plane`、`packages/sandbox-bridge` 即使存在目录，其生成物也不是当前源码、可构建包或测试覆盖；本设计不依赖或恢复这些目录。
@@ -163,6 +165,8 @@ welcome 只证明认证；ready 按顺序满足：
 4. 结构化 exporter/WAL 可写，启动或恢复快照通过校验。
 5. 命令事实、projection cursor 对账完成；旧网络 facade 已释放。
 6. 控制面按 activeRunId/generation/epoch CAS 写 ready，再允许 outbox dispatcher 发 createSession/首个 prompt。
+
+**（2026-10-11 M8 简化定调）**：原第 4 条"按 Run 冻结的 `profileVersion` 收齐并安装用户资源"随自举安装面整体退役（[14 §4.8](./14-user-profile-sync.md)）——用户资源改为**连接期同步**（ready 之后控制面经 `rpc.*` 调沙箱既有 sync 服务），不参与 ready 判定；条件恢复 6 条。
 
 当前 `desktop-attached-remote` 将 runtime preferences 请求交外部 Host（`packages/services/src/node.ts`），其 15s timeout 不提供云授权。新增云执行节点装配/authority 见 07；不能靠页面 responder 或加长 timeout 处理。
 

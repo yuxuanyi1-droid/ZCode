@@ -203,6 +203,7 @@ export {
   useCloudTask,
   useCloudTaskHistory,
   useCloudTasks,
+  useCloudTaskUserProfileSync,
   useCloudWorkspaceController,
   useCloudWorkspaceServices,
   useReopenCloudTask,
@@ -233,11 +234,15 @@ export type {
   UseCloudTaskResult,
   UseCloudTasksOptions,
   UseCloudTasksResult,
+  UseCloudTaskUserProfileSyncResult,
   UseCloudWorkspaceControllerOptions,
+  UseCloudUserResourcesOptions,
+  UseCloudUserResourcesResult,
   UseReopenCloudTaskOptions,
   UseReopenCloudTaskResult,
   UseSubmitCloudInputOptions,
   UseSubmitCloudInputResult,
+  useCloudUserResources,
 } from "./hooks/cloud/index.js";
 
 export {
@@ -251,10 +256,12 @@ export {
   createMemoryCloudDraftLocalStores,
   resetCloudDraftStoresForTests,
   selectCloudTasksForProject,
+  selectVisibleUserResourceEntries,
   useCloudDraftStore,
   useCloudProjectsStore,
   useCloudTaskHistoryStore,
   useCloudTasksStore,
+  useCloudUserResourcesStore,
 } from "./store/cloud/index.js";
 export type {
   CloudConversationFold,
@@ -277,6 +284,7 @@ export {
   CloudRuntimeSection,
   CloudGithubSettingsSection,
   CloudSandboxSettingsSection,
+  CloudUserResourcesSection,
   CLOUD_RUNTIME_SETTINGS_GROUP_ID,
   CLOUD_RUNTIME_SETTINGS_SECTION_ID,
   describeCloudSettingsError,

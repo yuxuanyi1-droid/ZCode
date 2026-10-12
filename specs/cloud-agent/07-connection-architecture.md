@@ -155,16 +155,16 @@ M2 的无页面 ready 验证是节点能力/技术试验；公开接收与执行
 
 不能把 RemoteServiceAccess 所有 getter 或“若干 service channel 原样可用”当云权限设计。计划由 cloud facade 使用显式 descriptor + 方法级 allowlist，并在每次调用校验账号/Task/current attachment。
 
-| 服务族                                                                     | 权威位置                                                              | 云 facade 处理                                                                |
-| -------------------------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| file / file-watcher / media-preview / Git / checkpoint / system / terminal | 当前远端执行节点                                                      | 在线调用，经 Run地址/路径/能力检查；禁止本机 fallback                         |
-| zcode-agent / zcode-session 写命令                                         | CLI/runtime                                                           | cloud durable gateway 投递后由 runtime裁决；不能绕过outbox                    |
-| 会话/history/sessions-index/workspace-config读                             | runtime事实；控制面持久投影为读副本                                   | 离线读持久副本，在线同epoch续流；不造第二份权威task索引                       |
-| provider-settings / model-selection                                        | 账号配置权威在 host 本体；Run 应用版本在节点                          | 账号授权配置下发；运行时选择按既有命令/版本确认                               |
-| skills / plugins / MCP / commands / hooks / subagents                      | 远端执行作用域                                                        | 按Task/Run配置与能力开放；不引用控制面本机home                                |
-| setting / OAuth / credential / coding-plan / usage 等账号服务              | **host 本体自带**（[12](./12-account-domain.md) §1.2/§4，零新增装配） | 浏览器经 host `/ws` 拿状态/操作接口；不另建账号子系统、不把账号服务复制进沙箱 |
-| provider provisioning target                                               | 云服务端（host 本体 + cloud 层）→ 沙箱执行节点                        | 只允许云服务端内部装配调用；Browser不可通过频道名调用                         |
-| native windows/dialog、Desktop CUA等平台服务                               | 原Desktop平台                                                         | 云Web使用IPlatformService适配；不伪装可用本机能力                             |
+| 服务族                                                                     | 权威位置                                                              | 云 facade 处理                                                                                                                                                                                                   |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| file / file-watcher / media-preview / Git / checkpoint / system / terminal | 当前远端执行节点                                                      | 在线调用，经 Run地址/路径/能力检查；禁止本机 fallback                                                                                                                                                            |
+| zcode-agent / zcode-session 写命令                                         | CLI/runtime                                                           | cloud durable gateway 投递后由 runtime裁决；不能绕过outbox                                                                                                                                                       |
+| 会话/history/sessions-index/workspace-config读                             | runtime事实；控制面持久投影为读副本                                   | 离线读持久副本，在线同epoch续流；不造第二份权威task索引                                                                                                                                                          |
+| provider-settings / model-selection                                        | 账号配置权威在 host 本体；Run 应用版本在节点                          | 账号授权配置下发；运行时选择按既有命令/版本确认                                                                                                                                                                  |
+| skills / plugins / MCP / commands / hooks / subagents                      | 远端执行作用域                                                        | 按Task/Run配置与能力开放；不引用控制面本机home（2026-10-11 起：M8 用户级 resources 在 Run 连接期（bridge ready 后）经控制面调用沙箱既有 sync 服务同步，见 [14 §4](./14-user-profile-sync.md)；本行 v1 结论保留） |
+| setting / OAuth / credential / coding-plan / usage 等账号服务              | **host 本体自带**（[12](./12-account-domain.md) §1.2/§4，零新增装配） | 浏览器经 host `/ws` 拿状态/操作接口；不另建账号子系统、不把账号服务复制进沙箱                                                                                                                                    |
+| provider provisioning target                                               | 云服务端（host 本体 + cloud 层）→ 沙箱执行节点                        | 只允许云服务端内部装配调用；Browser不可通过频道名调用                                                                                                                                                            |
+| native windows/dialog、Desktop CUA等平台服务                               | 原Desktop平台                                                         | 云Web使用IPlatformService适配；不伪装可用本机能力                                                                                                                                                                |
 
 云 Task 列表来自控制面 metadata，不调用远端 `zcodeTaskService.listTasks` 作为产品 Task 注册表。既有 zcode-task/session/index 是远端 runtime 会话投影，cloud taskId 与 runtimeSessionId 建显式映射，不能因当前名词相近而共用主键/状态所有者。
 
@@ -178,12 +178,12 @@ M2 的无页面 ready 验证是节点能力/技术试验；公开接收与执行
 
 M2/M3新增云执行节点assembly/authority，具体schema纳入`packages/shared/src/serviceAuthority.ts`并同步现有解析/门禁，不能默认为desktop-local。节点获得只读、版本化账号policy snapshot和最小provider授权；本地服务端responder无需浏览器在线。
 
-| 请求                                           | 云方案应答方                           | 离线规则                                               |
-| ---------------------------------------------- | -------------------------------------- | ------------------------------------------------------ |
-| runtime preferences / shell / memory /预算策略 | 执行节点从已授权configVersion快照应答  | 保留运行轮配置；新配置需服务器签发，不能取页面本地值   |
-| provider/model配置与运行时headers              | 服务端账号授权 + 执行节点受控安装/刷新 | 已有授权可按明确TTL运行；过期fail closed并暴露原因     |
-| permission/interaction                         | runtime是决定owner；授权客户端响应     | 无客户端保持pending或既定runtime策略，不由控制面自批准 |
-| local path/file/terminal能力                   | 执行节点服务                           | 断连返回unavailable，不在控制面执行                    |
+| 请求                                           | 云方案应答方                           | 离线规则                                                                                                                                |
+| ---------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| runtime preferences / shell / memory /预算策略 | 执行节点从已授权configVersion快照应答  | 保留运行轮配置；新配置需服务器签发，不能取页面本地值（2026-10-11 起：快照实值化落地见 [14 §6](./14-user-profile-sync.md)；v1 划分不变） |
+| provider/model配置与运行时headers              | 服务端账号授权 + 执行节点受控安装/刷新 | 已有授权可按明确TTL运行；过期fail closed并暴露原因                                                                                      |
+| permission/interaction                         | runtime是决定owner；授权客户端响应     | 无客户端保持pending或既定runtime策略，不由控制面自批准                                                                                  |
+| local path/file/terminal能力                   | 执行节点服务                           | 断连返回unavailable，不在控制面执行                                                                                                     |
 
 Config version属于Run已应用配置，设置存储属于账号；不能建多个互相广播的权威写路径。Cloud responder与Desktop现有Host responder分开装配，回环/回写由版本与明确所有者防止。
 

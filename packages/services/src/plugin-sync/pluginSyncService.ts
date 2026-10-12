@@ -29,6 +29,10 @@ import {
 } from "./pluginSyncArchive.js";
 import { normalizePluginSyncRelativePath, resolvePluginSyncPathWithin } from "./pluginSyncPath.js";
 import { checkRemoteSyncDirectoriesWriteAccess } from "../remote-sync/remoteSyncWriteAccess.js";
+import { createUserArchiveImportSession } from "../remote-sync/userArchiveImportSession.js";
+import { createServiceLogger } from "../logger/serviceLogger.js";
+
+const log = createServiceLogger("plugin-sync");
 
 interface PluginManifestInfo {
   name: string;
@@ -84,6 +88,17 @@ export function createPluginSyncService(options?: {
   maxArchiveBytes?: number;
 }): IPluginSyncService {
   const maxArchiveBytes = options?.maxArchiveBytes ?? DEFAULT_MAX_ARCHIVE_BYTES;
+  // 分块导入会话（14 §4.4）：与 skill-sync 同一状态机实现（shared 契约同源），
+  // complete 组装出的字节直接交给 runImportPluginsArchive（与 importPluginsArchive 同一实现）。
+  const archiveImportSessions = createUserArchiveImportSession({
+    label: "plugin-sync",
+    maxArchiveBytes,
+    onSessionDiscarded: (info) => {
+      // 正常完成（completed）不记；异常释放留一条调试诊断，不带归档正文（14 §5）。
+      if (info.reason === "completed") return;
+      log.debug(undefined, "user archive import session discarded", info);
+    },
+  });
   return {
     async listLocalUserPluginCandidates() {
       return {
@@ -185,12 +200,22 @@ export function createPluginSyncService(options?: {
       if (params.overwrite) {
         throw new Error("plugin sync overwrite is not supported");
       }
-      if (params.archive.byteLength > maxArchiveBytes) {
-        throw new Error(
-          `plugin sync archive exceeds limit: ${params.archive.byteLength}/${maxArchiveBytes}`,
-        );
-      }
-      return await importPluginsArchive(params.archive, maxArchiveBytes);
+      return await runImportPluginsArchive(params.archive, maxArchiveBytes);
+    },
+    // ── 分块导入（14 §4.4）：形状与 skill-sync 同款（shared 契约单一来源）；
+    // complete 委派既有 importPluginsArchive，不新增第二份解包/校验实现。
+    async beginUserArchiveImport(params) {
+      return await archiveImportSessions.begin(params);
+    },
+    async appendUserArchiveImportChunk(params) {
+      return await archiveImportSessions.append(params);
+    },
+    async completeUserArchiveImport(params) {
+      const archive = await archiveImportSessions.complete(params);
+      return await runImportPluginsArchive(archive, maxArchiveBytes);
+    },
+    async abortUserArchiveImport(params) {
+      return await archiveImportSessions.abort(params);
     },
     async checkRemoteUserPluginWriteAccess() {
       return checkRemoteSyncDirectoriesWriteAccess([
@@ -210,6 +235,17 @@ export function createPluginSyncService(options?: {
       return await importMarketplaceSourceArchiveInternal(params.archive, maxArchiveBytes);
     },
   };
+}
+
+/** `importPluginsArchive` 与分块导入 complete 的共用实现：上限检查 + 既有导入链路。 */
+async function runImportPluginsArchive(
+  archive: Uint8Array,
+  maxArchiveBytes: number,
+): Promise<PluginSyncImportResult> {
+  if (archive.byteLength > maxArchiveBytes) {
+    throw new Error(`plugin sync archive exceeds limit: ${archive.byteLength}/${maxArchiveBytes}`);
+  }
+  return await importPluginsArchive(archive, maxArchiveBytes);
 }
 
 function resolveUserHomeDir(): string {

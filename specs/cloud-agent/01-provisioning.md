@@ -200,7 +200,7 @@ Daytona 分别定义生命周期、自动停止与 wall-clock TTL，需核实实
 
 ### 6.1 环境
 
-模板预置git、CA、Node（当前 `mise.toml` 为24.14.0）、兼容CLI和supervisor/bridge；不带repo、用户设置、App key、模型凭据、MCP token、登录缓存。目标资源2vCPU/4GiB RAM/10GiB磁盘，按provider能力显式收敛；这是待基准测试的配置，不是已验证的OOM数据。
+模板预置git、CA、Node（当前 `mise.toml` 为24.14.0）、兼容CLI和supervisor/bridge；不带repo、用户设置、App key、模型凭据、MCP token、登录缓存。目标资源2vCPU/4GiB RAM/10GiB磁盘，按provider能力显式收敛；这是待基准测试的配置，不是已验证的OOM数据。（2026-10-11 起：M8 用户资源同步见 [14](./14-user-profile-sync.md) §4——用户级资源仍**不经模板**，改由 Run 连接期（bridge ready 后）经控制面调用沙箱既有 sync 服务同步 profile；同日简化定调后原"自举安装"设计已退役（[14 §9.5](./14-user-profile-sync.md)）。本段"模板不带用户设置"结论与 MCP token 凭据边界保留。）
 
 记录templateRevision、CLI build、protocolVersion、OS/arch和资源。先制模板并验证，再启用adapter；版本不兼容fail-closed。模板构建命令、SDK依赖在M2进入实际package.json后才写成可用命令。
 
@@ -228,13 +228,13 @@ SSH 作为 Desktop 本机/远控连接继续走现有 backend/deploy，不经 Sa
 
 ### 7.1 授权与存放
 
-| 秘密                                      | 所有者                                                                                                                                                      | 沙箱权限                                     |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| Provider API key、App私钥、webhook secret | 模型/provider 凭据与账号凭据归 host 本体 credentialService（envelope 只读快照）；GitHub App 私钥与 webhook secret 归 cloud 层部署秘密加载器；配置只保存引用 | 无                                           |
-| GitHub installation token                 | 控制面worker / 临时broker内存                                                                                                                               | 按单repo、read/write分开的grant按需领取      |
-| 模型API key / OAuth request auth          | principal选定的provider connection                                                                                                                          | 优先代理；直连仅注入本任务选定的最小秘密     |
-| MCP / registry / 依赖凭据                 | 显式授权的task manifest                                                                                                                                     | 默认空；purpose/origin/工具/run白名单        |
-| bootstrap/reconnect ticket                | 控制面认证owner                                                                                                                                             | run/runGeneration/期限绑定，不是一般用户权限 |
+| 秘密                                      | 所有者                                                                                                                                                      | 沙箱权限                                                                                                                                      |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Provider API key、App私钥、webhook secret | 模型/provider 凭据与账号凭据归 host 本体 credentialService（envelope 只读快照）；GitHub App 私钥与 webhook secret 归 cloud 层部署秘密加载器；配置只保存引用 | 无                                                                                                                                            |
+| GitHub installation token                 | 控制面worker / 临时broker内存                                                                                                                               | 按单repo、read/write分开的grant按需领取                                                                                                       |
+| 模型API key / OAuth request auth          | principal选定的provider connection                                                                                                                          | 优先代理；直连仅注入本任务选定的最小秘密                                                                                                      |
+| MCP / registry / 依赖凭据                 | 显式授权的task manifest（2026-10-11 起：M8 来源=控制面用户资源 profile，按任务授权，见 [14](./14-user-profile-sync.md) §5；本行 v1 结论保留）               | 默认空；purpose/origin/工具/run白名单（M8 起按任务授权从 profile 同步进沙箱，purpose/origin 语义保留；见 [14](./14-user-profile-sync.md) §5） |
+| bootstrap/reconnect ticket                | 控制面认证owner                                                                                                                                             | run/runGeneration/期限绑定，不是一般用户权限                                                                                                  |
 
 按白名单读 `ICredentialService`（就是 host 本体的既有实现，云服务端数据目录指向云持久卷），禁止复制 credentials.json、settings 全表、store 或 App 私钥。云侧部署秘密（auth token、App 私钥）与账号凭据分开管理，备份加密密钥与数据库分开存放。
 

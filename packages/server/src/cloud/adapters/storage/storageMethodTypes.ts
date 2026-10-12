@@ -27,6 +27,13 @@ import type {
   TaskRepo,
 } from "../../app/ports/storagePort.js";
 import type { OperationOutboxPort } from "../../app/ports/operationOutboxPort.js";
+import type {
+  UserProfileDeleteResult,
+  UserProfileSetEnabledResult,
+  UserProfileStorePort,
+  UserProfileUpsertRequest,
+  UserProfileUpsertResult,
+} from "../../app/ports/userProfileStorePort.js";
 import type { GitGrantRecord, GitGrantStore } from "../../app/ports/gitGrantPort.js";
 import type { GitHubEffectStore, LeasedGitHubEffect } from "../../app/ports/gitHubEffectPort.js";
 import type {
@@ -35,6 +42,7 @@ import type {
   CloudTaskArtifactRecord,
   CloudTaskInputRecord,
   CloudTaskRecord,
+  CloudUserProfileCategory,
 } from "@zcode/shared";
 import type {
   AttachmentObjectRecord,
@@ -153,6 +161,36 @@ export interface StorageMethodTable {
   };
   "storage.acceptInput": { params: AcceptInputRequest; result: AcceptInputResult };
   "storage.readiness": { params: undefined; result: StorageDbReadiness };
+
+  // ── 用户资源 profile（M8；14 §9.2①/§9.4；owner = 账号域）──
+  "userProfile.snapshot": {
+    params: undefined;
+    result: Awaited<ReturnType<UserProfileStorePort["snapshot"]>>;
+  };
+  "userProfile.readVersion": {
+    params: { profileVersion: number };
+    result: Awaited<ReturnType<UserProfileStorePort["readVersion"]>>;
+  };
+  "userProfile.readVersionEntries": {
+    params: { profileVersion: number };
+    result: Awaited<ReturnType<UserProfileStorePort["readVersionEntries"]>>;
+  };
+  "userProfile.readEntry": {
+    params: { category: CloudUserProfileCategory; entryId: string };
+    result: Awaited<ReturnType<UserProfileStorePort["readEntry"]>>;
+  };
+  "userProfile.upsertEntry": {
+    params: UserProfileUpsertRequest;
+    result: UserProfileUpsertResult;
+  };
+  "userProfile.deleteEntry": {
+    params: { category: CloudUserProfileCategory; entryId: string; now: number };
+    result: UserProfileDeleteResult;
+  };
+  "userProfile.setEntryEnabled": {
+    params: { category: CloudUserProfileCategory; entryId: string; enabled: boolean; now: number };
+    result: UserProfileSetEnabledResult;
+  };
 
   // ── external operation outbox（03 §5、01 §5.3）──
   "operations.enqueue": MethodSignature<OperationOutboxPort["enqueue"]>;

@@ -4,6 +4,7 @@
  */
 import { cloudBridgeControlFrameSchema, type CloudBridgeControlFrame } from "@zcode/shared";
 import type { AttachmentPort, AttachmentSendResult } from "../../app/ports/attachmentPort.js";
+import type { ControlPlaneRpcPort } from "../../app/ports/controlPlaneRpcPort.js";
 import type { RuntimeCommandQueryPort } from "../../app/ports/runtimeCommandQueryPort.js";
 import type { ClockPort } from "../../app/ports/clockPort.js";
 import type { IdGeneratorPort } from "../../app/ports/idGeneratorPort.js";
@@ -75,6 +76,11 @@ export interface LiveConnection {
 export interface CloudBridgeChannel {
   readonly port: AttachmentPort;
   readonly runtimeCommands: RuntimeCommandQueryPort;
+  /**
+   * 控制面 RPC 会话端口（M8 连接期同步；14 §4.2）：app 层的用户资源同步只经它调沙箱
+   * 既有 sync 服务（`rpc.*` 帧 + `serviceScope: "control-plane"`）。
+   */
+  readonly controlPlaneRpc: ControlPlaneRpcPort;
   /**
    * 浏览器任务通道（`/ws/cloud/tasks/:taskId`）：打开一条转发到沙箱的 RPC 流。
    * 无当前连接/代际不符返回 null，调用方按 4503 结构化关闭（03 §7.1、CP-11）。

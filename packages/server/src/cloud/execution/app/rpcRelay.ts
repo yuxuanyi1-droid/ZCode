@@ -1,14 +1,23 @@
 /**
  * `rpc.*` 帧 ↔ 本地常驻 stdio client 的受控转接（specs/cloud-agent/02 §0「原 Web UI 的
- * 受控 RPC 承载」、§4 尾段，W6 §3「rpcRelay」）。
+ * 受控 RPC 承载」、§4 尾段，W6 §3「rpcRelay」；14 §4.2 `serviceScope` 分面）。
  *
  * 做法：浏览器仍是原 ChannelClient，沙箱侧为每条浏览器 streamId 建一个 ChannelServer，
  * 通道实现是**本地 stdio client 上同名 channel 的转发**——复用既有 Channel RPC 的序列化、
  * 事件与取消，不另造文件/Git/终端业务协议，也不把网络字节直通唯一 stdio 管道。
  *
+ * 分面（14 §4.2；2026-10-11 C 批定夺，`rpc.open.serviceScope` 必填）：
+ * - `"client"`（浏览器面，现状不变）：只注册 `CLOUD_ATTACHMENT_SERVICE_ALLOWLIST`；
+ * - `"control-plane"`（控制面连接期同步）：注册 `CLOUD_ATTACHMENT_SERVICE_ALLOWLIST`
+ *   **∪** `CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST`——控制面是受信基础设施，能力是浏览器面的
+ *   超集（例如命令投递复用 `zcode-agent` 通道，用户资源同步用 6 个 sync 通道）；
+ * - 无法映射到任一允许集（scope 不是上述两值）→ 拒绝该 `rpc.open`，不建会话；
+ * - denylist `CLOUD_ATTACHMENT_DENIED_SERVICE_CHANNELS`（账号域/host 本体能力）对两面都生效。
+ *
  * 边界：
- * - 通道白名单是 shared 冻结的 `CLOUD_ATTACHMENT_SERVICE_ALLOWLIST`，禁止任何一端硬编码；
- * - 明确拒绝账号域/host 本体能力（`CLOUD_ATTACHMENT_DENIED_SERVICE_CHANNELS`）；
+ * - 通道白名单是 shared 冻结的常量，禁止任何一端硬编码；
+ * - 未列出的通道名**既不注册也不代理**（不回落 host 执行域）：对已 open 的流调用只会停在
+ *   ChannelServer 的未注册通道路径（挂起至超时），不产生第二套拒绝语义；
  * - 每帧都按当前 ready attachment 校验 runId/runGeneration/connectionEpoch，旧代际帧拒绝；
  * - 连接释放只清网络侧 ChannelServer 与会话，保留 stdio/runtime（02 §3）。
  */
@@ -24,13 +33,39 @@ import {
 import {
   CLOUD_ATTACHMENT_DENIED_SERVICE_CHANNELS,
   CLOUD_ATTACHMENT_SERVICE_ALLOWLIST,
+  CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST,
   CLOUD_RPC_PROTOCOL_VERSION,
   type CloudRpcFrame,
+  type CloudRpcServiceScope,
 } from "@zcode/shared";
 import type { AttachmentContext, ExecutionLogger, RpcRelayPort } from "./ports.js";
 
 /** 单 attachment 允许同时存在的浏览器 RPC 会话上限（有界资源，02 §8）。 */
 export const MAX_RELAY_STREAMS = 32;
+
+/**
+ * `"control-plane"` 分面可触达的通道 = 浏览器面 ∪ 控制面面（14 §4.2 定夺：控制面是受信
+ * 基础设施，能力 ⊇ 浏览器）。两份白名单各自仍是 shared 单一来源，这里只做并集派生
+ * （按名字去重，避免两份表将来出现重叠时重复注册）。
+ */
+export const CLOUD_CONTROL_PLANE_SERVICE_REACHABLE_CHANNELS = Array.from(
+  new Set<string>([
+    ...CLOUD_ATTACHMENT_SERVICE_ALLOWLIST,
+    ...CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST,
+  ]),
+);
+
+/**
+ * 分面 → 该 `rpc.open` 允许注册的通道集。返回 null = 不是合法分面值（帧未经 shared schema
+ * 校验时的兜底），调用方按拒绝处理。
+ */
+export function serviceAllowlistForScope(
+  scope: CloudRpcServiceScope | undefined,
+): readonly string[] | null {
+  if (scope === "client") return CLOUD_ATTACHMENT_SERVICE_ALLOWLIST;
+  if (scope === "control-plane") return CLOUD_CONTROL_PLANE_SERVICE_REACHABLE_CHANNELS;
+  return null;
+}
 
 export type LocalChannelAccessor = (channelName: string) => IChannel | null;
 
@@ -138,6 +173,16 @@ export function createRpcRelay(options: RpcRelayOptions): RpcRelayPort {
     frame: Extract<CloudRpcFrame, { type: "rpc.open" }>,
     context: AttachmentContext,
   ): void {
+    // 分面准入（14 §4.2）：scope 决定本流可注册的通道集；无法映射即拒绝该 open
+    // （沿既有拒绝形态：warn + 不建会话，不回 close——帧本就不该走到这里）。
+    const allowlist = serviceAllowlistForScope(frame.serviceScope);
+    if (!allowlist) {
+      options.logger.warn(undefined, "rpc.open rejected: unknown service scope", {
+        streamId: frame.streamId,
+        serviceScope: String(frame.serviceScope),
+      });
+      return;
+    }
     if (sessions.size >= maxStreams) {
       options.logger.warn(undefined, "rpc relay stream limit reached", { limit: maxStreams });
       send({
@@ -173,9 +218,10 @@ export function createRpcRelay(options: RpcRelayOptions): RpcRelayPort {
     for (const channelName of CLOUD_ATTACHMENT_DENIED_SERVICE_CHANNELS) {
       server.registerChannel(channelName, denyChannel(`channel ${channelName} is not available`));
     }
-    // 白名单作为唯一注册面：未列出的名字既不注册也不代理（不回落 host 执行域）。
+    // 分面白名单作为唯一注册面：未列出的名字既不注册也不代理（不回落 host 执行域），
+    // 因此 `client` 流拿不到控制面专用 sync 通道、`control-plane` 流才拿到并集。
     let registered = 0;
-    for (const channelName of CLOUD_ATTACHMENT_SERVICE_ALLOWLIST) {
+    for (const channelName of allowlist) {
       const local = options.channel(channelName);
       if (!local) continue;
       server.registerChannel(channelName, adaptLocalChannel(local));
@@ -187,6 +233,7 @@ export function createRpcRelay(options: RpcRelayOptions): RpcRelayPort {
     options.logger.info(undefined, "rpc relay session opened", {
       streamId: frame.streamId,
       channels: registered,
+      serviceScope: frame.serviceScope,
     });
   }
 

@@ -8,6 +8,16 @@ export const ZCODE_REMOTE_HTTP_PROXY_ENV_KEY = "ZCODE_REMOTE_HTTP_PROXY";
 export const ZCODE_REMOTE_NO_PROXY_ENV_KEY = "ZCODE_REMOTE_NO_PROXY";
 export const ZCODE_AGENT_CA_CERT_ENV_KEY = "ZCODE_AGENT_CA_CERT";
 export const ZCODE_TOOL_ENV_PASSTHROUGH_ENV_KEY = "ZCODE_TOOL_ENV_PASSTHROUGH_JSON";
+/**
+ * 云执行节点（沙箱）内 `applied-policy.json` 快照的绝对路径（specs/cloud-agent 14 §6/§9.3）。
+ *
+ * 由 supervisor 装配层注入沙箱 runtime 进程（`cloud-execution` 的 `runtimeEnv`），
+ * services 侧在 `cloud-execution-node` authority 下据此应答 runtime preferences：
+ * 值来自控制面下发的偏好快照，不读沙箱自身 settingService 的默认值（07 §8 表首行）。
+ * 只是宿主内部交接的**文件路径**（不含值、不是凭据），无需传给 agent/Bash/MCP 子进程，
+ * 故同样进两张剔除表（与 `ZCODE_REMOTE_RUNTIME_NETWORK_AUTHORITY` 同款口径）。
+ */
+export const ZCODE_APPLIED_POLICY_SNAPSHOT_ENV_KEY = "ZCODE_APPLIED_POLICY_SNAPSHOT";
 /** Desktop Main 将服务端裁决的单功能灰度结果传给 Local/Remote Host。 */
 export const ZCODE_DESKTOP_CONTEXT_PROMPT_ENABLED_ENV = "ZCODE_DESKTOP_CONTEXT_PROMPT_ENABLED";
 export const ZCODE_CUA_PRODUCT_HELPER_ENV_KEY = "ZCODE_CUA_PRODUCT_HELPER";
@@ -57,6 +67,8 @@ const SANITIZED_RUNTIME_ENV_KEYS = [
   ZCODE_REMOTE_RUNTIME_NETWORK_AUTHORITY_ENV_KEY,
   ZCODE_REMOTE_HTTP_PROXY_ENV_KEY,
   ZCODE_REMOTE_NO_PROXY_ENV_KEY,
+  // 云执行节点的策略快照路径是宿主↔runtime 的内部交接（14 §6），不回传给 tool/Bash/MCP。
+  ZCODE_APPLIED_POLICY_SNAPSHOT_ENV_KEY,
   // CUA broker socket 是只该给目标 zcode-cua MCP server 的连接材料（由 desktop/CLI 在
   // 解析该 server 时定向注入其 env）。绝不能随 agent 全局 env 泄漏给其它 MCP server / Bash / tool
   // 子进程 —— 否则同 agent 内的恶意 MCP 或被 prompt-injection 触发的命令能直接驱动
@@ -104,6 +116,7 @@ const NON_TOOL_PASSTHROUGH_RUNTIME_ENV_KEYS = [
   ZCODE_REMOTE_RUNTIME_NETWORK_AUTHORITY_ENV_KEY,
   ZCODE_REMOTE_HTTP_PROXY_ENV_KEY,
   ZCODE_REMOTE_NO_PROXY_ENV_KEY,
+  ZCODE_APPLIED_POLICY_SNAPSHOT_ENV_KEY,
 ] as const;
 
 const SANITIZED_PACKAGE_MANAGER_ENV_PATTERN =

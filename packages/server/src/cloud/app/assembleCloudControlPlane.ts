@@ -61,6 +61,14 @@ import { createRunOrchestrator, type RunOrchestrator } from "./runOrchestrator.j
 import { createCloudGitGrantService, type CloudGitGrantService } from "./gitGrants.js";
 import { createTaskDetailService, type TaskDetailService } from "./taskDetail.js";
 import { createTaskService, type TaskService } from "./taskService.js";
+import {
+  createUserProfileService,
+  type UserProfileService,
+} from "./userProfile/userProfileService.js";
+import {
+  createProfileSyncService,
+  type ProfileSyncService,
+} from "./userProfile/profileSyncService.js";
 
 /** `capabilitiesResponseSchema.providers` 的元素形状（shared 的 provider 能力声明）。 */
 export interface CloudProviderCapability extends SandboxDriverCapabilities {
@@ -88,6 +96,13 @@ export interface CloudControlPlane {
   router: CloudCommandRouter;
   watchdog: HeartbeatWatchdog;
   runs: RunOrchestrator;
+  /** 用户资源 profile 用例（M8；14 §9.2①）：HTTP 端点唯一入口。 */
+  userProfile: UserProfileService;
+  /**
+   * 连接期用户资源同步（M8；14 §4.6）：`bridge.ready` 后的自动触发与手动端点共用同一
+   * 执行器；失败不 fail run。
+   */
+  userProfileSync: ProfileSyncService;
   provisioning: {
     create: CreateOperationRunner;
     readiness: ReadinessWatchdog;
@@ -137,6 +152,7 @@ export function assembleCloudControlPlane(
       ? { sandboxRuntimeSettings: input.sandboxRuntimeSettings }
       : {}),
     attachments: input.attachments,
+    ...(input.controlPlaneRpc ? { controlPlaneRpc: input.controlPlaneRpc } : {}),
     ...(input.browserWatch ? { browserWatch: input.browserWatch } : {}),
     runtimeCommands: input.runtimeCommands,
     clock: input.clock,
@@ -151,6 +167,8 @@ export function assembleCloudControlPlane(
     ...(input.provisioningEnvelope ? { provisioningEnvelope: input.provisioningEnvelope } : {}),
     ...(input.gitGrantStore ? { gitGrantStore: input.gitGrantStore } : {}),
     ...(input.gitGrantBroker ? { gitGrantBroker: input.gitGrantBroker } : {}),
+    ...(input.userProfile ? { userProfile: input.userProfile } : {}),
+    ...(input.userPreferences ? { userPreferences: input.userPreferences } : {}),
   };
 
   const registry = options.registry ?? createAttachmentRegistry();
@@ -185,6 +203,8 @@ export function assembleCloudControlPlane(
   const history = createProjectionHistoryService(deps);
   const reconciler = createStartupReconciler(deps, runs);
   const credentials = createRunAuthorizationPolicy(deps);
+  const userProfile = createUserProfileService(deps);
+  const userProfileSync = createProfileSyncService(deps, registry);
 
   return {
     config: deps.config,
@@ -219,6 +239,8 @@ export function assembleCloudControlPlane(
     router,
     watchdog,
     runs,
+    userProfile,
+    userProfileSync,
     provisioning: { create, readiness, compensation, bootstrapConfig },
     lifecycle: { keepalive, drain, checkpoints, pauseResume },
     commands: { taskLifecycle, interactions, reopen, stop },

@@ -1,14 +1,25 @@
 /**
  * bootstrap 管线（specs/cloud-agent/02 §5.3 ready 条件、01 §6.2 步骤 2–6、12 §6 envelope
- * 安装；W6 §3「bootstrap/」）。
+ * 安装；14 §6 偏好快照；W6 §3「bootstrap/」）。
  *
  * 顺序即契约：welcome 只证明认证，ready 必须逐条满足（02 §5.3）——
  *   registering → cloning → handshaking → installing-config → exporter-starting → reconciling。
  * 每一步失败都带阶段与归一错误码上报（`bridge.phase`），不存在「假 ready」；
  * clone 事实、workspacePath、envelope 全部来自已认证通道的 `bootstrap.config`，不走
  * provider env/元数据（01 §6.2、12 §6）。
+ *
+ * ready 清单里的每一项都必须是**真实证据**：`preferencesInstalled` 由偏好快照安装器的
+ * 落盘结果驱动（14 §6「凡必须有真实证据的条件不得写死 true」）。
+ *
+ * 2026-10-11 简化改造（14 §4.8/§9.5）：自举期资源安装整体退役——`bootstrap.resources` 帧、
+ * `resources-installed` 条件与 `installing-resources` 相位全部移除；用户资源同步改在
+ * **连接期**由控制面经 bridge relay 调沙箱既有 sync 服务（与 bootstrap 无关）。
  */
-import type { BootstrapConfigFrame, CloudErrorCode } from "@zcode/shared";
+import type {
+  BootstrapConfigFrame,
+  CloudBootstrapPreferences,
+  CloudErrorCode,
+} from "@zcode/shared";
 import { evaluateReady, type BootstrapPhase, type ReadyChecklist } from "../domain/readyGate.js";
 import type { ProjectionExporter } from "./projectionExporter.js";
 import type { SandboxGit } from "./sandboxGit.js";
@@ -27,8 +38,17 @@ export interface ProvisioningInstallPort {
 }
 
 export interface PolicySnapshotPort {
-  /** 安装版本化 runtime preferences/policy snapshot；执行节点自己应答，不依赖页面（07 §8）。 */
-  install(policyVersion: string): Promise<void>;
+  /**
+   * 安装版本化 runtime preferences/policy snapshot（执行节点自己应答，不依赖页面，07 §8）。
+   * `preferences` 缺席=旧版 `bootstrap.config` 语义（只记 policyVersion）；返回**实际落盘**的
+   * 已应用配置版本（真实证据，供 ready 门控与 `bridge.ready.configVersion` 上报）。
+   */
+  install(input: {
+    policyVersion: string;
+    preferences?: CloudBootstrapPreferences;
+  }): Promise<{ configVersion: string }>;
+  /** 已应用的策略快照版本（无记录/不可解析返回 null）。 */
+  applied(): Promise<{ configVersion: string } | null>;
 }
 
 export interface WorkspacePort {
@@ -56,13 +76,17 @@ export interface BootstrapOptions {
 export interface Bootstrap extends BootstrapPort {
   /** checkpoint 用的 checkout 路径与任务分支（来自最近一次 config）。 */
   checkout(): { workspacePath: string; taskBranch: string } | null;
-  /** 命令事实 / 投影 cursor 对账（02 §5.3 第 5 条）；v1 以运行端可达与 WAL 健康为证据。 */
+  /** 命令事实 / 投影 cursor 对账（02 §5.3 第 6 条）；v1 以运行端可达与 WAL 健康为证据。 */
   reconcile(): Promise<{ ok: boolean; detail?: string }>;
 }
 
 export function createBootstrap(options: BootstrapOptions): Bootstrap {
   let current: BootstrapConfigFrame | null = null;
   let installedGeneration: number | null = null;
+  /** 已落盘的偏好快照版本（真实证据；null = 未安装，ready 门控据此拒绝）。 */
+  let installedPolicyVersion: string | null = null;
+  /** 已应用的配置版本（偏好快照 configVersion；无 preferences 块时 = policyVersion）。 */
+  let appliedConfigVersion: string | null = null;
   let phase: BootstrapPhase | undefined;
   let runtimeStarted = false;
   const phaseListeners = new Set<
@@ -77,7 +101,7 @@ export function createBootstrap(options: BootstrapOptions): Bootstrap {
     }
   }
 
-  /** 命令事实 / 投影 cursor 对账（02 §5.3 第 5 条）；v1 以运行端可达与 WAL 健康为证据。 */
+  /** 命令事实 / 投影 cursor 对账（02 §5.3 第 6 条）；v1 以运行端可达与 WAL 健康为证据。 */
   async function reconcile(): Promise<{ ok: boolean; detail?: string }> {
     const facts = options.runtime.facts();
     if (facts.pid === null) return { ok: false, detail: "runtime-not-alive" };
@@ -87,6 +111,9 @@ export function createBootstrap(options: BootstrapOptions): Bootstrap {
   }
 
   async function applyConfig(config: BootstrapConfigFrame): Promise<void> {
+    // 每次自举都是新的一次尝试：真实证据标志先归零，避免上一次尝试的结论被当成当前证据。
+    installedPolicyVersion = null;
+    appliedConfigVersion = null;
     emitPhase("registering");
     await options.workspace.ensure(options.workspaceRoot);
 
@@ -135,7 +162,14 @@ export function createBootstrap(options: BootstrapOptions): Bootstrap {
       );
       installedGeneration = config.credentialGeneration;
     }
-    await options.policy.install(config.policyVersion);
+    // 偏好快照（14 §6/§9.3）：有 preferences 块就落实值 + configVersion；没有则维持
+    // 旧版语义（只记 policyVersion）。返回的是**实际落盘**的版本，供 ready 与 ready 帧上报。
+    const appliedPolicy = await options.policy.install({
+      policyVersion: config.policyVersion,
+      ...(config.preferences ? { preferences: config.preferences } : {}),
+    });
+    installedPolicyVersion = appliedPolicy.configVersion;
+    appliedConfigVersion = appliedPolicy.configVersion;
 
     emitPhase("exporter-starting");
     await options.exporter.start();
@@ -173,7 +207,9 @@ export function createBootstrap(options: BootstrapOptions): Bootstrap {
         localRuntimeHandshake: facts.pid !== null,
         provisioningInstalled:
           installedGeneration !== null || (await options.provisioning.appliedGeneration()) !== null,
-        preferencesInstalled: true,
+        // 真实证据：本次安装的落盘版本，或状态文件里既有版本（重连/既有状态）；不写死 true。
+        preferencesInstalled:
+          installedPolicyVersion !== null || (await options.policy.applied()) !== null,
         exporterReady: exporterState.exporterReady,
         walReady: exporterState.walReady,
         reconciliationDone: true,
@@ -186,7 +222,8 @@ export function createBootstrap(options: BootstrapOptions): Bootstrap {
         throw failure;
       }
       return {
-        configVersion: config.policyVersion,
+        // 已应用配置版本（14 §6）：有偏好快照时 = 快照 configVersion，否则维持 policyVersion。
+        configVersion: appliedConfigVersion ?? config.policyVersion,
         runtimeIncarnation: facts.incarnation ?? "runtime-unknown",
         executionCapabilities: [
           ...(options.executionCapabilities ?? ["stdio-rpc", "projection-wal", "checkpoint"]),

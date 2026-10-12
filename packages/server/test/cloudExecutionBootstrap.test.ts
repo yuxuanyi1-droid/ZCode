@@ -105,7 +105,12 @@ function buildBootstrap(options: {
       appliedGeneration: async () => options.appliedGeneration ?? null,
       install: async () => undefined,
     },
-    policy: { install: async () => undefined },
+    policy: {
+      install: async ({ policyVersion }: { policyVersion: string }) => ({
+        configVersion: policyVersion,
+      }),
+      applied: async () => null,
+    },
     workspace,
     exporter: {
       ...exporter,
@@ -495,9 +500,11 @@ test("自举配置：缺 taskId/workspacePath 时 fail closed，不编造占位�
 test("policy snapshot 安装：落盘版本化摘要，可被后续读取", async () => {
   const stateDir = await mkdtemp(join(tmpdir(), "w6-policy-"));
   const policy = createPolicySnapshotInstaller({ logger: testLogger(), stateDir });
-  await policy.install("policy-9");
+  const applied = await policy.install({ policyVersion: "policy-9" });
+  assert.deepEqual(applied, { configVersion: "policy-9" });
   const raw = await readFile(join(stateDir, "applied-policy.json"), "utf8");
   assert.deepEqual(JSON.parse(raw), { version: 1, policyVersion: "policy-9" });
+  assert.deepEqual(await policy.applied(), { configVersion: "policy-9" });
 });
 
 test("bootstrap 端口与假件保持接口一致（防止测试假件漂移）", () => {

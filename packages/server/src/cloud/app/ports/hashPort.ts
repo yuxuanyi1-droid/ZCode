@@ -7,4 +7,11 @@
  */
 export interface HashPort {
   sha256Hex(value: string): Promise<string>;
+  /**
+   * 任意字节的 sha256（M8 连接期同步的归档分块/整包摘要，14 §4.4）。
+   *
+   * 字符串形态的 `sha256Hex` 会把二进制按 UTF-8 摘要，不能用于归档字节——分块导入的
+   * `chunkSha256`/`archiveSha256` 必须按**解码后字节**逐字节摘要（与 store 派生口径一致）。
+   */
+  sha256HexBytes(bytes: Uint8Array): Promise<string>;
 }

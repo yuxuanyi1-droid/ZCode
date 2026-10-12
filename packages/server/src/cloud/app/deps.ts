@@ -8,6 +8,7 @@ import type { AttachmentPort } from "./ports/attachmentPort.js";
 import type { BrowserWatchPort } from "./ports/browserWatchPort.js";
 import type { ArtifactRead, ExecutionProjectionRead } from "./ports/projectionPort.js";
 import type { InteractionDecisionRepo } from "./ports/inputPort.js";
+import type { ControlPlaneRpcPort } from "./ports/controlPlaneRpcPort.js";
 import type { GitGrantBrokerPort } from "./ports/gitGrantBrokerPort.js";
 import type { GitGrantStore } from "./ports/gitGrantPort.js";
 import type { ProvisioningEnvelopeSource } from "./ports/provisioningEnvelopePort.js";
@@ -21,6 +22,8 @@ import type { RuntimeCommandQueryPort } from "./ports/runtimeCommandQueryPort.js
 import type { SandboxDriverRegistryPort } from "./ports/sandboxDriverRegistryPort.js";
 import type { SandboxRuntimeSettingsPort } from "./ports/sandboxRuntimeSettingsPort.js";
 import type { StoragePort } from "./ports/storagePort.js";
+import type { UserPreferencesPort } from "./ports/userPreferencesPort.js";
+import type { UserProfileStorePort } from "./ports/userProfileStorePort.js";
 import type { CloudCoreConfig } from "./config.js";
 
 export interface CloudCoreDeps {
@@ -40,6 +43,12 @@ export interface CloudCoreDeps {
   sandboxRuntimeSettings?: SandboxRuntimeSettingsPort;
   /** 控制面 → attachment（02 §6.1 唯一投递出口）。 */
   attachments: AttachmentPort;
+  /**
+   * 控制面 RPC 会话（M8；14 §4.2/§4.6）：连接期用户资源同步经它调沙箱既有 sync 服务
+   * （`rpc.*` 帧 + `serviceScope: "control-plane"`）。未接线（测试/嵌入装配）时同步
+   * 按 `not_configured` fail-closed，不伪造成功；其它控制面功能不受影响。
+   */
+  controlPlaneRpc?: ControlPlaneRpcPort;
   /**
    * 浏览器观看事实（08 §7 空闲 pause 的连接条件）：该 run 是否有打开的
    * `/ws/cloud/tasks/:taskId` 观看流。未接线（测试/嵌入装配）视为无人观看，
@@ -77,4 +86,15 @@ export interface CloudCoreDeps {
   gitGrantStore?: GitGrantStore;
   /** git grant 的 token 机制（W4 broker）：mint / 单次兑换 CAS / TTL / 撤销。 */
   gitGrantBroker?: GitGrantBrokerPort;
+  /**
+   * 用户资源 profile store（M8；14 §9.2①）：上传用例与连接期同步都经它。
+   * 未接线（测试/嵌入装配）时上传端点按 `not_configured`(503) fail-closed，不伪装空
+   * profile。
+   */
+  userProfile?: UserProfileStorePort;
+  /**
+   * 账号行为偏好读取（M8；14 §6/§9.2⑥）：`bootstrap.config.preferences` 的唯一来源。
+   * 未接线时不下发 `preferences` 块、不 fail（偏好缺失不是 run 失败条件）。
+   */
+  userPreferences?: UserPreferencesPort;
 }

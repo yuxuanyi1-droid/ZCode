@@ -1,14 +1,18 @@
 /**
  * Cloud 端点矩阵、通道分面、wire 协议版本与错误码 → HTTP 状态映射（specs/cloud-agent
  * 03 §6 端点表、§7.1 两个服务通道分面、02 §0 沙箱 attachment 白名单、07 §9 执行节点
- * 端点、09 §2.2 installation 对账）。
+ * 端点、09 §2.2 installation 对账、14 §4.2 控制面专用白名单）。
  *
  * 与 `http-contracts.ts` 的分工：那里冻结「请求形状」，这里冻结「有哪些端点、谁暴露
  * 什么、每个端点引用哪份 request/response schema、允许暴露哪些既有 channel」。矩阵里的
  * schema 名由 `packages/shared/test/cloudHttpContracts.test.ts` 断言可在公开入口解析到。
  */
 import { z } from "zod";
-import { ServiceChannels } from "../channels.js";
+import { CLOUD_USER_PROFILE_HTTP_ENDPOINTS } from "./userProfileEndpoints.js";
+// 沙箱通道白名单落到独立文件（行数门禁，同 userProfileEndpoints.ts 的做法）；导出名与
+// 公共入口不变，浏览器面与控制面面两份白名单仍在该文件内一同冻结（14 §4.2）。
+export * from "./serviceChannelAllowlists.js";
+import { CLOUD_ATTACHMENT_SERVICE_ALLOWLIST } from "./serviceChannelAllowlists.js";
 
 // ── wire 协议版本（W7 CR-1；00 §8 独立版本化）──
 //
@@ -31,47 +35,11 @@ export function isSupportedCloudWireProtocolVersion(value: number): boolean {
   return (CLOUD_WIRE_PROTOCOL_SUPPORTED_VERSIONS as readonly number[]).includes(value);
 }
 
-// ── 沙箱 attachment 的白名单（02 §0、03 §7.1）──
+// ── 沙箱 attachment 的白名单（02 §0、03 §7.1、14 §4.2）──
 //
-// 通道名、命令名与帧事件名一律沿用既有 V4 协议（`ServiceChannels`），云侧只冻结
-// 「允许经 attachment 暴露哪些 channel」，禁止 UI/SDK/服务端各自硬编码字符串。
-// 账号域 channel 只在 host `/ws` 暴露，沙箱通道不得借用。
-
-/** 允许经 `/ws/cloud/tasks/:taskId` 暴露的执行域 channel（既有 V4 名，不另造）。 */
-export const CLOUD_ATTACHMENT_SERVICE_ALLOWLIST = [
-  ServiceChannels.File,
-  ServiceChannels.FileWatcher,
-  ServiceChannels.MediaPreview,
-  ServiceChannels.Git,
-  ServiceChannels.GitCheckpoint,
-  ServiceChannels.System,
-  ServiceChannels.Terminal,
-  ServiceChannels.ZCodeAgent,
-  ServiceChannels.ZCodeSession,
-] as const;
-
-export type CloudAttachmentServiceChannel = (typeof CLOUD_ATTACHMENT_SERVICE_ALLOWLIST)[number];
-
-/**
- * 显式拒绝的 channel：账号域与 host 本体能力（登录/凭据/套餐/模型目录/provider
- * provisioning target）只在 host `/ws` 提供；浏览器在 host 通道已认证也不放宽本通道
- * （03 §7.1、12 §5）。
- */
-export const CLOUD_ATTACHMENT_DENIED_SERVICE_CHANNELS = [
-  ServiceChannels.OAuth,
-  ServiceChannels.Credential,
-  ServiceChannels.UsageStats,
-  ServiceChannels.Setting,
-  ServiceChannels.ProviderSettings,
-  ServiceChannels.ModelSelection,
-  ServiceChannels.ProviderProvisioningTarget,
-  ServiceChannels.CodingPlanSubscription,
-  ServiceChannels.ClientConfig,
-] as const;
-
-export function isCloudAttachmentServiceAllowed(channelName: string): boolean {
-  return (CLOUD_ATTACHMENT_SERVICE_ALLOWLIST as readonly string[]).includes(channelName);
-}
+// 白名单常量与 denylist 定义在 `serviceChannelAllowlists.ts`（上方 `export *` 转出；
+// 行数门禁搬迁，事实源仍是一份）：浏览器面 `CLOUD_ATTACHMENT_SERVICE_ALLOWLIST`、
+// 控制面面 `CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST`（随 `rpc.open.serviceScope` 分面）。
 
 // ── 两个服务通道的分面（03 §7.1，决议⑧）──
 //
@@ -130,7 +98,8 @@ export type CloudEndpointAvailability = "available" | "not_configured" | "not_im
 /** 端点矩阵条目：request/response 为对应 schema 常量名，null 表示 W0 未冻结形状。 */
 export interface CloudHttpEndpointDescriptor {
   readonly id: string;
-  readonly method: "GET" | "POST" | "PATCH" | "DELETE";
+  /** `PUT` 为 M8 profile 条目上传冻结（幂等整条替换，14 §9.1）；矩阵行随 P19 登记。 */
+  readonly method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   readonly path: string;
   readonly request: string | null;
   readonly response: string | null;
@@ -403,6 +372,10 @@ export const CLOUD_HTTP_ENDPOINTS: readonly CloudHttpEndpointDescriptor[] = [
     null,
     "bootstrap/runtime bundle 分发；版本/hash 清单校验（01 §6）",
   ),
+  // 用户资源 profile（M8；14 §9.2⑦/§9.4）：行数据在 userProfileEndpoints.ts（路径常量在
+  // user-profile.ts），本数组仍是唯一注册表；快照/版本响应永不含归档正文（14 §5），
+  // 条目回显 GET 是 HTTP 面唯一的正文出口（14 §9.4①）。
+  ...CLOUD_USER_PROFILE_HTTP_ENDPOINTS,
 ];
 
 /** 端点矩阵按 id 反查（W1–W9 与测试共用的唯一来源）。 */
@@ -421,6 +394,11 @@ export const CLOUD_ERROR_HTTP_STATUS: Readonly<Record<string, number>> = {
   invalid_ref: 400,
   unsupported_template: 400,
   resource_unsupported: 400,
+  // 用户资源 profile 上传（14 §9.1）：条目/请求体超限 413；内容非法 400；总量与条目数超限 409。
+  payload_too_large: 413,
+  invalid_entry: 400,
+  profile_total_exceeded: 409,
+  profile_entries_exceeded: 409,
   quota_exceeded: 409,
   budget_exceeded: 409,
   provider_create_unknown: 502,

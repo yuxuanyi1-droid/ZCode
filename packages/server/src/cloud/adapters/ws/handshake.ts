@@ -4,6 +4,8 @@
  *
  * 顺序固定：`hello`（凭据 hash 兑换 + epoch 接管）→ `welcome` → `bootstrap.config` → `ready`。
  * 任何一步失败都 fail-closed：不发布 ready、不用旧凭据重试，等下一次连接重装。
+ * 用户资源不在此下发（14 §4.8 自举期安装退役）：连接建立（`bridge.ready`）后由
+ * `userProfileSync` 走 `rpc.*` 帧同步（14 §4.6）。
  */
 import type { CloudBridgeControlFrame, CloudRunAddress } from "@zcode/shared";
 import {

@@ -6,7 +6,13 @@
  * 这样 B-03/B-04/B-05 才能真正验证 bridge 的客户端恢复契约，而不是自证。
  */
 import { createHash, randomUUID } from "node:crypto";
-import type { BootstrapConfigFrame, CloudBridgeControlFrame, CloudRpcFrame } from "@zcode/shared";
+import type {
+  BootstrapConfigFrame,
+  CloudBootstrapPreferences,
+  CloudBridgeControlFrame,
+  CloudRpcFrame,
+  CloudRpcServiceScope,
+} from "@zcode/shared";
 import {
   CLOUD_BRIDGE_PROTOCOL_VERSION,
   cloudBridgeControlFrameSchema,
@@ -144,6 +150,8 @@ export interface FakeControlPlaneOptions {
   repositoryFullName?: string;
   baseSha?: string;
   taskBranch?: string;
+  /** 每次 attach 下发的 `bootstrap.config.preferences`（14 §6 偏好快照块）。 */
+  preferences?: CloudBootstrapPreferences;
 }
 
 export interface RecordedHello {
@@ -163,6 +171,8 @@ export class FakeControlPlane {
   readonly attachments: { epoch: number; attemptId: string; rotationId: string; socket: number }[] =
     [];
   readonly rejectedFrames: { frame: unknown; reason: string }[] = [];
+  /** 每次 connect 建立的控制面侧句柄（测试可主动断连以验证重连语义）。 */
+  readonly sockets: ReturnType<typeof createMemoryConnectionPair>["controlSide"][] = [];
   private currentHash: string;
   private candidateHash: string | null = null;
   private attempt: { id: string; rotationId: string; candidateHash: string } | null = null;
@@ -358,6 +368,8 @@ export class FakeControlPlane {
       this.bootstrapped = true;
       control.send(this.bootstrapConfig());
     }
+    // 2026-10-11 简化改造：`bootstrap.resources` 帧已退役（14 §4.8），自举期不再下发资源；
+    // 用户资源同步改在连接期由控制面经 bridge relay 调沙箱既有 sync 服务（14 §4）。
   }
 
   bootstrapConfig(): BootstrapConfigFrame {
@@ -375,6 +387,7 @@ export class FakeControlPlane {
       provisioningEnvelopeJson: JSON.stringify({ version: 1, providers: [] }),
       credentialGeneration: 1,
       policyVersion: "policy-1",
+      ...(this.options.preferences ? { preferences: this.options.preferences } : {}),
     };
   }
 
@@ -384,6 +397,7 @@ export class FakeControlPlane {
       connect: async () => {
         const pair = createMemoryConnectionPair();
         const socket = ++this.socketCounter;
+        this.sockets.push(pair.controlSide);
         pair.controlSide.onFrame((frame) => this.handle(frame, pair.controlSide, socket));
         return pair.bridgeSide;
       },
@@ -391,6 +405,10 @@ export class FakeControlPlane {
   }
 }
 
+/**
+ * 内存 rpc 帧构造：`rpc.open` 必带 `serviceScope`（14 §4.2；默认 `"client"` = 浏览器面，
+ * 与浏览器转发路径一致），request/close 不带 scope（按已 open 的流校验）。
+ */
 export function memoryRpcFrame(
   type: "rpc.open" | "rpc.request" | "rpc.close",
   input: {
@@ -399,6 +417,7 @@ export function memoryRpcFrame(
     connectionEpoch: number;
     streamId: string;
     payload?: string;
+    serviceScope?: CloudRpcServiceScope;
   },
 ): CloudRpcFrame {
   const base = {
@@ -410,6 +429,13 @@ export function memoryRpcFrame(
   };
   if (type === "rpc.request") {
     return { ...base, type, payload: input.payload ?? "" } as CloudRpcFrame;
+  }
+  if (type === "rpc.open") {
+    return {
+      ...base,
+      type,
+      serviceScope: input.serviceScope ?? "client",
+    } as CloudRpcFrame;
   }
   return { ...base, type } as CloudRpcFrame;
 }

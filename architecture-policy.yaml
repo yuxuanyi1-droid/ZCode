@@ -38,6 +38,8 @@ modules:
     roots: [packages/server/src/cloud]
     managed: true
     requires: [shared, rpc, services, server, cloud-execution]
+    # 2026-10-11 简化定调（14 §4.8）：`bootstrap.resources` 退役，执行节点复用 bundle
+    # schema 的窄入口 `userProfileBundleContract.ts` 一并删除，本模块只剩单一公开契约。
     publicEntrypoints: [packages/server/src/cloud/contract.ts]
     layers: { domain: domain, app: app, adapters: adapters }
     layerOrder: [domain, app, adapters]

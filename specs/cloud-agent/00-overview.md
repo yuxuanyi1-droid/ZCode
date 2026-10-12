@@ -18,6 +18,8 @@
 
 首版不包含 Android 推送、iOS、沙箱快照恢复、多 Agent 共享 checkout、任务共享/RBAC、任意第三方 Git 托管平台。云客户端只有 Web（含手机浏览器）；Android 壳与 Desktop 云入口已按 2026-10-06 决议移除，见 §11 决议记录⑥。
 
+（2026-10-11 起：M8）云模式下的**用户级资源与设置同步**（MCP servers、skills、自定义命令、plugins、subagents、用户全局 `AGENTS.md`、agent 行为偏好）列为**独立里程碑 M8** 的目标设计，见 [14-user-profile-sync.md](./14-user-profile-sync.md) 与 [W11](./modules/W11-user-profile-sync.md)：控制面持有用户资源 profile，Run **连接期**（bridge ready 后）经控制面调用沙箱既有 sync 服务自动同步一次、连接态可手动同步（2026-10-11 简化定调，原"自举安装"设计已退役，见 [14 §4/§9.5](./14-user-profile-sync.md)）。本节（含上段不包含项）的首版范围结论**不被推翻**，M8 是其后的追加任务；实施前先按 [13 §5](./13-module-map.md) 扩展 W0 契约冻结。
+
 ## 2. 当前源码基线
 
 | 当前源码                                                                   | 可复用能力                                  | 尚未具备的云能力                                                                          |
@@ -152,22 +154,23 @@ sandbox provider 已拍板（2026-10-05）：首期同时实现 E2B、Modal、Da
 
 ## 10. 索引与冻结规则
 
-| 文档                                                             | 唯一负责的细节                                               |
-| ---------------------------------------------------------------- | ------------------------------------------------------------ |
-| [01-provisioning.md](./01-provisioning.md)                       | driver、bootstrap、创建执行、凭据、资源                      |
-| [02-bridge-protocol.md](./02-bridge-protocol.md)                 | 握手、ACK、fencing、重连、durable ingest                     |
-| [03-control-plane.md](./03-control-plane.md)                     | 服务装配、数据库、HTTP/WS、鉴权、恢复                        |
-| [04-web-client.md](./04-web-client.md)                           | 交互、hook、客户端投影、移动布局                             |
-| [05-android-shell.md](./05-android-shell.md)                     | 已移除（2026-10-06 决议⑥）：文件保留为历史记录，不构成路线图 |
-| [06-removal-docker-wsl.md](./06-removal-docker-wsl.md)           | 原子删除、旧身份兼容、宿主保留                               |
-| [07-connection-architecture.md](./07-connection-architecture.md) | 拓扑、连接owner、RPC/投影通路                                |
-| [08-project-task-model.md](./08-project-task-model.md)           | 数据模型、状态、生命周期、恢复                               |
-| [09-github-integration.md](./09-github-integration.md)           | 分支、PR、webhook、权限、撤权                                |
-| [10-implementation-plan.md](./10-implementation-plan.md)         | PR 拆分、依赖、验收、迁移、运行与验证                        |
-| [11-project-task-creation.md](./11-project-task-creation.md)     | 仓库项目、草稿配置、首次启动流程与专项验收                   |
-| [12-account-domain.md](./12-account-domain.md)                   | 账号域云适配：登录、套餐、套餐模型进沙箱（决议⑦）            |
-| [13-module-map.md](./13-module-map.md)                           | 模块地图、依赖矩阵、代理分工波次与工作单规范                 |
-| [modules/W0–W10](./modules/W0-contract-freeze.md)                | 按模块的实施工作单：每个代理的输入、接口、边界与验收         |
+| 文档                                                             | 唯一负责的细节                                                          |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| [01-provisioning.md](./01-provisioning.md)                       | driver、bootstrap、创建执行、凭据、资源                                 |
+| [02-bridge-protocol.md](./02-bridge-protocol.md)                 | 握手、ACK、fencing、重连、durable ingest                                |
+| [03-control-plane.md](./03-control-plane.md)                     | 服务装配、数据库、HTTP/WS、鉴权、恢复                                   |
+| [04-web-client.md](./04-web-client.md)                           | 交互、hook、客户端投影、移动布局                                        |
+| [05-android-shell.md](./05-android-shell.md)                     | 已移除（2026-10-06 决议⑥）：文件保留为历史记录，不构成路线图            |
+| [06-removal-docker-wsl.md](./06-removal-docker-wsl.md)           | 原子删除、旧身份兼容、宿主保留                                          |
+| [07-connection-architecture.md](./07-connection-architecture.md) | 拓扑、连接owner、RPC/投影通路                                           |
+| [08-project-task-model.md](./08-project-task-model.md)           | 数据模型、状态、生命周期、恢复                                          |
+| [09-github-integration.md](./09-github-integration.md)           | 分支、PR、webhook、权限、撤权                                           |
+| [10-implementation-plan.md](./10-implementation-plan.md)         | PR 拆分、依赖、验收、迁移、运行与验证                                   |
+| [11-project-task-creation.md](./11-project-task-creation.md)     | 仓库项目、草稿配置、首次启动流程与专项验收                              |
+| [12-account-domain.md](./12-account-domain.md)                   | 账号域云适配：登录、套餐、套餐模型进沙箱（决议⑦）                       |
+| [13-module-map.md](./13-module-map.md)                           | 模块地图、依赖矩阵、代理分工波次与工作单规范                            |
+| [14-user-profile-sync.md](./14-user-profile-sync.md)             | 用户资源与设置同步（M8）：profile、连接期同步通路、偏好快照             |
+| [modules/W0–W11](./modules/W0-contract-freeze.md)                | 按模块的实施工作单：每个代理的输入、接口、边界与验收（W11 = M8，见 14） |
 
 重叠细节以该负责文档为源，其他文档引用。改变 API、状态或术语必须同步引用方。计划测试不代表现有覆盖或已通过。实施期按 [13](./13-module-map.md) 的模块工作单分派：工作单只引用本表章节，不复制规则。
 

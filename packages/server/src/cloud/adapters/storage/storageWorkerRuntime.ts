@@ -28,6 +28,7 @@ import { attachmentRepoHandlers } from "./repositories/attachmentRepo.js";
 import { gitGrantRepoHandlers } from "./repositories/gitGrantRepo.js";
 import { githubEffectRepoHandlers } from "./repositories/githubEffectRepo.js";
 import { interactionRepoHandlers } from "./repositories/interactionRepo.js";
+import { userProfileRepoHandlers } from "./repositories/userProfileRepo.js";
 import { acceptInputHandlers } from "./repositories/acceptInput.js";
 import type {
   StorageHandlerTable,
@@ -93,6 +94,7 @@ function buildRuntime(
     ...gitGrantRepoHandlers,
     ...githubEffectRepoHandlers,
     ...interactionRepoHandlers,
+    ...userProfileRepoHandlers,
     ...acceptInputHandlers,
     "storage.readiness": () => readDbReadiness(context),
   };

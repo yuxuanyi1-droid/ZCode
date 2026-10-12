@@ -205,7 +205,52 @@ export function cloudEndpointPayload(endpointId: CloudSdkEndpointId): Record<str
         bytes: 12,
         createdAt: EPOCH_MS,
       };
+    // M8 用户资源 profile（14 §9.2⑦）：快照只含条目元数据（无正文）。
+    case "userProfile":
+      return {
+        profileVersion: 3,
+        entries: [userProfileEntry()],
+        totalBytes: 42,
+        createdAtMs: EPOCH_MS,
+      };
+    case "userProfileVersion":
+      return { profileVersion: 3 };
+    case "putUserProfileEntry":
+    // PATCH 开关与 PUT 同一响应形状（entry + profileVersion，14 §9.4①）。
+    case "patchUserProfileEntryEnabled":
+      return { entry: userProfileEntry(), profileVersion: 4 };
+    case "deleteUserProfileEntry":
+      return { profileVersion: 5 };
+    // 条目回显（14 §9.4①）：元数据 + 正文，两者类别必须一致。
+    case "readUserProfileEntry":
+      return {
+        entry: userProfileEntry(),
+        payload: { category: "mcp", config: { command: "npx" } },
+      };
+    // M8 连接期手动同步（14 §4.6）：逐条结果按 (category, entryId) 定位。
+    case "syncTaskUserProfile":
+      return {
+        runId: RUN_ID,
+        profileVersion: 3,
+        trigger: "manual",
+        results: [
+          { category: "mcp", entryId: "primary", status: "synced" },
+          { category: "agents-md", entryId: "user-agents", status: "skipped" },
+        ],
+      };
   }
+}
+
+/** profile 条目元数据 fixture（sha256 形状与 shared 严格 schema 一致）。 */
+export function userProfileEntry(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    category: "mcp",
+    entryId: "primary",
+    enabled: true,
+    sha256: "c".repeat(64),
+    bytes: 42,
+    ...overrides,
+  };
 }
 
 /** 在标准 fixture 上改写字段（畸形/边界用例）；合并只发生在 fixture 内部。 */

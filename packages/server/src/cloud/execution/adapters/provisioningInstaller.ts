@@ -86,25 +86,74 @@ export function createProvisioningInstaller(
 }
 
 /**
+ * 已应用策略快照文件路径（唯一事实源：安装器写入、`runtimeEnv` 注入给 runtime 读取、
+ * services 侧 `readRuntimePreferencesSnapshot` 消费，见 14 §6/§9.3）。
+ */
+export function appliedPolicySnapshotPath(stateDir: string = DEFAULT_RUNTIME_STATE_DIR): string {
+  return join(stateDir, "applied-policy.json");
+}
+
+/**
  * 版本化 runtime preferences/policy snapshot 安装（07 §8 表首行：执行节点自己应答，
- * 页面不承担 Host 应答）。v1 的 snapshot 内容由控制面 policyVersion 标识，本地只记录
- * 已应用版本，供运行时 responder 读取；不写入账号设置存储（避免第二条写路径）。
+ * 页面不承担 Host 应答；14 §6/§9.3 升级为**实值快照**）。
+ *
+ * 落盘格式：
+ * - v2（有 preferences 块）：`{version:2, policyVersion, configVersion, preferences:{五键}}`
+ *   —— preferences 即 `bootstrap.config.preferences.values`，沙箱 responder 从**已应用
+ *   快照**应答（services `readRuntimePreferencesSnapshot`）；
+ * - v1（无 preferences 块，旧版语义）：`{version:1, policyVersion}` —— 只记已应用版本。
+ *
+ * 只写状态文件，不写账号设置存储（避免第二条写路径）；原子替换 + 0600。
  */
 export function createPolicySnapshotInstaller(options: {
   logger: ExecutionLogger;
   stateDir?: string;
 }): PolicySnapshotPort {
   const stateDir = options.stateDir ?? DEFAULT_RUNTIME_STATE_DIR;
-  const path = join(stateDir, "applied-policy.json");
+  const path = appliedPolicySnapshotPath(stateDir);
   return {
-    async install(policyVersion) {
+    async install({ policyVersion, preferences }) {
+      const configVersion = preferences?.configVersion ?? policyVersion;
+      const content = preferences
+        ? {
+            version: 2,
+            policyVersion,
+            configVersion,
+            preferences: preferences.values,
+          }
+        : { version: 1, policyVersion };
       await mkdir(dirname(path), { recursive: true, mode: 0o700 });
       const temporary = `${path}.${randomUUID()}.tmp`;
-      await writeFile(temporary, `${JSON.stringify({ version: 1, policyVersion })}\n`, {
-        mode: 0o600,
-      });
+      await writeFile(temporary, `${JSON.stringify(content)}\n`, { mode: 0o600 });
       await rename(temporary, path);
-      options.logger.info(undefined, "runtime policy snapshot applied", { policyVersion });
+      options.logger.info(undefined, "runtime policy snapshot applied", {
+        policyVersion,
+        configVersion,
+        // 只记键名集合，不记值正文（值本身不是凭据，但保持"快照不落日志"的一致性）。
+        preferenceKeys: preferences ? Object.keys(preferences.values).sort().join(",") : "",
+      });
+      return { configVersion };
+    },
+
+    async applied() {
+      const raw = await readFile(path, "utf8").catch(() => null);
+      if (raw === null) return null;
+      try {
+        const value = JSON.parse(raw) as {
+          version?: unknown;
+          policyVersion?: unknown;
+          configVersion?: unknown;
+        };
+        if (value.version === 2 && typeof value.configVersion === "string") {
+          return { configVersion: value.configVersion };
+        }
+        if (value.version === 1 && typeof value.policyVersion === "string") {
+          return { configVersion: value.policyVersion };
+        }
+        return null;
+      } catch {
+        return null;
+      }
     },
   };
 }

@@ -22,12 +22,28 @@ import {
   walkSkillMarkdownPaths,
 } from "../skills/skillDiscoveryWalk.js";
 import { checkRemoteSyncDirectoryWriteAccess } from "../remote-sync/remoteSyncWriteAccess.js";
+import { createUserArchiveImportSession } from "../remote-sync/userArchiveImportSession.js";
+import { createServiceLogger } from "../logger/serviceLogger.js";
 
 const SKILL_FILE_NAME = "SKILL.md";
 const DEFAULT_MAX_ARCHIVE_BYTES = 20 * 1024 * 1024;
 
+const log = createServiceLogger("skill-sync");
+
 export function createSkillSyncService(options?: { maxArchiveBytes?: number }): ISkillSyncService {
   const maxArchiveBytes = options?.maxArchiveBytes ?? DEFAULT_MAX_ARCHIVE_BYTES;
+  // 分块导入会话（14 §4.4）：一个实例同一时刻最多 1 个会话；complete 组装出的字节
+  // 直接交给 runImportSkillsArchive（与 importSkillsArchive 同一实现，不新增解包路径）。
+  const archiveImportSessions = createUserArchiveImportSession({
+    label: "skill-sync",
+    maxArchiveBytes,
+    onSessionDiscarded: (info) => {
+      // 正常完成（completed）不记；异常释放（超时/abort/被新 begin 顶替）留一条调试诊断，
+      // 只带 importId 与原因，不带归档正文（14 §5 凭据/内容边界）。
+      if (info.reason === "completed") return;
+      log.debug(undefined, "user archive import session discarded", info);
+    },
+  });
   return {
     async listLocalUserSkillCandidates(): Promise<SkillSyncCandidateListResult> {
       return {
@@ -114,16 +130,39 @@ export function createSkillSyncService(options?: { maxArchiveBytes?: number }): 
       if (params.overwrite) {
         throw new Error("skill sync overwrite is not supported");
       }
-      if (params.archive.byteLength > maxArchiveBytes) {
-        throw createSkillSyncSizeLimitError({
-          actualBytes: params.archive.byteLength,
-          maxBytes: maxArchiveBytes,
-          phase: "archive",
-        });
-      }
-      return await importArchive(params.archive, maxArchiveBytes);
+      return await runImportSkillsArchive(params.archive, maxArchiveBytes);
+    },
+    // ── 分块导入（14 §4.4）：控制面连接期同步用的大归档通路；参数形状冻结在 shared 的
+    // `user-archive-import.ts`，SSH 同步将来可共用（不新增第二份解包实现）。
+    async beginUserArchiveImport(params) {
+      return await archiveImportSessions.begin(params);
+    },
+    async appendUserArchiveImportChunk(params) {
+      return await archiveImportSessions.append(params);
+    },
+    async completeUserArchiveImport(params) {
+      const archive = await archiveImportSessions.complete(params);
+      return await runImportSkillsArchive(archive, maxArchiveBytes);
+    },
+    async abortUserArchiveImport(params) {
+      return await archiveImportSessions.abort(params);
     },
   };
+}
+
+/** `importSkillsArchive` 与分块导入 complete 的共用实现：上限检查 + 既有导入链路。 */
+async function runImportSkillsArchive(
+  archive: Uint8Array,
+  maxArchiveBytes: number,
+): Promise<SkillSyncImportResult> {
+  if (archive.byteLength > maxArchiveBytes) {
+    throw createSkillSyncSizeLimitError({
+      actualBytes: archive.byteLength,
+      maxBytes: maxArchiveBytes,
+      phase: "archive",
+    });
+  }
+  return await importArchive(archive, maxArchiveBytes);
 }
 
 function resolveUserHomeDir(): string {

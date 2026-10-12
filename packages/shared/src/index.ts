@@ -262,6 +262,7 @@ export * from "./skill-sync.js";
 export * from "./mcp-sync.js";
 export * from "./plugin-sync.js";
 export * from "./remote-sync.js";
+export * from "./user-archive-import.js";
 export * from "./plugin-types.js";
 export * from "./subagents-types.js";
 export * from "./settings-source.js";

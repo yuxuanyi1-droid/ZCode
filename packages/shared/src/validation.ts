@@ -44,6 +44,9 @@ export {
   appSettingsOccupationEnum,
   appSettingsPatchSchema,
   appSettingsSchema,
+  // M8/P19b：云执行节点沙箱 responder 校验偏好快照里的 shell 选择值（14 §6/§9.3），
+  // 复用本 schema 避免在 services 侧复制 `mode: "auto" | "shell"` 枚举（唯一来源在该文件）。
+  integratedTerminalShellSelectionSchema,
   localeSchema,
   postUpdateReleaseNotesPayloadSchema,
 } from "./validationAppSettings.js";

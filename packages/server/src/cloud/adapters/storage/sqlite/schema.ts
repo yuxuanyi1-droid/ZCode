@@ -10,7 +10,8 @@
  * 编号纪律（10 §7、W2 §8）：`0001`/`0002`/`0003`/`0005` 沿用回退前编号，`0004`
  * 永久退役不复用（原 SSH attachment，随 00 §11⑥ 移除），下一条从 `0006` 起。
  * 编号一经应用不可改：任何后续 schema 变更只能追加新的编号，不得改已应用 id 的
- * 内容——checksum 校验会拒绝被改写的历史迁移。
+ * 内容——checksum 校验会拒绝被改写的历史迁移。M8 追加 `0008_user_profile`（两表 +
+ * runs 冻结列 + 空版本种子，见 `tables/profile.ts`）。
  *
  * 约束承担状态迁移（03 §4）：单有效写 run、owner+creationKey、task+acceptanceSeq、
  * commandId 幂等、projection 去重键都在表族文件里用唯一/部分索引与 CHECK 表达，
@@ -34,6 +35,7 @@ import { credentialTables } from "./tables/credentials.js";
 import { grantTables } from "./tables/grants.js";
 import { interactionTables } from "./tables/interactions.js";
 import { attachmentTables } from "./tables/attachments.js";
+import { profileTables } from "./tables/profile.js";
 
 export interface CloudMigration {
   readonly id: string;
@@ -84,6 +86,11 @@ export const CLOUD_MIGRATIONS: readonly CloudMigration[] = [
     preStatements: ["PRAGMA foreign_keys = OFF"],
     postStatements: ["PRAGMA foreign_keys = ON"],
   },
+  {
+    // M8 用户资源 profile（14 §9.2①）：两表 + runs 冻结列 + 空版本 1 种子。
+    id: "0008_user_profile",
+    statements: splitStatements(profileTables),
+  },
 ];
 
 /**
@@ -96,7 +103,7 @@ export const RETIRED_MIGRATIONS: readonly { id: string; reason: string }[] = [
 ];
 
 /** schema 版本：当前链的最大编号（降级启动检查用，10 §7）。 */
-export const CLOUD_SCHEMA_VERSION = 7;
+export const CLOUD_SCHEMA_VERSION = 8;
 
 export const OPERATION_KIND_VALUES: readonly ExternalOperationKind[] = [
   "create",

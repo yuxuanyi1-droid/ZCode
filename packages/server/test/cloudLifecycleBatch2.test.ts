@@ -169,7 +169,8 @@ test("0007 表重建：fresh 与增量（0006 前缀）同构，paused CHECK 与
     try {
       runCloudMigrations(fresh, { now: 1 });
       const facts = readCloudMigrationFacts(fresh);
-      assert.equal(facts.schemaVersion, 7);
+      // 链头随 0008_user_profile（M8）推进；本用例只关心 0007 的 paused 语义。
+      assert.equal(facts.schemaVersion, 8);
       assert.deepEqual(facts.pendingMigrationIds, []);
       const runsDdl = String(
         fresh.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'runs'").get()?.["sql"],

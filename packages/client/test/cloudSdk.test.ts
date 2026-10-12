@@ -288,6 +288,58 @@ test("rejected local request bodies never reach the wire", async () => {
   assert.equal(server.requests.length, 0);
 });
 
+test("profile 条目上传：路径与正文 category 不一致在本地拒绝（不发出请求）", async () => {
+  // 14 §9.2⑦：路径是路由事实、正文是自描述事实，矛盾必须 fail-closed，不能把两种事实都发到线上。
+  const server = createCloudFixtureServer();
+  const { client } = clientFor(server);
+  const error = await client
+    .putUserProfileEntry("mcp", "primary", {
+      category: "agents-md",
+      content: "正文",
+    })
+    .then(() => undefined)
+    .catch((thrown: unknown) => thrown);
+  assert.ok(isCloudApiError(error));
+  assert.equal(error.code, "validation_failed");
+  assert.equal(server.requests.length, 0);
+
+  // 合法调用：请求体按冻结 schema 原样发送，路径参数由矩阵模板展开。
+  const uploaded = await client.putUserProfileEntry("mcp", "primary", {
+    category: "mcp",
+    config: { command: "npx" },
+  });
+  assert.equal(uploaded.profileVersion, 4);
+  assert.equal(server.endpointIds[0], "putUserProfileEntry");
+  assert.equal(server.requests[0]?.method, "PUT");
+  assert.equal(server.requests[0]?.pathname, "/api/cloud/user-profile/entries/mcp/primary");
+  // 请求体经冻结 schema 归一（`enabled` 默认 true 落成显式值）：SDK 与 schema 同源，不自行发明默认。
+  assert.deepEqual(server.requests[0]?.body, {
+    category: "mcp",
+    config: { command: "npx" },
+    enabled: true,
+  });
+});
+
+test("profile 快照/版本读取与删除走冻结的 GET/DELETE 形状", async () => {
+  const server = createCloudFixtureServer();
+  const { client } = clientFor(server);
+  const snapshot = await client.listUserProfile();
+  assert.equal(snapshot.profileVersion, 3);
+  assert.equal(snapshot.entries.length, 1);
+  const version = await client.getUserProfileVersion();
+  assert.equal(version.profileVersion, 3);
+  const deleted = await client.deleteUserProfileEntry("mcp", "primary");
+  assert.equal(deleted.profileVersion, 5);
+  assert.deepEqual(
+    server.requests.map((request) => `${request.method} ${request.pathname}`),
+    [
+      "GET /api/cloud/user-profile",
+      "GET /api/cloud/user-profile/version",
+      "DELETE /api/cloud/user-profile/entries/mcp/primary",
+    ],
+  );
+});
+
 test("202 persistence receipt is distinct from runtime admission", async () => {
   const server = createCloudFixtureServer({
     handlers: {
@@ -390,4 +442,35 @@ test("a cursor outside the retention window raises resync-required", async () =>
   const page = await healthyClient.getTaskHistory(TASK_ID, { topic: "conversation" });
   assert.equal(page.items.length, 1);
   assert.equal(page.nextCursor, "epoch-1:0");
+});
+
+test("profile 条目级开关与回显走冻结的 PATCH/GET 形状（14 §9.4①）", async () => {
+  const server = createCloudFixtureServer();
+  const { client } = clientFor(server);
+
+  const toggled = await client.setUserProfileEntryEnabled("mcp", "primary", false);
+  assert.equal(server.endpointIds[0], "patchUserProfileEntryEnabled");
+  assert.equal(server.requests[0]?.method, "PATCH");
+  assert.equal(server.requests[0]?.pathname, "/api/cloud/user-profile/entries/mcp/primary");
+  // body 只含 enabled：toggle 不重发正文（重发会让 sha256 依赖客户端缓存）。
+  assert.deepEqual(server.requests[0]?.body, { enabled: false });
+  assert.equal(toggled.entry.enabled, true, "响应由服务端决定，SDK 不做本地乐观改写");
+  assert.equal(toggled.profileVersion, 4);
+
+  const read = await client.getUserProfileEntry("mcp", "primary");
+  assert.equal(server.endpointIds[1], "readUserProfileEntry");
+  assert.equal(server.requests[1]?.method, "GET");
+  assert.equal(server.requests[1]?.pathname, "/api/cloud/user-profile/entries/mcp/primary");
+  assert.equal(server.requests[1]?.body, undefined, "GET 不携带请求体");
+  assert.equal(read.entry.entryId, "primary");
+  assert.equal(read.payload.category, "mcp");
+
+  // 本地形状违约（enabled 非布尔）在发出请求前拒绝，不把半合法 body 送到线上。
+  const invalid = await client
+    .setUserProfileEntryEnabled("mcp", "primary", "false" as never)
+    .then(() => undefined)
+    .catch((thrown: unknown) => thrown);
+  assert.ok(isCloudApiError(invalid));
+  assert.equal(invalid.code, "validation_failed");
+  assert.equal(server.requests.length, 2);
 });

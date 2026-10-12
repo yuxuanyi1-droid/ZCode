@@ -13,15 +13,48 @@
  * - 发送失败按 run fault 语义收口：不重做 ready、不用旧凭据重试，等下一次连接重装
  *   （02 §8「welcome/旋转响应丢失」行 + 01 §6.2）。
  */
-import type { BootstrapConfigFrame } from "@zcode/shared";
+import type { BootstrapConfigFrame, CloudBootstrapPreferences } from "@zcode/shared";
 import type { CloudCoreDeps } from "../deps.js";
 import { cloudCoreLogger } from "../logger.js";
 import { fail, ok, type CloudAppResult } from "../result.js";
 import type { AttachmentRegistry } from "../attachments/registry.js";
+import type { UserPreferencesPort } from "../ports/userPreferencesPort.js";
 
 export interface BootstrapConfigSendResult {
   credentialGeneration: number;
   policyVersion: string;
+  /** 本次实际下发的偏好版本（`prefs-<16hex>`）；未接线/无显式设置时为 undefined。 */
+  preferencesConfigVersion?: string;
+}
+
+/**
+ * 偏好快照块（14 §6/§9.2⑥）：五键实值 + 内容寻址 `configVersion`。
+ *
+ * - 值来源 = host 本体 `settingService`（经 `UserPreferencesPort` 注入）；端口回的是
+ *   **显式设置过的键**，缺席键由沙箱 responder 用既有默认值收敛（不复制默认值规则）；
+ * - `configVersion` = `"prefs-" + sha256(键名排序后的 JSON).slice(0,16)`：同值同 hash，
+ *   便于 `bridge.ready.configVersion` 回执核对（键序排序保证与构造顺序无关）；
+ * - `values` 为空对象 → 整个 `preferences` 块省略（兼容旧版 bootstrap.config 语义）；
+ * - 读取失败/未接线 → 不带块、**不 fail**（偏好缺失不是 run 失败条件，14 §9.2⑥）。
+ */
+async function resolvePreferencesBlock(
+  hash: CloudCoreDeps["hash"],
+  port: UserPreferencesPort | undefined,
+): Promise<CloudBootstrapPreferences | undefined> {
+  if (!port) return undefined;
+  let values: CloudBootstrapPreferences["values"];
+  try {
+    values = await port.readUserPreferences();
+  } catch (error) {
+    cloudCoreLogger.warn(undefined, "cloud bootstrap preferences read failed", {
+      error: error instanceof Error ? error.message : "unknown",
+    });
+    return undefined;
+  }
+  if (Object.keys(values).length === 0) return undefined;
+  const canonical = JSON.stringify(values, Object.keys(values).sort());
+  const configVersion = `prefs-${(await hash.sha256Hex(canonical)).slice(0, 16)}`;
+  return { configVersion, values };
 }
 
 export interface BootstrapConfigSender {
@@ -79,6 +112,7 @@ export function createBootstrapConfigSender(
       });
       if (!envelope) return fail("not_configured", "provisioning-envelope-unavailable");
 
+      const preferences = await resolvePreferencesBlock(deps.hash, deps.userPreferences);
       const frame: Omit<BootstrapConfigFrame, "protocolVersion" | "type"> = {
         taskId: task.taskId,
         workspacePath: run.workspacePath,
@@ -91,6 +125,7 @@ export function createBootstrapConfigSender(
         provisioningEnvelopeJson: envelope.envelopeJson,
         credentialGeneration: envelope.credentialGeneration,
         policyVersion: config.bootstrapPolicyVersion,
+        ...(preferences ? { preferences } : {}),
       };
 
       const sent = await attachments.sendBootstrapConfig({
@@ -126,6 +161,7 @@ export function createBootstrapConfigSender(
       return ok({
         credentialGeneration: envelope.credentialGeneration,
         policyVersion: frame.policyVersion,
+        ...(preferences ? { preferencesConfigVersion: preferences.configVersion } : {}),
       });
     },
   };

@@ -1,8 +1,9 @@
 /**
- * 入站帧路由（specs/cloud-agent 02 §4 帧表与方向、§7.2 写入与确认顺序、§8 故障表）。
+ * 入站帧路由（specs/cloud-agent 02 §4 帧表与方向、§7.2 写入与确认顺序、§8 故障表；
+ * 14 §4.6 连接期同步的自动触发点）。
  *
  * 每个帧只做一件事，且都不改 runtime 队列语义：
- * ready → 发布 ready（bootstrap.config 已下发的门控在 app 层）；heartbeat → 连接心跳；
+ * ready → 发布 ready（并触发一次异步用户资源同步）；heartbeat → 连接心跳；
  * phase/fault → 记录；drain → 走同一 drain 入口；projection.batch → ingest 后回 ack；
  * checkpoint.result → 落保存事实。
  */
@@ -54,6 +55,15 @@ export async function routeInboundFrame(
         connectionEpoch: connection.connectionEpoch,
         runtimeIncarnation: frame.runtimeIncarnation,
         at: clock.now(),
+      });
+      // M8 连接期同步（14 §4.6）：ready 发布后异步自动同步一次最新 profile（同 run+epoch
+      // 只触发一次；失败只记日志、不 fail run）。同步走 `rpc.*`（relay 在 ready 前
+      // fail-closed 丢弃），因此只能在这个时刻发起。
+      context.services().userProfileSync.triggerAutomatic({
+        taskId: run.taskId,
+        runId: run.runId,
+        runGeneration: run.runGeneration,
+        connectionEpoch: connection.connectionEpoch,
       });
       return;
     }

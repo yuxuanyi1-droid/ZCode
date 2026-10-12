@@ -6838,6 +6838,104 @@ const enUS: Record<string, string> = {
   "settings.cloudRuntime.loading": "Loading…",
   "settings.cloudRuntime.notCloudMode":
     "Not in cloud mode; the Cloud runtime group is unavailable.",
+  "settings.cloudUserResources.title": "User resources",
+  "settings.cloudUserResources.description":
+    "User-level resources available inside cloud sandboxes: MCP servers, skills, commands, plugins, subagents, and the global AGENTS.md.",
+  "settings.cloudUserResources.version": "Current profile version v{version}",
+  "settings.cloudUserResources.totalBytes": "{used} of {max} used, up to {entries} entries",
+  "settings.cloudUserResources.effectiveHint":
+    "Resources sync automatically once a sandbox connection is established; tasks that are connected can be synced manually from the task panel; no sync is offered while disconnected.",
+  "settings.cloudUserResources.category.mcp": "MCP servers",
+  "settings.cloudUserResources.category.skills": "Skills",
+  "settings.cloudUserResources.category.commands": "Commands",
+  "settings.cloudUserResources.category.plugins": "Plugins",
+  "settings.cloudUserResources.category.subagents": "Subagents",
+  "settings.cloudUserResources.category.agents-md": "AGENTS.md",
+  "settings.cloudUserResources.categoryLimit": "Per-entry limit for this category: {max}",
+  "settings.cloudUserResources.group.count": "{count} entries",
+  "settings.cloudUserResources.empty": "No entries yet.",
+  "settings.cloudUserResources.loading": "Loading…",
+  "settings.cloudUserResources.retry": "Retry",
+  "settings.cloudUserResources.savedHint":
+    "Saved; it syncs once a sandbox connection is established, and connected tasks can be synced manually from the task panel.",
+  "settings.cloudUserResources.credentialsNote":
+    "Credential content is delivered to cloud sandboxes over the authenticated channel only and never appears in logs, task history, or the attachment surface.",
+  "settings.cloudUserResources.entry.disabled": "Disabled (excluded from sync)",
+  "settings.cloudUserResources.entry.pending": "Working…",
+  "settings.cloudUserResources.entry.enabledAria": "Enable {name}",
+  "settings.cloudUserResources.entry.deleteAria": "Delete {name}",
+  "settings.cloudUserResources.entry.deleteTitle": "Delete this entry",
+  "settings.cloudUserResources.entry.deleteDescription":
+    "After deleting {name} it is excluded from sync; connected sandboxes need a manual sync or the next connection to pick it up.",
+  "settings.cloudUserResources.archive.hint": "tar+gzip archive, up to {max} per entry",
+  "settings.cloudUserResources.archive.chooseFile": "Choose archive…",
+  "settings.cloudUserResources.archive.noFile": "Choose a tar+gzip archive file first.",
+  "settings.cloudUserResources.archive.entryIdLabel": "Entry ID",
+  "settings.cloudUserResources.archive.displayNameLabel": "Display name (optional)",
+  "settings.cloudUserResources.archive.entryIdHint":
+    "Entry IDs start with a lowercase letter or digit, may contain - _ ., and are at most 128 characters; uploading the same ID replaces it.",
+  "settings.cloudUserResources.archive.upload": "Upload/Replace",
+  "settings.cloudUserResources.markdown.hint":
+    "Single markdown file up to {max}; the entry ID is the file name ({suffix})",
+  "settings.cloudUserResources.markdown.new": "New entry",
+  "settings.cloudUserResources.markdown.editing": "Editing {id}",
+  "settings.cloudUserResources.markdown.edit": "Edit",
+  "settings.cloudUserResources.markdown.entryIdLabel": "Entry ID (file name on disk)",
+  "settings.cloudUserResources.markdown.displayNameLabel": "Display name (optional)",
+  "settings.cloudUserResources.markdown.contentLabel": "Markdown content",
+  "settings.cloudUserResources.markdown.placeholder": "# Entry content",
+  "settings.cloudUserResources.markdown.pickFile": "Read from file…",
+  "settings.cloudUserResources.markdown.fileReadFailed":
+    "Could not read the file; retry or paste the text directly.",
+  "settings.cloudUserResources.markdown.note":
+    "The entry ID must end with {suffix} (it becomes the file name inside the sandbox); saving the same ID overwrites it.",
+  "settings.cloudUserResources.mcp.hint": "Configured through a form (including token/headers/env)",
+  "settings.cloudUserResources.mcp.new": "New MCP server",
+  "settings.cloudUserResources.mcp.editing": "Editing {id}",
+  "settings.cloudUserResources.mcp.edit": "Edit",
+  "settings.cloudUserResources.mcp.entryIdLabel": "Entry ID",
+  "settings.cloudUserResources.mcp.displayNameLabel": "Display name (optional)",
+  "settings.cloudUserResources.mcp.configLabel": "Config JSON",
+  "settings.cloudUserResources.mcp.credentialsNote":
+    "Tokens, headers, and env values in the config are credentials: they are delivered to cloud sandboxes over the authenticated channel and never echoed in snapshots or task history.",
+  "settings.cloudUserResources.agentsMd.hint":
+    "Single text entry up to {max}, synced to the sandbox {path}",
+  "settings.cloudUserResources.agentsMd.empty": "No user-level AGENTS.md yet.",
+  "settings.cloudUserResources.agentsMd.editorLabel": "User-wide AGENTS.md",
+  "settings.cloudUserResources.agentsMd.placeholder": "# User-wide instructions",
+  "settings.cloudUserResources.agentsMd.dirty": "Unsaved changes",
+  "settings.cloudUserResources.agentsMd.note":
+    "Saving writes it into the control-plane profile; once a sandbox connection is established it overwrites ~/.zcode/AGENTS.md as a whole file.",
+  "settings.cloudUserResources.error.notFound":
+    "The entry no longer exists (it may have been deleted). Refresh and retry.",
+  "settings.cloudUserResources.error.payloadTooLarge":
+    "The content exceeds this category's size limit; compress it and retry.",
+  "settings.cloudUserResources.error.profileTotalExceeded":
+    "The total resource size exceeds the limit; delete some entries first.",
+  "settings.cloudUserResources.error.profileEntriesExceeded":
+    "The entry count exceeds the limit; delete some entries first.",
+  "settings.cloudUserResources.error.invalidEntry":
+    "The entry content is invalid (archives must be tar+gzip; commands and subagents are markdown text).",
+  "settings.cloudUserResources.error.notConfigured":
+    "The deployment has not wired user-resource storage.",
+  "settings.cloudUserResources.error.unauthorized":
+    "This account cannot manage user resources; sign in again.",
+  "settings.cloudUserResources.error.network":
+    "Network error; the result is unknown. Refresh and verify.",
+  "settings.cloudUserResources.error.unknown": "The operation failed. Please retry.",
+  "settings.cloudUserResources.error.contentLoad": "Failed to load the content.",
+  "settings.cloudUserResources.validation.empty": "Enter an entry ID.",
+  "settings.cloudUserResources.validation.shape": "The entry ID must match {pattern}.",
+  "settings.cloudUserResources.validation.emptyFile": "The archive file is empty.",
+  "settings.cloudUserResources.validation.fileTooLarge": "The archive exceeds the {max} limit.",
+  "settings.cloudUserResources.validation.bodyTooLarge":
+    "The file exceeds the upload body limit of {max}.",
+  "settings.cloudUserResources.validation.markdownSuffix":
+    "The entry ID must end with {suffix} (it is also the file name on disk).",
+  "settings.cloudUserResources.validation.markdownTooLarge": "The content exceeds the {max} limit.",
+  "settings.cloudUserResources.validation.jsonInvalid": "The config is not valid JSON.",
+  "settings.cloudUserResources.validation.jsonNotObject": "The config must be a JSON object.",
+  "settings.cloudUserResources.validation.jsonTooLarge": "The config exceeds the {max} limit.",
   "cloud.draftStartConfig.baseBranch": "Base branch",
   "cloud.draftStartConfig.baseBranch.empty": "No branches available",
   "cloud.draftStartConfig.provider": "Run provider",
@@ -6941,6 +7039,19 @@ const enUS: Record<string, string> = {
     "The run environment is temporarily unavailable. It retries automatically, or click reconnect.",
   "cloud.run.error.technicalDetail": "View technical details",
   "cloud.run.settings.timeoutClamped": "Converged to the deployment limit of {seconds} seconds.",
+  "cloud.userProfileSync.hint":
+    "User resources already synced once when the connection was established; you can sync the latest version again here.",
+  "cloud.userProfileSync.action": "Sync user resources",
+  "cloud.userProfileSync.pending": "Syncing…",
+  "cloud.userProfileSync.result":
+    "Sync complete (profile v{version}): {total} entries — {synced} synced, {skipped} skipped, {failed} failed.",
+  "cloud.userProfileSync.joinedAutomatic":
+    "This request joined the automatic sync already in flight and returned the same result.",
+  "cloud.userProfileSync.moreFailures": "{count} more failures not listed.",
+  "cloud.userProfileSync.error.notConnected":
+    "The cloud sandbox is not connected, so syncing is unavailable for now; retry after the connection recovers.",
+  "cloud.userProfileSync.error.runEnded":
+    "There is no run environment to sync into (the run ended or does not exist).",
   "chat.attachments.cloud.uploadUnavailable":
     "This deployment does not support draft attachment uploads for cloud tasks. Remove attachments before the first send.",
   "chat.attachments.cloud.attachmentUnavailable":

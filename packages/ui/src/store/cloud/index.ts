@@ -41,3 +41,9 @@ export {
   createMemoryCloudLocalStore,
   type CloudLocalStore,
 } from "./cloudLocalPersistence.js";
+export {
+  selectVisibleUserResourceEntries,
+  useCloudUserResourcesStore,
+  type CloudUserResourceEntryContent,
+  type CloudUserResourcePendingAction,
+} from "./cloudUserResourcesStore.js";

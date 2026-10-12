@@ -1,10 +1,13 @@
 /**
- * Cloud RPC 帧契约（specs/cloud-agent/02 §0「原 Web UI 的受控 RPC 承载」、§4 尾段）。
+ * Cloud RPC 帧契约（specs/cloud-agent 02 §0「原 Web UI 的受控 RPC 承载」、§4 尾段；
+ * 14 §4.2 `serviceScope` 分面）。
  *
  * 复用既有 Channel RPC 的序列化、事件与取消，不另建文件/Git/终端业务协议：
- * 控制面只转发已鉴权浏览器 streamId 的有界字节，并在每一帧上验证当前 ready
- * attachment；旧代际帧拒绝（02 §2 不变量 3）。浏览器用原 ChannelClient，沙箱用
- * 常驻 stdio client 组成 ChannelServer，不重启 runtime。
+ * 控制面只转发已鉴权浏览器 streamId 的有界字节（`client` scope），并可用**同一套**帧
+ * 以 `control-plane` scope 调用沙箱 runtime 的既有 sync 服务（连接期用户资源同步，
+ * 14 §4.1/§4.2）；每条 rpc 会话在每一帧上验证当前 ready attachment，旧代际帧拒绝
+ * （02 §2 不变量 3）。浏览器用原 ChannelClient，沙箱用常驻 stdio client 组成
+ * ChannelServer，不重启 runtime。
  */
 import { z } from "zod";
 import { cloudUuidSchema } from "./identity.js";
@@ -59,9 +62,27 @@ const rpcAddress = {
   streamId: cloudUuidSchema,
 };
 
+/**
+ * rpc 会话的发起方分面（14 §4.2，A 批冻结）。**唯一构造方是控制面**：浏览器字节只作为
+ * 有界 payload 被包装，不能在帧里自报 scope——因此控制面为浏览器流固定写 `"client"`。
+ *
+ * - `client`：已鉴权浏览器（`CLOUD_ATTACHMENT_SERVICE_ALLOWLIST`，现状不变）；
+ * - `control-plane`：控制面自身发起的用户资源同步会话（`CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST`）。
+ *
+ * 两份白名单不得混用；denylist `CLOUD_ATTACHMENT_DENIED_SERVICE_CHANNELS` 对两面生效。
+ */
+export const cloudRpcServiceScopeSchema = z.enum(["client", "control-plane"]);
+export type CloudRpcServiceScope = z.infer<typeof cloudRpcServiceScopeSchema>;
+
 /** 帧全集；每帧校验地址代际与尺寸后才路由。 */
 export const cloudRpcFrameSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("rpc.open"), ...rpcAddress }).strict(),
+  z
+    .object({
+      type: z.literal("rpc.open"),
+      ...rpcAddress,
+      serviceScope: cloudRpcServiceScopeSchema,
+    })
+    .strict(),
   z.object({ type: z.literal("rpc.close"), ...rpcAddress }).strict(),
   z
     .object({

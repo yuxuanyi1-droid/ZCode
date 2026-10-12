@@ -26,6 +26,8 @@ import type { OperationOutboxPort } from "../app/ports/operationOutboxPort.js";
 import type { SandboxDriverRegistryPort } from "../app/ports/sandboxDriverRegistryPort.js";
 import type { SandboxRuntimeSettingsPort } from "../app/ports/sandboxRuntimeSettingsPort.js";
 import type { StoragePort, StorageReadiness } from "../app/ports/storagePort.js";
+import type { UserPreferencesPort } from "../app/ports/userPreferencesPort.js";
+import type { UserProfileStorePort } from "../app/ports/userProfileStorePort.js";
 import type { ArtifactRead, ExecutionProjectionRead } from "../app/ports/projectionPort.js";
 import type { InteractionDecisionRepo } from "../app/ports/inputPort.js";
 import type { ProvisioningEnvelopeSource } from "../app/ports/provisioningEnvelopePort.js";
@@ -51,7 +53,7 @@ import {
   type CloudUpgradeWebSocket,
 } from "./http/registerCloudRoutes.js";
 import { createCloudStorage } from "./storage/cloudStorageClient.js";
-import { createGitHubAdapter } from "./github/adapter.js";
+import { createFailClosedGitHubPort, createGitHubAdapter } from "./github/adapter.js";
 import { assembleGitGrantBroker } from "./gitGrantAssembly.js";
 import { CloudControlPlaneAssemblyError } from "./controlPlaneAssemblyError.js";
 import type { CloudGitGrantService } from "../app/gitGrants.js";
@@ -108,6 +110,11 @@ export interface CloudControlPlaneContext {
   /** 控制面核心配置覆盖（08 §6/§7 默认值的部署级调整）。 */
   readonly coreConfig?: Partial<CloudCoreConfig>;
   /**
+   * 账号行为偏好来源（M8；14 §9.2⑥）：`bootstrap.config.preferences` 的唯一来源；
+   * 未注入时不带 `preferences` 块、不 fail（偏好缺失不是 run 失败条件）。
+   */
+  readonly userPreferences?: UserPreferencesPort;
+  /**
    * GitHub token 服务覆盖点（测试/嵌入方注入 fake）：git grant 的装配点只有控制面一处
    * （签发与兑换共用 broker），因此 fake 必须从这里进，而不是在入口另建 broker。
    */
@@ -125,6 +132,8 @@ export interface CloudEntryStorageSource extends CloudStorageReadinessSource {
   readonly operations?: OperationOutboxPort;
   /** W2 客户端的 git grant store（01 §7.2）：签发幂等查询与兑换都经它。 */
   readonly grants?: GitGrantStore;
+  /** W2 客户端的用户资源 profile store（M8；14 §9.2①）：上传用例与资源下发组装经它。 */
+  readonly userProfile?: UserProfileStorePort;
   close?(): Promise<void>;
 }
 
@@ -160,6 +169,8 @@ export async function assembleCloudControlPlane(
   const ids = { newId: () => randomUUID(), newSecret: () => randomBytes(32).toString("base64url") };
   const hash = {
     sha256Hex: async (value: string) => createHash("sha256").update(value).digest("hex"),
+    // M8 连接期同步的归档分块/整包摘要（14 §4.4）：按解码后字节摘要，不能走 UTF-8 字符串路径。
+    sha256HexBytes: async (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex"),
   };
 
   // 1) 存储：注入优先，否则由 W2 客户端自持（worker 入口路径显式透传）。
@@ -210,6 +221,8 @@ export async function assembleCloudControlPlane(
         ? { sandboxRuntimeSettings: context.sandboxRuntimeSettings }
         : {}),
       attachments: bridge.port,
+      // 控制面 RPC 会话（M8 连接期同步；14 §4.2）：bridge 通道提供实现，app 层只依赖端口。
+      controlPlaneRpc: bridge.controlPlaneRpc,
       // 浏览器观看事实（08 §7，复核缺陷 1）：登记点=bridge 多路复用器（关即清），非 attachment 注册表。
       browserWatch: { hasWatcher: (runId) => bridge.hasOpenBrowserStreams(runId) },
       runtimeCommands: bridge.runtimeCommands,
@@ -228,6 +241,10 @@ export async function assembleCloudControlPlane(
       ...(envelopeSource ? { provisioningEnvelope: envelopeSource } : {}),
       ...(gitGrantStore ? { gitGrantStore } : {}),
       ...(gitGrantBroker ? { gitGrantBroker } : {}),
+      // M8（14 §9.2①⑥）：profile store 与偏好来源都从入口 context/存储客户端透传，
+      // 未接线时上层各自结构化降级（上传 503 / 不下发 preferences 块）。
+      ...(storage.userProfile ? { userProfile: storage.userProfile } : {}),
+      ...(context.userPreferences ? { userPreferences: context.userPreferences } : {}),
     },
     { registry },
   );
@@ -277,6 +294,7 @@ async function resolveStorage(context: CloudControlPlaneContext): Promise<{
   storage: StoragePort;
   operations: OperationOutboxPort;
   grants?: GitGrantStore;
+  userProfile?: UserProfileStorePort;
   close?: () => Promise<void>;
 }> {
   const injected = context.storage as CloudEntryStorageSource | undefined;
@@ -286,6 +304,7 @@ async function resolveStorage(context: CloudControlPlaneContext): Promise<{
       storage: injected.storage,
       operations: injected.operations,
       ...(injected.grants ? { grants: injected.grants } : {}),
+      ...(injected.userProfile ? { userProfile: injected.userProfile } : {}),
     };
   }
   // 自持：worker 入口路径由入口显式给出（打包后是独立产物）。
@@ -299,6 +318,7 @@ async function resolveStorage(context: CloudControlPlaneContext): Promise<{
     storage: client.storage,
     operations: client.operations,
     grants: client.grants,
+    userProfile: client.userProfile,
     close: () => client.close(),
   };
 }
@@ -319,7 +339,7 @@ function resolveGitHubPort(context: CloudControlPlaneContext): {
     };
   }
   const app = context.secrets.gitHubApp;
-  if (!app) return { port: failClosedGitHubPort(), configured: false };
+  if (!app) return { port: createFailClosedGitHubPort(), configured: false };
   const appId = Number.parseInt(app.appId, 10);
   if (!Number.isFinite(appId) || appId <= 0) {
     throw new CloudControlPlaneAssemblyError("not_configured", "github app id invalid");
@@ -339,33 +359,6 @@ function resolveGitHubPort(context: CloudControlPlaneContext): {
     configured: true,
     catalog: adapter.catalog,
     branchCatalog: adapter.branches,
-  };
-}
-
-/**
- * 未配置 GitHub App 时的 fail-closed 端口：所有读取返回空、所有副作用拒绝。
- * 不伪造仓库、不在没有授权来源时创建 Project（11 §4.3）。
- */
-function failClosedGitHubPort(): GitHubPort {
-  const denied = async (): Promise<never> => {
-    throw new CloudControlPlaneAssemblyError("not_configured", "github app not configured");
-  };
-  return {
-    async listRepositories() {
-      return { items: [] };
-    },
-    async getRepository() {
-      return null;
-    },
-    async getBranchHead() {
-      return null;
-    },
-    mintToken: denied,
-    async getPullRequest() {
-      return null;
-    },
-    publishDraftPullRequest: denied,
-    enqueueEffect: denied,
   };
 }
 

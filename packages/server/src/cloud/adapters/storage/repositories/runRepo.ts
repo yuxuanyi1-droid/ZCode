@@ -86,7 +86,9 @@ export function reserveRunInTransaction(
          run_id, task_id, run_generation, execution_kind, first_input_command_id,
          execution_recipe_json, provider, workspace_path, status, connection_epoch,
          data_at_risk, created_at, updated_at
-       ) VALUES (?, ?, ?, 'sandbox', ?, ?, ?, ?, 'provisioning', 1, 0, ?, ?)`,
+       ) VALUES (
+         ?, ?, ?, 'sandbox', ?, ?, ?, ?, 'provisioning', 1, 0, ?, ?
+       )`,
     )
     .run(
       request.runId,

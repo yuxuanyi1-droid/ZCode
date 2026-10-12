@@ -10,7 +10,11 @@
  */
 import { randomUUID } from "node:crypto";
 import type { CloudRunAddress } from "@zcode/shared";
-import { buildCloudTaskWorkspaceIdentity, ServiceChannels } from "@zcode/shared";
+import {
+  buildCloudTaskWorkspaceIdentity,
+  ServiceChannels,
+  ZCODE_APPLIED_POLICY_SNAPSHOT_ENV_KEY,
+} from "@zcode/shared";
 import { createBridgeSession, type BridgeSession } from "../app/bridgeSession.js";
 import { createBootstrap, type Bootstrap } from "../app/bootstrap.js";
 import { createCheckpoint } from "../app/checkpoint.js";
@@ -25,6 +29,7 @@ import { createGitGrantClient, createGitRunner } from "./gitRunner.js";
 import { createLocalRpcOwner } from "./localRpcOwner.js";
 import { createProjectionWalStore } from "./projectionWalStore.js";
 import {
+  appliedPolicySnapshotPath,
   createPolicySnapshotInstaller,
   createProvisioningInstaller,
   createSandboxWorkspace,
@@ -75,7 +80,13 @@ export function createSandboxSupervisor(options: SandboxSupervisorOptions): Sand
   // 状态目录在 supervisor 进程里自建（`~/.zcode/run`，见 credentialStateFile 的 E2B 实测注释）：
   // 不依赖模板预建，也不假定系统目录可写。
   const fatal = deferredFatal();
-  const runtime = createRuntimeOwner({ logger, root: options.runtimeRoot });
+  const runtime = createRuntimeOwner({
+    logger,
+    root: options.runtimeRoot,
+    // 策略快照路径注入沙箱 runtime：services 侧在 cloud-execution-node authority 下据此
+    // 读已应用偏好实值（14 §6/§9.3），不读沙箱自身 settingService 的默认值。
+    env: { [ZCODE_APPLIED_POLICY_SNAPSHOT_ENV_KEY]: appliedPolicySnapshotPath(stateDir) },
+  });
   const localRpc = createLocalRpcOwner({ logger });
   const projectionStore = createProjectionWalStore({ stateDir, logger });
   const credentials = createCredentialStateFile({ stateDir, logger });
@@ -126,6 +137,9 @@ export function createSandboxSupervisor(options: SandboxSupervisorOptions): Sand
     send: (frame) => outbound.send(encodeBridgeFrame(frame)),
     logger,
   });
+
+  // 用户资源同步不经本进程自举：连接期由控制面经 bridge relay 调沙箱既有 sync 服务
+  // （14 §4/§9.5，2026-10-11 简化改造——自研安装器与 intake 整体退役）。
 
   const bootstrap: Bootstrap = createBootstrap({
     git,

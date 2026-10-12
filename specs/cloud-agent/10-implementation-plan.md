@@ -72,25 +72,28 @@ M0评审通过后才实施数据库schema与协议变更。CLI子仓库AGENTS要
 
 每个PR先落对应spec/test，再实现；列出的测试路径均为拟新增，不是现有覆盖。每批保持最小可运行/可关闭边界。
 
-| PR  | 阶段与交付                                                                                 | 前置                                   | 退出证据                                                          |
-| --- | ------------------------------------------------------------------------------------------ | -------------------------------------- | ----------------------------------------------------------------- |
-| P01 | M0：决策、严格schema、cloud上下文、架构模块contract与示例                                  | 方案冻结                               | schema round-trip、非法输入、未知版本；旧local/SSH契约仍成立      |
-| P02 | M1：cloud安全服务装配、认证principal与capabilities                                         | P01                                    | 绕过UI无法本机Agent/file/terminal执行；未配置认证cloud启动失败    |
-| P03 | M1：DB worker、迁移、Project/Task/run/input/operation存储                                  | P01/P02                                | 临时DB事务/唯一约束/磁盘失败/重启恢复；零provider调用             |
-| P04 | M2：provider port、一个driver、GitHub read授权adapter/clone broker、创建意图与对账/清理    | P03                                    | mock故障点与真实create/inspect/terminate，create未知不重复        |
-| P05 | M2：固定baseSha/taskBranch的bootstrap、runtime发布与常驻bridge supervisor                  | P04                                    | 检验版本/摘要、真实出站WSS、断网不stdin EOF；无client也ready      |
-| P06 | M2：canonical projection/quiesce技术试验                                                   | P01/P05                                | 确认hook/epoch/seq/snapshot屏障；结果不成立先修订02，不堆fallback |
-| P07 | M3：durable input delivery、runtime ACK/query和firstInput                                  | P03/P05                                | accepted后关页、ACK丢失、并发firstInput、同ID不同payload          |
-| P08 | M3：durable projection ingest、snapshot/history与缺口恢复                                  | P03/P06                                | 断网>transport缓存、重启、重复/乱序、retention超界                |
-| P09 | M3：Web cloud console、任务路由/列表/receipt与按需attach                                   | P07/P08                                | 清存储/换浏览器、移动布局、真实远端交互E2E                        |
-| P10 | M4：Git write grant/push与remote SHA确认、安全checkpoint、期限drain、续期/配额/stop/reopen | P06/P07/P08                            | concurrent writer、push失败、硬期限、旧run晚到、termination未知   |
-| P11 | M4：PR publication幂等effect、最小权限与PR状态投影（分支/保存已在P01–P10落地）             | P10                                    | base/head正确、创建响应丢失、noChanges、nonfastforward、撤权      |
-| P12 | M5：多端 Web 审批/订阅与delivery回归（桌面+移动浏览器）                                    | P09/P10                                | desktop-continuous与web-remote-replayable各自通过                 |
-| P13 | （已移除）原控制面 SSH attachment 与 workspace owner 映射                                  | 不适用                                 | 2026-10-06 决议移除，见 00 §11⑥；实施证据留 git 历史              |
-| P14 | M5：Docker/WSL远程目标原子删除                                                             | P12，仓库替代路径可用                  | 类型+消费者+schema+文档同PR，legacy invalid、跨平台宿主回归       |
-| P15 | （已移除）原 Android 壳、origin、OAuth/deep-link                                           | 不适用                                 | 2026-10-06 决议移除，见 00 §11⑥；apps/android-shell 已删          |
-| P16 | M7：多账号/Git写隔离/每用户预算与公开门槛                                                  | 条件性；见 00 §11⑤（单用户不在路线图） | 跨租户隔离、恶意repo/越权ref、secret隔离、限额原子性              |
-| P17 | M7：GitHub durable webhook、sender授权、checks/comments                                    | 条件性；见 00 §11⑤                     | delivery重放/补投、bot防自激、fork/外部commenter拒绝              |
+| PR  | 阶段与交付                                                                                                                                                                                                       | 前置                                                    | 退出证据                                                                                                                                     |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| P01 | M0：决策、严格schema、cloud上下文、架构模块contract与示例                                                                                                                                                        | 方案冻结                                                | schema round-trip、非法输入、未知版本；旧local/SSH契约仍成立                                                                                 |
+| P02 | M1：cloud安全服务装配、认证principal与capabilities                                                                                                                                                               | P01                                                     | 绕过UI无法本机Agent/file/terminal执行；未配置认证cloud启动失败                                                                               |
+| P03 | M1：DB worker、迁移、Project/Task/run/input/operation存储                                                                                                                                                        | P01/P02                                                 | 临时DB事务/唯一约束/磁盘失败/重启恢复；零provider调用                                                                                        |
+| P04 | M2：provider port、一个driver、GitHub read授权adapter/clone broker、创建意图与对账/清理                                                                                                                          | P03                                                     | mock故障点与真实create/inspect/terminate，create未知不重复                                                                                   |
+| P05 | M2：固定baseSha/taskBranch的bootstrap、runtime发布与常驻bridge supervisor                                                                                                                                        | P04                                                     | 检验版本/摘要、真实出站WSS、断网不stdin EOF；无client也ready                                                                                 |
+| P06 | M2：canonical projection/quiesce技术试验                                                                                                                                                                         | P01/P05                                                 | 确认hook/epoch/seq/snapshot屏障；结果不成立先修订02，不堆fallback                                                                            |
+| P07 | M3：durable input delivery、runtime ACK/query和firstInput                                                                                                                                                        | P03/P05                                                 | accepted后关页、ACK丢失、并发firstInput、同ID不同payload                                                                                     |
+| P08 | M3：durable projection ingest、snapshot/history与缺口恢复                                                                                                                                                        | P03/P06                                                 | 断网>transport缓存、重启、重复/乱序、retention超界                                                                                           |
+| P09 | M3：Web cloud console、任务路由/列表/receipt与按需attach                                                                                                                                                         | P07/P08                                                 | 清存储/换浏览器、移动布局、真实远端交互E2E                                                                                                   |
+| P10 | M4：Git write grant/push与remote SHA确认、安全checkpoint、期限drain、续期/配额/stop/reopen                                                                                                                       | P06/P07/P08                                             | concurrent writer、push失败、硬期限、旧run晚到、termination未知                                                                              |
+| P11 | M4：PR publication幂等effect、最小权限与PR状态投影（分支/保存已在P01–P10落地）                                                                                                                                   | P10                                                     | base/head正确、创建响应丢失、noChanges、nonfastforward、撤权                                                                                 |
+| P12 | M5：多端 Web 审批/订阅与delivery回归（桌面+移动浏览器）                                                                                                                                                          | P09/P10                                                 | desktop-continuous与web-remote-replayable各自通过                                                                                            |
+| P13 | （已移除）原控制面 SSH attachment 与 workspace owner 映射                                                                                                                                                        | 不适用                                                  | 2026-10-06 决议移除，见 00 §11⑥；实施证据留 git 历史                                                                                         |
+| P14 | M5：Docker/WSL远程目标原子删除                                                                                                                                                                                   | P12，仓库替代路径可用                                   | 类型+消费者+schema+文档同PR，legacy invalid、跨平台宿主回归                                                                                  |
+| P15 | （已移除）原 Android 壳、origin、OAuth/deep-link                                                                                                                                                                 | 不适用                                                  | 2026-10-06 决议移除，见 00 §11⑥；apps/android-shell 已删                                                                                     |
+| P16 | M7：多账号/Git写隔离/每用户预算与公开门槛                                                                                                                                                                        | 条件性；见 00 §11⑤（单用户不在路线图）                  | 跨租户隔离、恶意repo/越权ref、secret隔离、限额原子性                                                                                         |
+| P17 | M7：GitHub durable webhook、sender授权、checks/comments                                                                                                                                                          | 条件性；见 00 §11⑤                                      | delivery重放/补投、bot防自激、fork/外部commenter拒绝                                                                                         |
+| P18 | M8：契约扩展冻结（`bootstrap.resources` 帧 schema、profile store 契约、偏好快照 schema、上传端点形状）                                                                                                           | 方案冻结；按 [13 §5](./13-module-map.md) 走 W0 扩展流程 | schema round-trip/非法输入/未知版本拒绝；14 §8 U-01–U-12 反向核对字段；02/07/01 修订段落落档                                                 |
+| P19 | M8：控制面 profile store + 上传 API + `bootstrap.resources` 下发与沙箱安装器（含 ready 条件 `resources-installed`、偏好快照实值化）                                                                              | P18、P05/P07（bridge 通道与 ready 闭环已通）            | 上传→新 Run 安装生效（7 类）；运行中 Run 不变；重连幂等；凭据不进日志/投影/attachment 面                                                     |
+| P20 | M8：W8 设置页资源管理 UI（MCP 表单、归档上传、AGENTS.md 编辑、**条目级授权开关**（[14 §9.1②](./14-user-profile-sync.md)：v1 无任务粒度勾选 UI）、版本/错误展示）+ 两个契约小追加（PATCH 条目开关、GET 条目回显） | P19a、P19b                                              | 上传/编辑/删除/开关闭环；移动布局；浏览器 E2E 与 14 §8 U-01–U-12 的 UI 侧——**2026-10-11 已落**（见 §10 P20 记录；浏览器 E2E 未执行，列悬项） |
 
 ```mermaid
 flowchart LR
@@ -113,7 +116,9 @@ flowchart LR
 
 可并行schema/fixture/界面设计，不能在输入/恢复语义未冻结时用mock成功路径认定端到端完成。P06为真实设计验证门槛，不以大规模重写runtime取代证据。
 
-按模块分工的执行入口见 [13-module-map](./13-module-map.md) 与 `modules/W0–W10`，对应关系：P01→W0；P02→W5；P03→W2；P04→W3/W4；P05/P06→W6；P07/P08→W1+W6；P09→W8/W9；P10/P11→W1/W3/W4/W6；P12→W10；P14→W10。**W0 契约未冻结前不得并行开工其他工作单。**
+按模块分工的执行入口见 [13-module-map](./13-module-map.md) 与 `modules/W0–W11`，对应关系：P01→W0；P02→W5；P03→W2；P04→W3/W4；P05/P06→W6；P07/P08→W1+W6；P09→W8/W9；P10/P11→W1/W3/W4/W6；P12→W10；P14→W10；P18→W11（W0 扩展）；P19/P20→W11。**W0 契约未冻结前不得并行开工其他工作单。**
+
+**2026-10-11 简化定调后**：上表 P18–P20 中与"自举安装"相关的交付物（`bootstrap.resources` 帧、资源下发编排、沙箱安装器、ready 条件 `resources-installed`、Run 冻结列）已整体退役（[14 §4.8/§9.5](./14-user-profile-sync.md)）；后续实施按 [W11 §13](./modules/W11-user-profile-sync.md) 的 A 契约与 services / B 控制面 / C 沙箱清理 / D UI 四个批次执行（本表尚未单列新 PR 行；批次信息以 W11 §13 为准），见下方 §10 置顶记录。
 
 ## 5. 测试分层和入口
 
@@ -201,6 +206,543 @@ pnpm verify:pre-push
 architecture baseline不能自动刷新消除新增违规。报告改变模块、owner、event order、测试、行数和baseline/new violations。所有未执行/环境受限验证单列。
 
 ## 10. 文档修订验证记录
+
+### 2026-10-13 M8 简化改造 A–D 验收记录（全量回归 + dev 服务重启 + 无头浏览器/接口验收）
+
+触发与来源：用户 2026-10-12 派发 M8 简化改造 A–D（W11 §13）的**全量回归 + dev 服务重启（含迁移 0008 就地修改导致的 DB 兼容处理）+ 无头浏览器验收**。本轮**零源码改动**；仅本记录为仓库内唯一文件变更（A–D 的代码改动为既有未提交工作树，共 143 个改动文件，不属本轮）。
+
+**一、全量回归（真实执行，仓库根）**
+
+| 项                                                                | 结果                                                                                                                                                                                                 |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `node scripts/check-workspace-freshness.mjs`                      | PASS：基线新鲜（feat/cloud-agent 与 origin 同步；相对 origin/main ahead 8 / behind 1，阈值 50）                                                                                                      |
+| `pnpm typecheck`                                                  | PASS exit 0（`tsc -b` 增量：无待编译变更）                                                                                                                                                           |
+| `pnpm lint`                                                       | PASS exit 0：**0 error / 77 warning，全部存量**（逐条警告坐标与本会话 143 改动文件的新增行区间零交集；含改动文件内 15 处警告均为未改动行）                                                           |
+| `pnpm fmt:check`                                                  | exit 1（存量）：35 个失败文件与 143 个改动文件**交集为空**（本会话文件 0 失败）；存量含 `.zcode/plans/*`、`README.md`、`packages/services/src/bots/*` 等                                             |
+| `pnpm architecture:check --changed`                               | PASS：`architecture: OK / violations: 0 / baseline: 0 / new: 0`                                                                                                                                      |
+| `pnpm --filter @zcode/shared test`                                | PASS：75 tests / 75 pass / **0 fail** / 0 skip                                                                                                                                                       |
+| `pnpm --filter @zcode/server test`                                | PASS：674 tests / 666 pass / **0 fail** / 8 skip（8 条均为凭据门控 live 测试：`ZCODE_CLOUD_E2E`/`ZCODE_CLOUD_GITHUB_LIVE`/`ZCODE_CLOUD_SANDBOX_TEMPLATE_REF` 未设即显式 skip，存量设计，不伪造通过） |
+| `pnpm --filter @zcode/client test`                                | PASS：38 / 38 pass / **0 fail**                                                                                                                                                                      |
+| `pnpm --filter @zcode/ui test`                                    | PASS：247 / 247 pass / **0 fail**                                                                                                                                                                    |
+| `cd packages/services && node --import tsx --test test/*.test.ts` | PASS：42 / 42 pass / **0 fail**                                                                                                                                                                      |
+| `pnpm --filter @zcode/server build:sandbox-assets`                | PASS exit 0：`supervisor.bundle.mjs` 3,608,023 B sha256 `38bdba0d9eee…`、`runtimeStub.bundle.mjs` 3,362,881 B sha256 `312985f707be…`，manifest buildId `3.14.3+116339235fd2`                         |
+
+**二、dev 服务重启（DB 兼容处理）**
+
+- 旧后端为 tsup watch 进程组（pgid 225563），源码大改后状态不可信；整组终止后确认 3030 释放（vite 5173 不动）。
+- B 批就地修改迁移 0008（commands/subagents 改 markdown `content_kind`），旧库 CHECK 约束不含 markdown，启动以 `startup_failed：迁移 0008_user_profile 的 checksum 与账本不一致` 拒绝；按预案将 `cloud.db*`（含 3 个旧 `.bak-*`）移入 `~/.zcode-cloud-debug/data/backup-20261012-234735-/`（**备份先行**），`data/.zcode/v2/`（onboarding/provider 凭据）原地保留未动。
+- 用 `/tmp/zcode-cloud-debug-start.sh` 原样重启（新库自动建，`lastAppliedMigrationId: 0008_user_profile`、schemaVersion 8、authMode anonymous）。
+- 冒烟：`GET /api/cloud/capabilities` 200（anonymous、e2b `apiKeyConfigured=true`、部署日志 `githubConfigured=true`）；`GET /api/cloud/user-profile` 200 空 profile。
+- 首轮 V4 揭示脚本将 `ZCODE_CLOUD_PUBLIC_ORIGIN` 覆盖为回环地址导致沙箱无法回连（见环境性发现 2），随后用 **仅改该一行** 的副本 `/tmp/zcode-cloud-debug-start-public.sh`（origin 取 cloud.env 的隧道值 `https://zcode.yuxuanyi.tech`）重启以完成真机 V4；原脚本保持原样未改。当前后端 PID 370373（3030）。（2026-10-13 追加：V4r 重验时后端已按同一 public 脚本重启为 PID 380567；见下文「六、V4r 重验记录」。）
+
+**三、无头浏览器验收（agent-browser 0.39.0 + Chrome for Testing 151 headless，`http://127.0.0.1:5173/`）**
+
+`data/.zcode/v2` 凭据仍有效，**未出现账号门**，直接进入云壳（全程免登录，未触碰用户凭据）。
+
+| 项                                    | 结果                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| V1 设置页（`User resources` 分区）    | **PASS**：分区存在；顶部说明为连接期语义（"Resources sync automatically once a sandbox connection is established; tasks that are connected can be synced manually from the task panel; no sync is offered while disconnected."，保存提示同语义）；六分组 tab；Commands/Subagents 为 markdown 编辑器（Entry ID 必须 `.md`、`Markdown content` 文本框），文件选择器 `accept=".md,text/markdown"`，**无归档上传入口**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| V2 上传（AGENTS.md / commands / MCP） | **PASS**：AGENTS.md 写入保存 → profileVersion 1→2（agents-md/user-agents 198 B）；commands `deploy-notes.md` → v3（104 B，displayName 生效）；MCP `demo-fs` 表单（config JSON）→ v4（80 B）；`GET user-profile` 条目数/字节数/版本号逐项正确（totalBytes 382 = 198+104+80）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| V3 任务视图门控（无在线任务）         | **PASS**：DOM 中 `[data-testid^="cloud-task-user-profile-sync"]` 计数 0、无 "Sync user resources" 文案（截图）；任务 provision（未连接）期间同样零渲染；终态后横幅为 "The previous run has ended / Reopen task" 且仍无同步入口                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| V4 端到端（真实 E2B）                 | **→ V4r PASS（2026-10-13 模板重建后重验通过；判定明细与新增发现见「六、V4r 重验记录」；以下为原 BLOCKED 记录，保留）**。原记录：**BLOCKED（环境性，任务预授权类别）**：run gen2（隧道 origin）沙箱成功回连（`bridge attachment opened` → `welcome` → `bootstrap.config` → 236 ms 后 `bridge attachment closed {reason:'frame-rejected:invalid-frame', code:4001}`）→ 2 分钟 `cloud provisioning timed out with live instance` → 补偿终止（`e2b sandbox terminated`，end_reason `provider-confirmed`）。根因经**模板镜像取证**：模板 `zcode-sandbox-template`（E2B 侧 10/5 创建、无重建）内 supervisor bundle（镜像内 10-08 产物，sha256 `560cbc0f7aa2…`）的 `bootstrap.config`/`rpc.open` 均为 `.strict()` 旧 schema，**无 `preferences`、无 `serviceScope`**（亦无 `cloudBootstrapPreferences`/`writeUserAgentsFile`/`beginUserArchiveImport`）→ 新控制面下发的 `bootstrap.config`（含 preferences 块）被旧 bundle 整帧拒绝（4001 为**执行节点侧**关闭码，`frame-rejected:` 由沙箱 `bridgeInbound` 构造）→ 连接从未 ready，自动/手动同步均不可达。补救 = 按 `packages/server/src/cloud/adapters/sandbox/templates/README.md` 步骤 1–4a **重建模板**（`build:sandbox-assets` → `build:remote`+CLI build → `npx @e2b/cli template create zcode-sandbox-template`），**无需改代码**；A–D 侧行为正确（双向 fail-closed、不伪造 ready、补偿终止干净） |
+| V4r 端到端重验（2026-10-13，模板重建后） | **PASS**：「六」详录。要点：profile 备 3 条（agents-md 199 B / commands `deploy-notes.md` 107 B / mcp `demo-fs` 80 B，v4）后建任务——provision→ready ~10 s 无 `frame-rejected`；**服务端自动同步 `{trigger:'automatic', synced:2/2, failed:0}`**（沙箱文件取证 AGENTS.md 199 B 0600、commands/deploy-notes.md 107 B）；reopen gen2 后**自动同步 `{trigger:'automatic', total:3, synced:3, failed:0}`（含 mcp）**、随即手动「同步用户资源」= **"Sync complete (profile v6): 3 entries — 2 synced, 1 skipped, 0 failed."**（mcp 同名 skip 为 14 §4.7 既有幂等语义；三件实体文件均已在沙箱 HOME 取证）；终态（stop）后横幅 "The previous run has ended / Reopen task"、同步入口消失。截图 `/tmp/V4r-*.png`（关键：V4r-42 同步摘要、V4r-43 终态） |
+| V5 未连接/终态拒绝（API 直测）        | **PASS**：不存在任务 → 404 `not_found`/`task-not-found`；provisioning（未连接）任务 → 409 `not_ready`/`run-not-connected`；终态任务 → 409 `not_ready`/`run-terminal`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+
+**四、API 兜底验收（curl 真实输出）**
+
+| 项                                                             | 结果                                                           |
+| -------------------------------------------------------------- | -------------------------------------------------------------- |
+| `PUT /api/cloud/user-profile/entries/agents-md/user-agents`    | 200（v5；159 B；sha256 `b2da3e802460…` 与本地自算一致）        |
+| `PUT /api/cloud/user-profile/entries/commands/deploy-notes.md` | 200（v6；125 B；sha256 `e72650eb0c8f…` 一致）                  |
+| `PUT …/commands/badid`（entryId 无 `.md`）                     | 400 `invalid_entry`/`invalid-entry-path`                       |
+| `GET /api/cloud/user-profile`                                  | 3 条 / totalBytes 364 = 80+125+159（与条目字节和一致）         |
+| `POST /api/cloud/tasks/:id/user-profile-sync`（未连接/终态）   | 409 `not_ready`（`run-not-connected` / `run-terminal`；见 V5） |
+
+**五、环境性发现清单（均不计代码回归）**
+
+1. **E2B 模板陈旧**（V4 阻断根因）：`zcode-sandbox-template` 自 10/5 创建后未重建，镜像内 bundle（10-08）与新协议（`bootstrap.config.preferences`、`rpc.open.serviceScope`、连接期同步方法）不兼容；模板版本固定（Run recipe 冻结 `templateVersion`/`imageDigest`）是既有设计，故改动协议后**必须重建模板**才能真机联调（README 已载明路径）。
+2. **dev 启动脚本的 origin 覆盖**：`/tmp/zcode-cloud-debug-start.sh` 把 `ZCODE_CLOUD_PUBLIC_ORIGIN` 覆盖为 `http://127.0.0.1:3030`，E2B 云沙箱不可达回环地址（故 run gen1 无任何回连痕迹）；cloud.env 原值（隧道 `https://zcode.yuxuanyi.tech`，cloudflared 正在运行且路由本机 3030）为沙箱可达 origin。脚本已保持原样，隧道 origin 版本见 `/tmp/zcode-cloud-debug-start-public.sh`。
+3. fmt:check 存量失败 35 文件（与 A–D 无关）；lint 存量 warning 77（0 error）。
+4. 环境未预装 agent-browser：安装于 `/tmp/ab-tool`（v0.39.0）并复用 playwright Chromium（Chrome for Testing 151，配置 `/tmp/ab-config.json`），未写入用户全局 npm 或仓库。
+
+**结论**：回归全绿（仅 fmt 存量 35 失败与 8 条凭据门控 skip，均标注不冒充通过）；A–D 的可验收面（设置页 markdown/连接期语义、上传 API 与版本/哈希派生、任务视角门控与未连接零渲染、未连接/终态 409、无在线任务无入口）**逐项 PASS**；唯一端到端 V4 阻断由模板陈旧这一环境因素造成（有镜像内 sha/schema 取证），非本轮代码回归。**判定：达到可提交标准**；建议（不阻塞提交）重建 E2B 模板后补跑一次 V4 真机链路。
+
+（2026-10-13 追加：上述建议已执行——重建模板后 V4r 重验 **PASS**，见下节「六」；本节其余结论不变。）
+
+**六、V4r 重验记录（2026-10-13，模板重建后；命令、耗时与镜像取证）**
+
+前置：为干净起点，dev 库再次轮换（`cloud.db*` 移入 `~/.zcode-cloud-debug/data/backup-20261013-001626-/`，`data/.zcode/v2` 凭据原地保留），按 `/tmp/zcode-cloud-debug-start-public.sh` 原样重启（PID 380567，`PUBLIC_ORIGIN=https://zcode.yuxuanyi.tech`，`capabilities` 200）。无头浏览器 agent-browser 0.39.0（`/tmp/ab-tool`），截图 `/tmp/V4r-*.png`。**未改任何源码；用户 HOME/凭据未动。**
+
+1. **模板重建（两轮，均按 `packages/server/src/cloud/adapters/sandbox/templates/README.md` 步骤 1–4a）**
+   - 构建上下文 `/tmp/zcode-template-build`；`build:sandbox-assets` 产物已就绪未重建（supervisor 3,608,023 B sha256 `38bdba0d9eee…`、runtimeStub 3,362,881 B sha256 `312985f707be…`，manifest buildId `3.14.3+116339235fd2`）。
+   - **第一轮**（仅换 supervisor 资产）：`npx -y @e2b/cli@latest`（2.21.2）`template create zcode-sandbox-template --dockerfile e2b.Dockerfile --cmd /opt/zcode/start.sh --ready-cmd "echo ready" --cpu-count 2 --memory-mb 4096` → exit 0、**耗时 27 s**（E2B 构建 19 s）；templateId `kqko0hhq2zovsio5tkrk`、buildId `893cfa92-7faa-4d4d-8e09-7b04e91a3b87`。临时沙箱取证 `/opt/zcode/supervisor.bundle.mjs` = `38bdba0d9eee7d3d2b3c195d336ce2c1d3582fe1cd4de6de8b6b8d3fcc7ee51a` ✓（原 10-08 旧帧 schema 阻断解除）。
+   - **第二轮**（真机联调暴露镜像内 runtime 产物仍是 10-09 旧构建：`zcode-server.cjs`/`zcode-cli.cjs` 均无 `writeUserAgentsFile`，同步报 `Method not found`）：按 README 步骤 2 重建——`pnpm --filter @zcode/server build:remote`（→ 11,245,556 B）、`pnpm --dir apps/zcode-cli/packages/cli build`（→ 31,284,913 B + `dist/provider/zcode-builtin.json`）；**注意必须清理继承的 ZCODE_* 调试 env**（本机 shell 泄漏 `ZCODE_ENV=production` 与指向 3.15.1 HOME 缓存的 `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`，直接跑会以 `Invalid Built-in Provider config (production)` 失败；`env -u …` 清掉后走仓库自带 `config/provider/zcode-builtin.json`）。重出模板 exit 0、**耗时 35 s**，buildId `9a73c335-9046-4bae-90e1-48f072088e99`（templateId 同上）；镜像内取证：supervisor `38bdba0d…` ✓、`/opt/zcode/zcode-server.cjs` 含 `writeUserAgentsFile`/`beginUserArchiveImport` ✓。
+2. **端到端（a–d）**
+   - 新库 + UI 重建三类资源（V4r marker：agents-md 199 B / commands `deploy-notes.md` 107 B / mcp `demo-fs` 80 B；profile v1→v4）→ 建任务。
+   - provision：`e2b sandbox created` → `bridge attachment opened/welcome/bootstrap.config` → **`cloud run ready`（+10 s）**，全链无 `frame-rejected`/无超时；输入投递 + agent 应答（"Worked for 5s"）。
+   - **（a）自动同步 PASS**：ready 即 `cloud user profile sync completed {trigger:'automatic', synced:2/2, failed:0}`（当时 profile 无 mcp）；沙箱文件级取证 `~/.zcode/AGENTS.md`（199 B/0600，V4r marker 正文）、`~/.zcode/commands/deploy-notes.md`（107 B）——旧镜像上该方法曾 `Method not found`，新镜像写入成功。
+   - **（b）手动同步 PASS**：reopen gen2（profile v6 含三件）后自动同步 `{trigger:'automatic', total:3, synced:3, skipped:0, failed:0}`（含 mcp）；随即点「同步用户资源」→ UI 摘要 **"Sync complete (profile v6): 3 entries — 2 synced, 1 skipped, 0 failed."**（agents-md/commands 覆盖写计 synced；mcp 因同名已存在计 skipped，14 §4.7① 既有幂等语义）。三件实体文件在沙箱 HOME 全部取证：AGENTS.md 199 B/0600、commands/deploy-notes.md 107 B、`~/.zcode/cli/config.json` 219 B/0600 含 `mcp.servers.demo-fs`。
+   - **（c）终态 PASS**：stop 受理（draining → 本 run gen1 因下述②卡 draining 由 `force-stop` 收口；gen2 同）后，横幅 "The previous run has ended / Reopen task"，DOM 无 "Sync user resources"（截图 V4r-27/V4r-43）。
+   - **（d）截图**：`/tmp/V4r-0-project-list.png`（空项目列表）→ `/tmp/V4r-42-gen2-manual-sync-result.png`（同步摘要）→ `/tmp/V4r-43-gen2-terminal.png`（终态）全序列留存。
+   - 附注：本库首轮 V4r 的 gen1 手动同步曾得 "3 entries — 2 synced, 1 failed"，唯一失败 = `agents-md: settings-sync.writeUserAgentsFile failed: closed (Method not found)`，即上述第二轮模板重建的根因，非同步逻辑缺陷。
+3. **V4r 新发现（产品级，未修；均不改动源码）**
+   - ① **agent 会话 cwd 被身份污染**：沙箱内 CLI 会话 `workingDirectory=/workspace/epdg/cloud-task:<taskId>`（不存在）→ 工具 `spawn /bin/bash ENOENT`、工作目录 Read 失败；而进程 cwd 实为 `/workspace/epdg`，镜像内 bash 与克隆仓库均在。根因：v4 `createSession` 只带身份 `workspaceId`，CLI `resolveWorkspaceRefFromId` 对非 `remote:` 身份按本地路径回落（`apps/zcode-cli/packages/bootstrap/src/zcode-protocol/workspace.ts:48-49`，注释已列 cloud-task 走此分支），相对值被 cwd 解析成 `<workspacePath>/<identity>`；既有污染修复器只覆盖 `remote:` 前缀（`apps/zcode-cli/packages/core/src/runtime/helpers/persisted-remote-session-path-repair.ts:49-51`）。与 spec 既有待办一致（02 §2/07 §8/06 §4：「createSession 同时传可信 workspacePath，不能把 `cloud-task:*` 当本地目录」），尚未实施。
+   - ② **checkpoint 后控制面 RPC 挂起（间歇）**：周期/ready 后 checkpoint（`cloud checkpoint saved`，约每 5.3 min）之后，控制面经 bridge 的 RPC 出现无响应至超时（`closed (… timed out)`）——本 V4r 中表现为 gen1 手动同步两次 3 条全超时、append 输入 `uncertain/closed`（V4 首轮同签名）、stop 后 run 卡 `draining` 需 `force-stop`；同一端点在同 run checkpoint 前一切正常（gen2 手动同步紧邻 ready 即成功）。supervisor.log 侧挂起期间无新 `rpc relay session opened`。两端日志段：`/tmp/zcode-cloud-server.log` 00:36/00:39/00:46–00:48/00:51/00:57。
+
+（最终结论：**V4 由 V4r 判定 PASS**——模板/资产陈旧两层阻断均已按 README 重建解除，provision→ready→输入/回复→自动+手动同步（计数 + 沙箱文件级取证）→终态门控全链通过；上述①②为独立的产品级新发现，不推翻 V4 判定，建议另开任务处置。）
+
+### 2026-10-11 M8 简化定调：连接期同步（退役自举安装面；本轮只改 spec）
+
+触发与来源：用户 2026-10-11 **最终口径**对 M8 同步设计做整体简化。落 [14 §4（全节重写）/§9.5](./14-user-profile-sync.md)（决议记录）、[W11 §13](./modules/W11-user-profile-sync.md)（A–D 实施批次）、[02 §0/§4/§5.3](./02-bridge-protocol.md)、[03 §6](./03-control-plane.md)、[07 §7](./07-connection-architecture.md)。**本轮为纯 spec 修订：不动代码**；退役项与新增面的实现属 W11 §13 的 A–D 批次（未开工）。
+
+定调（用户口径原文要点）：
+
+1. **总框架**：云相对 SSH 的**专有面仅三项**——沙箱回连（出站 WSS）、生命周期管理、持久投影/可回放历史；其余一切骑 **SSH 同构服务层**（安装逻辑 = 既有 sync 服务单一来源）。
+2. **同步语义三规则**：①沙箱连接建立（bridge ready）后**自动同步一次最新 profile**；②**手动同步仅在连接状态下允许**——任务视图的同步入口只在 run 连接态且非 terminal 时显示，未连接时 UI 不显示入口、服务端调用也拒绝（409）；③**不做自举期（pre-ready）安装**。
+3. **同步形态**：驱动方 = 控制面；控制面经 bridge relay 调沙箱 runtime 的既有服务（与桌面调 SSH 远端同构）。
+
+口径修正（两处，均已写入 14 §9.5）：
+
+| #   | 修正前（P18–P20，轮 1）                                                           | 修正后（现行，轮 2）                                                                           |
+| --- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| 1   | Run 自举时一次性安装；Run 预约时冻结 `resources_profile_version`，运行中 Run 不变 | **每次连接自动一次 + 连接态手动任意次**；Run 不追踪 profile 版本（冻结列退役）                 |
+| 2   | commands/subagents = tar+gzip 归档上传/自举解包                                   | **单文件 markdown 文本条目**（entryId = 文件名 `*.md`、payload ≤256KiB/条），消除 tar 解包环节 |
+
+退役清单（overview；逐项落位见 [14 §4.8](./14-user-profile-sync.md)）：`bootstrap.resources` 帧（02 §4 帧行已删、02 §5.3 ready 条件恢复 6 条）＋控制面分块下发编排（`bootstrapResources.ts`、bridgeChannel/handshake 接线、registry 的 transfer 记录）＋bundle/分片与窄公开入口（`userProfileBundle.ts`、`userProfileBundleContract.ts`、policy `publicEntrypoints` 项）＋沙箱自研安装器（`resourcesInstaller/Staging/Home/State`、`resourceIntake`、`domain/resourcesBundle`）＋ready 条件 `resources-installed`＋相位 `installing-resources`＋Run 冻结列 `resources_profile_version`（列保留不写不读，注明废弃）＋`applied-resources.json`/journal。**保留不动**：偏好快照链（`bootstrap.config.preferences` → `applied-policy.json` v2 → responder）、profile store 与上传/查询/开关端点、浏览器 allowlist/denylist、`@zcode/services/archive` 权威解包入口、上传侧最小前置校验。
+
+新增面（契约先冻结，见 [14 §9.5④](./14-user-profile-sync.md)）：控制面专用 allowlist `CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST`（浏览器面白名单/denylist 不变）；`rpc.open.serviceScope: "client" | "control-plane"` 分面；skill-sync/plugin-sync 分块导入方法（`beginUserArchiveImport`/`appendUserArchiveImportChunk`/`completeUserArchiveImport`/`abortUserArchiveImport`，收块 → 复用既有校验与解包，突破 4MiB 帧限，SSH 将来可共用）；settings-sync 最小写入方法 `writeUserAgentsFile`（整文件覆盖、原子、0600、≤256KiB）；commands/subagents 文本负载与归档类别收敛（`user-profile.ts`）；手动同步端点 `POST /api/cloud/tasks/:taskId/user-profile-sync`（连接态前置，409 `not_ready`，03 §6 已登记）；任务视图同步入口（连接态且非 terminal 才渲染）。
+
+交叉引用同步（本轮已落）：[00 §1/§10 索引](./00-overview.md)（M8 表述改为连接期同步）、[13 §3](./13-module-map.md) W11 行摘要、[14 §1/§2/§3/§5/§6/§7/§8/§9.1③④/§9.5](./14-user-profile-sync.md)、[02 §0/§4/§5.3](./02-bridge-protocol.md)、[03 §6](./03-control-plane.md)、[07 §7](./07-connection-architecture.md)、[W11 顶部/§13](./modules/W11-user-profile-sync.md)。
+
+验收：
+
+| 项                                             | 本轮（纯 spec）结果                                                                                                                                                                                                                                                                                                                  |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 交叉引用无死链                                 | 改动文件内 Markdown 相对链接与锚点目标全部存在（脚本核对，见下"验证方式"）                                                                                                                                                                                                                                                           |
+| `npx oxfmt`（改动文件）                        | 通过（仓库根 `npx oxfmt`；见下"验证方式"）                                                                                                                                                                                                                                                                                           |
+| `git status`／范围核对                         | 仅 `specs/cloud-agent/**` 下 8 个文件被改（14/02/03/07/10/W11 + 00/13 摘要行），代码与其它包零改动                                                                                                                                                                                                                                   |
+| 计划验收（A–D 批次完成后逐批执行；本轮未执行） | `pnpm typecheck`、`pnpm lint`、`pnpm architecture:check --changed`、`pnpm fmt:check`、各包 `test`（shared/services/server/client/ui）、`pnpm --filter @zcode/server build:sandbox-assets`、**无头浏览器 E2E**（未连接 run 无同步入口／连接态入口可用并展示逐条结果／设置页 commands-subagents 为文本编辑面板）；真实沙箱端到端归 W10 |
+
+验证方式（可复现）：①链接核对用一次性脚本提取改动文件中的 Markdown 相对链接并 `fs.existsSync` 校验目标存在；②格式用 `npx oxfmt <改动文件>`（等价 `pnpm fmt:check` 的本文件子集）。本轮未执行 typecheck/lint/测试（无代码改动，不产生新构建/测试面）；不将"未执行"写成通过。
+
+### 2026-10-11 M8 简化改造 B 批：控制面连接期同步（W11 §13B；含 60s 超时偏离说明）
+
+触发与来源：落 [W11 §13B](./modules/W11-user-profile-sync.md) 的控制面批次（A 批已冻结契约：`rpc.open.serviceScope` 必填、`CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST`、分块导入四方法、`writeUserAgentsFile`、commands/subagents markdown 文本分支、`cloudUserProfileSyncResponseSchema`）。动 `packages/server/src/cloud`（控制面）、`packages/client`（SDK 成对登记）、`packages/shared`（端点矩阵行 + 路径常量）与 spec；**不动 `cloud/execution/**`（C 批）与 `packages/ui`（D 批）\*\*。
+
+落地内容：
+
+1. **退役自举下发链**（[14 §4.8](./14-user-profile-sync.md)）：删 `app/provisioning/bootstrapResources.ts`、`domain/userProfileBundle.ts`、`userProfileBundleContract.ts`（module.ts / architecture-policy.yaml 的 `publicEntrypoints` 项同步删除）；`app/ports/attachmentPort.ts` 与 `adapters/ws/attachmentPort.ts` 删 `BootstrapResourcesFrame`/`sendBootstrapResources`；`adapters/ws/handshake.ts` 删 welcome 后的 resources 追加段；`app/attachments/registry.ts` 删 `resourcesTransfer*`/`markBootstrapResourcesSent`/`bootstrapResourcesSent`；`contract.ts`/`deps.ts`/`assembleCloudControlPlane.ts`/`entry-cloud-control-plane.ts` 同步清线。
+2. **Run 冻结列退役**：`runRepo` 停止写 `resources_profile_version`、删 `runs.resourcesProfileVersion` handler 与端口方法（`storageMethodTypes.ts`/`cloudStorageClient.ts`/`runPort.ts` 一并移除）；列与迁移 0008 保留，注明废弃（[14 §4.8](./14-user-profile-sync.md)）。
+3. **store/domain 适配 markdown 条目**（[14 §4.5](./14-user-profile-sync.md)）：`content_kind` 增 `markdown`（迁移 `0008` 的 CHECK 就地扩列——本功能未发布、无存量 commands/subagents 行，**无需数据迁移**；已应用 0008 的旧 dev 库需重建，属预期）；`domain/userProfile.ts` 新增 markdown 类别判定与超限前置（reason `commands-content-too-large`/`subagents-content-too-large`）；`userProfileService` 上传分支按类别落正文；`userProfileRepoHelpers` 的派生口径 = 正文 UTF-8 字节（`sha256`/`bytes` 与 agents-md 同口径）；HTTP 上传/回显/开关端点行为对齐（路径参数 schema 已由 A 批的 `cloudUserProfileEntryPathParamsSchema` 强制 `.md` 后缀）。
+4. **连接期同步编排（核心新增）**：`app/userProfile/profileSyncService.ts`（门控/单飞/汇总/日志/自动触发）+ `app/userProfile/profileSyncCategories.ts`（逐类别调用翻译，行数门禁拆分）+ `app/ports/controlPlaneRpcPort.ts` + `domain/userProfileSync.ts`（base64 纯编解码、分块、mcp 分批、subagents front-matter 映射、错误文本有界）。执行器取**最新** profile（`snapshot` → `readVersionEntries`，只同步 enabled 条目），前置校验按 order = Run 存在且非终态 → 无 `stopRequested` → 当前 attachment 存在且 ready，不满足返回结构化 `not_ready`（`run-not-found`/`run-terminal`/`stop-requested`/`run-not-connected`）；逐类别调沙箱既有服务（mcp 分批 `importMcpServers`、skills/plugins 分块 begin/append/complete、commands `list`+`writeCommandFile`/`updateCommandFile`、subagents `list`+`createAgent`/`updateAgent`、agents-md `writeUserAgentsFile`），逐条 try（单条失败不中断其余），整体响应 = `cloudUserProfileSyncResponseSchema`。
+5. **控制面 RPC 通道**：`adapters/ws/controlPlaneRpcChannel.ts`（每 Run 一条流、`rpc.open` 带 `serviceScope:"control-plane"`、真实 `ChannelClient`、30s 调用超时），`bridgeChannel.ts` 装配/routing/release/dispose；白名单用 `isCloudControlPlaneServiceAllowed` 在 app 层预检（沙箱侧按 scope 选白名单属 C 批）。
+6. **自动触发**：`adapters/ws/inbound.ts` 的 `bridge.ready` 分支在 `runs.markReady` + `registry.markReady` 之后调 `triggerAutomatic`（同 run+epoch 去重、失败只记 `warn`、不 fail run）；**手动端点** `POST /api/cloud/tasks/:taskId/user-profile-sync`（`adapters/http/userProfileRoutes.ts`）与 shared 矩阵行（`userProfileEndpoints.ts` + `CLOUD_USER_PROFILE_ENDPOINT_PATHS.syncTask`）、client SDK 方法 `syncTaskUserProfile`（schema 索引 + 方法 + fixture + invocations）成对登记。
+7. **`browserStreams` 补 `serviceScope:"client"`**（A 批移交项）。
+
+自主决定（本批无 A 批未决项，以下为提高可核对性的落地选择）：
+
+| #   | 决定                                                                                                                                                                                                                                  | 依据/影响                                                                                                                                                                                                                  |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | commands 条目：`writeCommandFile`/`updateCommandFile` 的 `config.prompt` = **整份 markdown 正文**（含 front-matter）                                                                                                                  | 既有生成器在无 `description`/`argument-hint` 时原样写出 `prompt`（`generateMarkdownCommandFileContent`），并由既有 parser 读回 front-matter → 正文逐字节落盘、解析仍由既有服务保留（[14 §4.5](./14-user-profile-sync.md)） |
+| 2   | subagents 条目：控制面按既有 serializer 的键集把 front-matter 映射成 `SubAgentConfig`（`name`/`description` 回落 entryId、body = `systemPrompt`、`model`+`thoughtLevel` 经 shared 的 `parseSubagentMarkdownSelection`；未知键不携带） | 沙箱落盘是既有服务的规范化序列化结果，与条目正文格式可能不同（键序/引号/未知键）——"原样落盘"需 subagents 服务新增原始 markdown 写入方法，**列为 C/D 批悬项**；名称合法性与必填校验仍由既有服务裁决                         |
+| 3   | mcp 调用显式带 `enabled: true`                                                                                                                                                                                                        | 既有 `setServerEnabled(config, undefined)` 走**停用**分支（`14 §4.2` 的 `[{name, config}]` 简写不含该字段）；只同步 enabled 条目，故显式为 true                                                                            |
+| 4   | mcp 分批只对 mcp 生效（单文件条目逐条调用，每条 ≤256KiB 天然有界）；批上限 = `JSON.stringify({name, config})` 累计 ≤2MiB（[14 §4.2](./14-user-profile-sync.md) 冻结值）                                                               | 既有写方法一次一条，无法批装；批划分在 domain 纯函数（同批按 entryId 升序，确定性）                                                                                                                                        |
+| 5   | `HashPort` 增 `sha256HexBytes`（必填）                                                                                                                                                                                                | 归档分块/整包摘要必须按解码后字节计算；字符串方法会把二进制按 UTF-8 摘要（既有端口只有字符串形态），实现点仅 `entry-cloud-control-plane.ts` + 测试 `FakeHash`                                                              |
+| 6   | 单飞 join 语义：手动请求 join 在飞的自动同步时，返回**同一次同步的真实结果与真实 `trigger`**（不伪造为 `manual`）                                                                                                                     | [14 §4.6](./14-user-profile-sync.md)「等待同一次结果返回（不排队第二次调用）」；回执如实反映承载本次结果的同步来源                                                                                                         |
+| 7   | 迁移 `0008` 的 `content_kind` CHECK 就地扩 `markdown`                                                                                                                                                                                 | 0.5 形态的功能未发布、无存量 archive 行（[14 §9.5](./14-user-profile-sync.md)「无需迁移」）；不新增 0009 以免制造"已发布迁移被改写"疑虑；旧 dev 库需重建并已记录                                                           |
+| 8   | 自动触发去重集合为有界 FIFO（256 键）                                                                                                                                                                                                 | 连接态事实、可重建；不引入持久状态                                                                                                                                                                                         |
+
+**60s 超时偏离 5 分钟建议（如实记录，A 批实现事实）**：[14 §4.4](./14-user-profile-sync.md) 建议"未完成分块导入会话在断连/超时（建议 5 分钟）后释放缓冲"，A 批实现取 `DEFAULT_IDLE_TIMEOUT_MS = 60_000`（`packages/services/src/remote-sync/userArchiveImportSession.ts`），B 批的控制面调用超时取 30s（`CONTROL_PLANE_RPC_TIMEOUT_MS`）以保证单次调用先于会话空闲窗口失败。偏离理由：控制面驱动的分块导入是**单次同步序列**，块间间隔由控制面串行下发决定（毫秒级），60s 空闲窗口对"断连/崩溃即释放"更保守（有界资源更快回收），且调用侧 30s 超时保证不会在半开连接上挂满 5 分钟。收敛建议：若将来 SSH 侧共用该会话状态机（14 §4.4 尾段），空闲窗口应改为可配并复核 5 分钟；
+
+落地物：
+
+```text
+packages/server/src/cloud/           app/ports/controlPlaneRpcPort.ts（新）、app/userProfile/profileSyncService.ts（新）、app/userProfile/profileSyncCategories.ts（新）、
+                                     domain/userProfileSync.ts（新）、adapters/ws/controlPlaneRpcChannel.ts（新）
+                                     app/ports/attachmentPort.ts、app/attachments/registry.ts、app/deps.ts、app/assembleCloudControlPlane.ts、app/ports/runPort.ts、
+                                     app/ports/hashPort.ts（+sha256Bytes）、app/ports/userProfileStorePort.ts、app/userProfile/userProfileService.ts、
+                                     domain/userProfile.ts、contract.ts、module.ts
+                                     adapters/ws/{attachmentPort,handshake,browserStreams,bridgeChannel,inbound,types}.ts、
+                                     adapters/http/userProfileRoutes.ts、adapters/entry-cloud-control-plane.ts、
+                                     adapters/storage/{cloudStorageClient,storageMethodTypes}.ts、adapters/storage/repositories/{runRepo,userProfileRepo,userProfileRepoHelpers}.ts、
+                                     adapters/storage/sqlite/tables/profile.ts
+删除：                                app/provisioning/bootstrapResources.ts、domain/userProfileBundle.ts、userProfileBundleContract.ts
+packages/shared/src/cloud/            user-profile.ts（路径常量 + 同步端点）、userProfileEndpoints.ts（矩阵行）
+packages/client/src/cloud/            cloudWireSchemas.ts、cloudControlPlaneClient.ts（方法合成对）
+packages/server/test/                 cloudUserProfileSync.test.ts（新）、cloudControlPlaneRpcChannel.test.ts（新）、cloudUserProfileSyncFakes.ts（新）、
+                                     cloudBootstrapPreferences.test.ts（新，替代退役的 cloudBootstrapResources.test.ts）、
+                                     cloudUserProfileDomain/Http/Store.test.ts、cloudCoreEntry/Contract.test.ts、cloudCoreFakes/AdapterFakes/StorageFake.ts
+packages/shared/test/                 cloudUserProfile.test.ts、packages/client/test/{cloudFixtures,cloudSdkInvocations}.ts
+architecture-policy.yaml、packages/server/src/cloud/module.ts（publicEntrypoints 收敛为 contract.ts）
+```
+
+验证（真实执行，仓库根；execution 侧遗留失败与本次分开）：
+
+| 命令                                               | 结果                                                                                                                                                                                          |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm typecheck`                                   | **控制面/shared/client/services 全绿（0 错误）**；仅剩 `cloud/execution/**` 15 处（C 批）与 `packages/ui/**` 4 处（D 批）——见下方移交清单                                                     |
+| `pnpm lint`                                        | **0 error / 77 warning**（警告全部在未改动文件/行；本批新文件 0/0）                                                                                                                           |
+| `pnpm fmt:check`（本批涉及文件）                   | 全部通过（`oxfmt --check` 44 个文件干净，含 `oxfmt` 写回）                                                                                                                                    |
+| `pnpm architecture:check --changed`                | **OK：violations 0 / baseline 0 / new 0**                                                                                                                                                     |
+| `pnpm --filter @zcode/shared test`                 | **75 tests / 75 pass / 0 fail**（较 P20 基线 +6：端点行/路径常量/同步契约扩展）                                                                                                               |
+| `pnpm --filter @zcode/client test`                 | **38 tests / 38 pass / 0 fail**（新增 `syncTaskUserProfile` 由既有不变量与 round-trip 用例覆盖，测试数不变）                                                                                  |
+| `pnpm --filter @zcode/server test`                 | **668 tests / 654 pass / 6 fail / 8 skip**（本批用例全绿：同步编排 8、ws 通道 4、HTTP markdown+手动同步 2、prefs 2、domain 7、store 退役列改写；6 个失败全部为 execution 退役遗留，见移交 C） |
+| `packages/services` 测试（直接 `tsx --test`）      | **42 tests / 42 pass / 0 fail**                                                                                                                                                               |
+| `pnpm --filter @zcode/server build:sandbox-assets` | **失败（符合预期，C 批范围）**：`src/cloud/execution/domain/resourcesBundle.ts` 仍 import 已删的 `../../userProfileBundleContract.js`——C 批删除安装器后恢复                                   |
+| `pnpm --filter @zcode/ui test`                     | 未执行（本批未改 UI；D 批负责）                                                                                                                                                               |
+
+移交 C 批（沙箱清理；本批**不修**的 execution 侧编译/测试错误）：
+
+| #   | 文件/项                                                                                                                                                                                                                                                                                                                                                    | 原因                                                                                                                                                              |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `execution/domain/resourcesBundle.ts`                                                                                                                                                                                                                                                                                                                      | 引用已删 bundle 窄入口 + 已删 `CLOUD_USER_PROFILE_CHUNK_*`/`BootstrapResourcesFrame`                                                                              |
+| 2   | `execution/adapters/{resourcesInstaller,resourcesStaging}.ts`                                                                                                                                                                                                                                                                                              | 同上（+ markdown 分支的 `archiveBase64` 访问）                                                                                                                    |
+| 3   | `execution/app/resourceIntake.ts`、`execution/app/bridgeInbound.ts`                                                                                                                                                                                                                                                                                        | `BootstrapResourcesFrame` 与 `bootstrap.resources` 帧路由                                                                                                         |
+| 4   | `execution/app/bootstrap.ts`、`execution/domain/readyGate.ts`                                                                                                                                                                                                                                                                                              | `installing-resources` 相位（shared 已删，ready 条件恢复 6 条）                                                                                                   |
+| 5   | `execution/app/commandTransport.ts`                                                                                                                                                                                                                                                                                                                        | `rpc.open` 缺 `serviceScope`（建议 `"control-plane"`）                                                                                                            |
+| 6   | `execution/app/rpcRelay.ts`                                                                                                                                                                                                                                                                                                                                | 按 `serviceScope` 选白名单（client=浏览器面 / control-plane=控制面面），denylist 对两面生效；C 批新增 scope 后 `CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST` 才真正可调 |
+| 7   | 测试/支撑：`cloudExecutionResources{E2e,Ready}.test.ts`、`cloudResourcesBundle.test.ts`、`cloudResourcesInstall.test.ts`、`cloudResourceArchives.ts`、`cloudExecutionFakes.ts`、`cloudBridgeFakes.ts`（`resourcesFrames` + `memoryRpcFrame` 缺 `serviceScope`）、`cloudExecutionRuntime.test.ts` 的 supervisor 打包用例、`cloudBridgeSession.test.ts` B-05 | 均由 1–6 的退役/契约变更派生（删除或改写）                                                                                                                        |
+
+移交 D 批（UI）：`packages/ui/src/hooks/cloud/useCloudUserResources.ts` 4 处类型错误（commands/subagents 由归档改 markdown 文本负载）；设置页分区改文本编辑面板、任务视图同步入口（连接态渲染）、无头浏览器 E2E。
+
+范围核对：本批改动 = `packages/server/src/cloud`（控制面，含 3 个删除）、`packages/server/test`、`packages/shared/src/cloud` + `packages/shared/test`、`packages/client/src/cloud` + `packages/client/test`、`architecture-policy.yaml`、`specs/cloud-agent/**`；`packages/desktop`、`packages/web`、`apps/zcode-cli`、`packages/rpc`、根 `package.json`/`pnpm-lock.yaml` 零改动。
+
+### 2026-10-11 M8 简化改造 C 批：沙箱执行节点清理 + relay 分面接入（W11 §13C）
+
+触发与来源：落 [W11 §13C](./modules/W11-user-profile-sync.md) 的沙箱清理批次（A 批已冻结契约：`serviceScope` 必填、`CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST`；B 批已落控制面编排与 `serviceScope:"control-plane"` 传输）。动 `packages/server/src/cloud/execution/**` + `packages/server/test/**` + 构建产物（`build:sandbox-assets`）+ spec 与一处 shared 注释；**不动控制面其余面（`packages/server/src/cloud` 的 app/adapters 非 execution 部分）与 `packages/ui`（D 批）**。
+
+落地内容：
+
+1. **退役自研安装链（全删，14 §4.8）**：删 `execution/domain/resourcesBundle.ts`、`execution/app/resourceIntake.ts`、`execution/adapters/{resourcesInstaller,resourcesStaging,resourcesHome,resourcesState}.ts`（B 批移交清单 1–3 的根因）；`domain/readyGate.ts` 删 `resources-installed` 条件位与 `installing-resources` 相位（`READY_CONDITIONS` 回到 5 项 = 02 §5.3 条件表节点侧 1–5；`PHASE_ORDER` 恢复 6 相位，穷尽断言 `PHASE_ORDER_EXHAUSTIVE` 同步，shared 再动相位立刻编译失败）；`app/bootstrap.ts` 删 `resources` 选项、`resourcesInstalled` 标志、`installing-resources` 相位与 intake 结论读取（**偏好快照链完整保留**：`options.policy.install` 落盘、`preferencesInstalled` 由 `installedPolicyVersion`/`policy.applied()` 真值驱动、`configVersion` 上报 = 快照 configVersion ?? policyVersion；局部量 `resourcesConfigVersion` 随退役改名 `appliedConfigVersion`）；`app/bridgeInbound.ts` 删 `bootstrap.resources` 帧路由；`app/bridgeState.ts` 删 `resources` 选项与 `resourcesTimeoutMs`；`app/bridgeSession.ts` 删每连接 `resources.begin`（保留 P19b 的"自举未完成不补发 ready"守卫）；`adapters/supervisorRuntime.ts` 删 intake/安装器装配（保留 runtime env 的 `ZCODE_APPLIED_POLICY_SNAPSHOT` 注入 = 偏好链唯一 env 交接）。
+2. **relay 按 `serviceScope` 分面（核心新增，14 §4.2）**：`app/rpcRelay.ts` 新增 `serviceAllowlistForScope(scope)`（`"client"` → `CLOUD_ATTACHMENT_SERVICE_ALLOWLIST`；`"control-plane"` → 浏览器面 ∪ `CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST` 的派生并集 `CLOUD_CONTROL_PLANE_SERVICE_REACHABLE_CHANNELS`；其余 → `null`），`openSession` 先取分面再建流：映射不到允许集 **拒绝该 `rpc.open`**（warn + 不建会话，沿既有 stale-frame 拒绝形态）、denylist 对两面注册、未列出的通道名仍**不注册也不代理**（调用停在 ChannelServer 未注册通道的挂起/超时路径，不新增第二套拒绝语义）；会话日志补 `serviceScope`（浏览器流生命周期排障面）。`app/commandTransport.ts` 的 `rpc.open` 补 `serviceScope:"control-plane"`（其 `zcode-agent` 在并集内）。
+3. **测试与支撑清理**：删 `cloudResourcesBundle.test.ts`（12 用例）、`cloudResourcesInstall.test.ts`、`cloudExecutionResourcesE2e.test.ts`（6 用例）、`cloudResourceArchives.ts`（B 批移交清单 7）；`cloudExecutionResourcesReady.test.ts` 改写为"退役断言 + 偏好快照用例"（7 → 5 用例）；`cloudExecutionFakes.ts` 删 intake 假件与 `BootstrapResourcesFrame` 依赖、`cloudBridgeFakes.ts` 删 `resourcesFrames` 下发并给 `memoryRpcFrame` 的 `rpc.open` 补 `serviceScope`（默认 `"client"`）、`cloudExecutionBootstrap.test.ts`/`cloudBridgeSession.test.ts`（B-05 帧）/`cloudBridgeProjection.test.ts`（relay 帧按 `client` 分面）适配；**新增 `cloudExecutionRpcRelayScope.test.ts`（5 用例）**：并集常量与两表不相交、client 分面可调浏览器面通道但 sync 通道被拒（且本地服务零调用）、control-plane 分面 6 个控制面通道 + 浏览器面 `zcode-agent` 全通过、denylist 两面被拒 + 未知通道不代理、未知 `serviceScope` 的 open 被拒（无会话响应）。
+4. **构建产物**：`build:sandbox-assets` 恢复通过（B 批记录其为失败：旧 bundle 内嵌已删的 `userProfileBundleContract` 引用）。
+
+自主决定（本批无 A/B 批未决项，以下为可核对性/一致性的落地选择）：
+
+| #   | 决定                                                                                                                                                                                              | 依据/影响                                                                                                                                                                                                                                            |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **`control-plane` 分面 = 浏览器面 ∪ 控制面面的并集**（用户 2026-10-11 定夺），并集在执行侧准入点**派生**（`rpcRelay.ts` 的 `CLOUD_CONTROL_PLANE_SERVICE_REACHABLE_CHANNELS`），不新增 shared 导出 | 控制面是受信基础设施，能力 ⊇ 浏览器（命令投递走浏览器面的 `zcode-agent`，资源同步走 6 个 sync 通道）；两份白名单各自仍是 shared 单一来源，"并集"只存在于唯一准入点（沙箱 relay），避免 shared 契约面出现第三个近似常量（14 §4.2 已就地标注并集语义） |
+| 2   | 未知 `serviceScope` 的 `rpc.open` 拒绝 = **warn + 不建会话**（不回 `rpc.close`）                                                                                                                  | 沿既有 stale-frame 拒绝形态（warn 后丢弃）；该分支只能被"绕过 shared schema 的原始帧"触发（真实链路在帧解码层已整帧拒绝并关连接），回 close 会给未鉴权字节一个额外回声面                                                                             |
+| 3   | 被拒流/未注册通道的调用行为**维持现状**（挂起至 ChannelServer 超时错误），不新增显式拒绝通道                                                                                                      | "白名单即唯一注册面"是 02 §0 既有不变量；为新分面把不允许的通道注册成 deny 会给浏览器面引入行为变化（现状是超时），C 批不做行为变更（新增分面用例断言"本地服务零调用"这一真实安全属性）                                                              |
+| 4   | `bootstrap.ts` 局部量 `resourcesConfigVersion` → `appliedConfigVersion`                                                                                                                           | 该值即"已应用配置版本"（偏好快照 configVersion，14 §6）；退役后旧名把读代码的人引向已删除的资源安装链，改名零行为变化                                                                                                                                |
+| 5   | `cloudExecutionResourcesReady.test.ts` **保留文件名**（不改为 `cloudExecution*Ready`/`*Preferences` 新名）                                                                                        | 该文件原职责是"资源 ready 门控"，退役后其核心内容之一正是**退役断言**（条件集/相位不得回流）+ 保留的偏好快照链；改名会让"退役断言放在哪"失去锚点（连接期同步的用例在控制面侧文件）                                                                   |
+| 6   | shared 的 `CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST` **只改注释**（说明准入集 = 并集），常量与导出名不动                                                                                             | 并集语义改变了该常量的读法（"增量"而非"全集"）；不动导出面 = 不产生契约变更，避免 A 批冻结面在 C 批被重开（改动仅 JSDoc，typecheck/测试行为零变化）                                                                                                  |
+| 7   | 顺带把 `execution/sandbox/supervisorMain.ts` 的既有格式偏差**还原不动**（oxfmt 命中但 revert）                                                                                                    | 该文件属"任务无关的既有 fmt 失败"（未改动文件），保持范围干净；存量失败在验证表中单列                                                                                                                                                                |
+
+验证（真实执行，仓库根）：
+
+| 命令                                               | 结果                                                                                                                                                                                                                                                                                                |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm typecheck`                                   | **execution 15 处全部消除（0 错误）**；全仓仅剩 `packages/ui/src/hooks/cloud/useCloudUserResources.ts` 4 处（commands/subagents 归档→markdown 文本负载），属 **D 批移交项**（B 批记录已列），本批范围不含                                                                                           |
+| `pnpm lint`                                        | **0 error / 77 warning**（与 B 批基线同数；本批改动文件 0/0，warning 全部落在未改动文件）                                                                                                                                                                                                           |
+| `npx oxfmt`（本批文件）                            | 全部通过（`--check` 19 个文件干净；另发现未改动文件 `execution/sandbox/supervisorMain.ts` 为既有 fmt 失败，已 revert 不改）                                                                                                                                                                         |
+| `pnpm architecture:check --changed`                | **OK：violations 0 / baseline 0 / new 0**                                                                                                                                                                                                                                                           |
+| `pnpm --filter @zcode/server test`                 | **674 tests / 666 pass / 0 fail / 8 skip**（B 批记录基线 668 / 654 / **6 fail** / 8 skip——6 个失败用例随退役文件删除；8 skip 为存量门控用例，不变）                                                                                                                                                 |
+| `pnpm --filter @zcode/server build:sandbox-assets` | **通过**：`supervisor.bundle.mjs` **3523.5 KiB**（sha256 `38bdba0d9eee`；P20 基线 3563.0 KiB → **−39.5 KiB**，退役安装器后不再拉入 staging/archive 链）、`runtimeStub.bundle.mjs` **3284.1 KiB**（sha256 `312985f707be`；较 P20 3283.1 KiB +1.0 KiB，B 批 shared 增量的既有影响，本批未动其入口链） |
+| `pnpm --filter @zcode/ui test`                     | 未执行（本批未改 UI；D 批负责）                                                                                                                                                                                                                                                                     |
+
+范围核对：本批改动 = `packages/server/src/cloud/execution/**`（6 删除 + 8 修改）、`packages/server/test/**`（4 删除 + 6 修改 + 1 新增）、`packages/shared/src/cloud/serviceChannelAllowlists.ts`（仅 JSDoc）、`specs/cloud-agent/{14,W11,10}*`。`packages/ui`、`packages/client`、`packages/services`、`packages/desktop`、`apps/zcode-cli`、根 `package.json`/`pnpm-lock.yaml` 零改动（`packages/server/src/cloud` 非 execution 面的既有变更均来自 A/B 批）。
+
+### 2026-10-11 M8 简化改造 D 批：UI 收尾（设置页 markdown 条目 + 任务面板同步入口；W11 §13D）
+
+触发与来源：落 [W11 §13D](./modules/W11-user-profile-sync.md) 的 UI 批次（A 批契约、B 批端点 `POST /api/cloud/tasks/:taskId/user-profile-sync` 与 SDK `syncTaskUserProfile`、C 批沙箱清理均已完成）。动 `packages/ui`（`src/cloud`、`src/hooks/cloud`、`src/settings`、`src/store/cloud`、`src/i18n/locales`、`src/app-shell`、`src/index.ts`、`test/`）与 spec；**不动 `packages/server`、`packages/shared`、`packages/services`、`packages/client`**。
+
+落地内容：
+
+1. **修 B 批移交的 4 处类型错误 + 条目形态切换（14 §4.3/§4.5）**：`hooks/cloud/useCloudUserResources.ts` 的归档上传体分支收敛为 `skills`/`plugins`（`userResourcesModel.buildUserResourceArchiveUploadBody`），新增 `saveMarkdownEntry`（`{category, content}` 负载 + entryId 校验 + 正文缓存以 PUT 响应 sha256 回填）；`store/cloud/cloudUserResourcesStore.ts` 的 pending 动作增 `markdown-text`；`cloud/userResourcesModel.ts` 新增 markdown 类别判定（`isUserResourceMarkdownCategory`）、`validateUserResourceMarkdownEntryId`（`*.md` 形状，失败分档 empty/shape/markdown-suffix）、`validateUserResourceMarkdownContent`（UTF-8 ≤256KiB，字符数先行闸 + 精算）、`validateUserResourceMarkdownEntry`（组合）与 `buildUserResourceMarkdownUploadBody`；`validateUserResourceArchiveFile` 参数收窄为 `CloudUserProfileArchiveCategory`（调用面同步）；清掉 `CLOUD_USER_RESOURCES_AGENTS_MD_ENTRY_ID` 注释里已退役的 `resourcesStaging` claim 依据。
+2. **设置页录入面板（W11 §13D）**：新增 `settings/cloudUserResourcesMarkdownPanel.tsx`（commands/subagents：条目列表 + 新建/覆盖编辑器 + 删除 + 开关；文件选择读文本并自动取文件名为 entryId、非法 entryId 即时提示、编辑已有条目按需 `GET` 回显、保存后清脏）；`CloudUserResourcesSection` 的分派改为 archive（skills/plugins）→ markdown（commands/subagents）→ mcp → agents-md；归档面板文档收敛为两类；`cloudUserResourcesSectionParts` 增 markdown 两档校验文案映射。
+3. **任务面板同步入口（核心新增，14 §4.6）**：纯逻辑 `cloud/cloudTaskUserProfileSync.ts`（门控 `resolveCloudUserProfileSyncEntry`、结果摘要 `summarizeCloudUserProfileSync`、错误文案 `describeCloudUserProfileSyncError`）；hook `hooks/cloud/useCloudTaskUserProfileSync.ts`（选中任务读 context 投影、非选中用 `useCloudTask` 兜底；attachment 在线判定 `selectCloudAttachmentForTask`）；组件 `cloud/CloudTaskUserProfileSyncRow.tsx` 挂进 `WorkspaceShellLayout` 主区状态槽位（`CloudTaskRunStatusBanner`/`CloudTaskArchivedBanner` 同区，运行状态与操作呈现只有这一个区域）；`cloud/cloudPorts.ts` 增 `syncTaskUserProfile(taskId)`（与 SDK 既有方法结构一致，W9 直接注入）。
+4. **文案（i18n，两个既有 locale 同步：zh-CN/en-US）**：设置页顶部说明改连接期语义（"沙箱连接建立后会自动同步一次；连接中的任务可在任务面板手动同步；未连接时不提供同步"）；删除 `savedNextRun` 等"新任务安装/运行中冻结"口径（`savedHint`、`entry.disabled`、`entry.deleteDescription`、`agentsMd.hint/note`、`error.invalidEntry` 同步改写）；新增 `settings.cloudUserResources.markdown.*`（10 键）、`validation.markdownSuffix/markdownTooLarge`、`cloud.userProfileSync.*`（8 键）。
+
+门控与挂载点（回答"用什么做连接态判定"）：
+
+| 项              | 落位                                                                                                                                        | 判定依据                                                                                                                                                                                                                                                               |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 挂载位置        | `packages/ui/src/app-shell/WorkspaceShellLayout.tsx:1982`（主区状态槽位：status banner 之后、`ScopedErrorBoundary` 之前）                   | 云任务的状态与操作呈现（provisioning/draining/ended/reopen/force-stop）都在该槽位；与停止/重开等操作同区域，不在别处长出第二个"任务操作区"                                                                                                                             |
+| 入口渲染        | `cloud/CloudTaskUserProfileSyncRow.tsx`（`entry.visible` 为假即 `return null`）                                                             | 未连接/终态**不渲染**（不是禁用态，14 §4.6「门控双保险」）                                                                                                                                                                                                             |
+| attachment 在线 | `hooks/cloud/useCloudTaskUserProfileSync.ts:75`：`selectCloudAttachmentForTask(context.attachment, taskId) !== null`                        | 与 `useCloudTaskStop`/`CloudTaskRunStatusBanner`/`useGitRepository`（`useGitRepository.ts:418`）同一条"attachment 归属当前任务"规则（04 §3.3「Task.active ≠ attachment ready」）；非选中任务工作区不借别的任务的 attachment                                            |
+| Run 连接态      | `cloud/cloudTaskUserProfileSync.ts` 的 `resolveCloudUserProfileSyncEntry`：`activeRunStatus === "ready"` + 非终态（stopped/expired/failed） | 服务端门控是 **bridge ready**（`profileSyncService.resolveTarget` 要求 registry session ready）；`disconnected`/`draining` 时 attachment 可能仍在（04 §3.3 重连/保存窗口）但服务端不会放行（未 ready / 命中 stopRequested 屏障），显示"可点但必 409"的入口不是正确呈现 |
+
+自主决定（本批无 A–C 批未决项；以下为可核对性与一致性的落地选择）：
+
+| #   | 决定                                                                                                 | 依据/影响                                                                                                                                                                       |
+| --- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | 连接态取 `activeRun.status === "ready"`（比"非终态"更严），而非"非终态即显示"                        | 门控的真实语义是 bridge ready（14 §4.6）；disconnected/draining 下服务端必然拒绝（`run-not-connected`/`stop-requested`），显示入口会给出误导性可点性。UI 只隐藏、服务端仍是权威 |
+| 2   | 手动同步结果就地内联展示（计数 + ≤5 条失败简列 + 截断计数），不弹 toast                              | 结果是"逐条清单 + 可复制诊断"，toast 一闪即逝且会覆盖上下文；设置页既有条目错误也是行内呈现（`UserResourceInlineError`）。`maxFailures` 默认 5 在纯函数里可调                   |
+| 3   | 响应 `trigger === "automatic"` 时额外提示"本次与进行中的自动同步合并"                                | B 批单飞语义：手动 join 在飞自动同步时回执保留真实 `trigger`（不伪写 manual）；UI 如实呈现来源，不把 join 说成独立的一次手动同步（14 §4.6 单飞）                                |
+| 4   | markdown entryId 的失败分三档（empty / shape / markdown-suffix），后缀档独立文案                     | 用户从文件选择器拿到的文件名常缺/错后缀，独立文案最可行动；形状判定仍复用 shared `cloudUserProfileMarkdownEntryIdSchema`（不手写第二份规则，14 §4.5）                           |
+| 5   | 上传体构造下沉到纯模块（`buildUserResourceArchiveUploadBody`/`buildUserResourceMarkdownUploadBody`） | 修完类型错误后 `useCloudUserResources.ts` 触发 `max-lines`（>400 行代码）；下沉的分支构造属纯逻辑，与"UI 不复制负载规则"口径一致，hook 只留校验 + 编码 + 调用 + 回填            |
+| 6   | markdown 面板提供"从文件读取…"（`File.text()` + 文件名作 entryId），不解析 tar/不写临时文件          | 与 agents-md 编辑器同形态（14 §4.5 的 W8 调整口径）；文件只作为文本来源，落盘格式由既有 sync 服务裁决                                                                           |
+| 7   | 未连接/终态时**不渲染**组件（不渲染禁用按钮 + 原因）                                                 | 14 §4.6 明文"UI 隐藏，不是禁用态"；与 Git 面板（无 attachment 呈现环境引导）不同——同步没有"等一会自然会好"的进行中语义，隐藏避免制造假入口                                      |
+
+落地物：
+
+```text
+packages/ui/src/cloud/           userResourcesModel.ts（markdown 类别/校验/上传体构造；注释清理）、cloudTaskUserProfileSync.ts（新）、
+                                 CloudTaskUserProfileSyncRow.tsx（新）、cloudPorts.ts（+syncTaskUserProfile）、index.ts（导出）
+packages/ui/src/hooks/cloud/     useCloudUserResources.ts（类型错误修复 + saveMarkdownEntry）、useCloudTaskUserProfileSync.ts（新）、index.ts（导出）
+packages/ui/src/settings/        cloudUserResourcesMarkdownPanel.tsx（新）、CloudUserResourcesSection.tsx（分派 + 连接期说明）、
+                                 cloudUserResourcesSectionParts.tsx（markdown 校验文案）、cloudUserResourcesArchivePanel.tsx（收敛 skills/plugins）、
+                                 cloudUserResourcesMcpPanel.tsx / cloudUserResourcesAgentsMdPanel.tsx（savedHint 文案键）
+packages/ui/src/store/cloud/     cloudUserResourcesStore.ts（pending 动作 +markdown-text）
+packages/ui/src/app-shell/       WorkspaceShellLayout.tsx（挂载同步入口）
+packages/ui/src/i18n/locales/    zh-CN.ts、en-US.ts（连接期语义改写 + 新增 markdown/同步键）
+packages/ui/src/index.ts         hooks 导出 +useCloudTaskUserProfileSync
+packages/ui/test/                cloudUserResources.test.ts（markdown 形态/录入方式/面板装配冒烟/i18n 键与文案断言）、
+                                 cloudTaskUserProfileSync.test.ts（新：门控/摘要/409 文案/渲染冒烟）
+```
+
+验证（真实执行，仓库根）：
+
+| 命令                                | 结果                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm typecheck`                    | **全仓 0 错误**（B 批移交的 ui 4 处已消除；`tsc -b` 覆盖 rpc/provider/shared/services/client/server/zcode-server-cli/ui/web/desktop-host 全部项目，无输出即零诊断）                                                                                                                                                           |
+| `pnpm lint`                         | **0 error / 77 warning**（与 B/C 批基线同数；逐文件核对：warning 全部落在未改动文件，本批新文件 0/0）                                                                                                                                                                                                                         |
+| `npx oxfmt --check`（本批文件）     | 21 个文件全部干净（含写回后再 check）                                                                                                                                                                                                                                                                                         |
+| `pnpm --filter @zcode/ui test`      | **247 tests / 247 pass / 0 fail / 0 skip**（本批两文件：`cloudTaskUserProfileSync.test.ts` 10 例——门控 4 / 摘要 3 / 错误文案 2 / 渲染冒烟 1；`cloudUserResources.test.ts` 19 例——markdown 形态与录入方式、面板装配冒烟、i18n 键与连接期文案断言为新增或改写；两文件均在 `test/cloud*.test.ts` 匹配面内）                      |
+| `pnpm architecture:check --changed` | **OK：violations 0 / baseline 0 / new 0**（新增文件均在既有 ui cloud/settings/hooks 目录，未跨模块根、未新增依赖边）                                                                                                                                                                                                          |
+| 无头浏览器 E2E（W11 §13D 验收）     | **未执行**：`packages/ui` 无浏览器/E2E 夹具（测试布局为 `node --test` 纯逻辑 + `react-dom/server` 结构冒烟），云界面还需真实控制面与登录态；验收③（commands/subagents 文本面板、skills/plugins 归档面板）以面板装配冒烟静态核对，①（未连接无入口）/②（连接态出现入口并出结果）以门控纯逻辑 + 渲染冒烟核对，真实交互路径留 W10 |
+
+范围核对：本批改动全部落在 `packages/ui`（src 子目录：cloud 5 / hooks/cloud 3 / settings 5 / store 1 / app-shell 1 / i18n 2 / index.ts）与 `specs/cloud-agent/**`；`packages/server`、`packages/shared`、`packages/services`、`packages/client`、`packages/web`、`packages/desktop`、`apps/zcode-cli`、根 `package.json`/`pnpm-lock.yaml` 零改动（`packages/ui/src/settings/CloudRuntimeSection.tsx`、`store/cloud/index.ts` 的既有改动来自 P20/B 批，本批未再触碰）。
+
+### 2026-10-11 M8 P18–P20 汇总记录（终验与收口）
+
+本节是 M8「云用户资源与设置同步」四批的**合并终验记录**，区别于下方四条分批记录（P20 / P19b / P19a / P18 各自保留触发、决议要点与落地物）。分批决议全文见 [14 §9.1–§9.4](./14-user-profile-sync.md)，"决议 → 落地物"映射见 [W11 §9–§12](./modules/W11-user-profile-sync.md)；本记录只做四批摘要 + 终验计数 + 统一悬项，不重复分批正文。
+
+> **2026-10-11 简化定调后**：本记录中的自举安装面（资源帧/安装器/ready 条件/Run 冻结列）已整体退役（见上方置顶记录与 [14 §4.8/§9.5](./14-user-profile-sync.md)），终验计数与验证结论保留为**当时事实**；"M8 契约与实现链路完成"这一结论在简化改造（[W11 §13](./modules/W11-user-profile-sync.md) A–D 批次）落地后需重新核对。
+
+四批落地摘要（各一句）：
+
+| 批次 | 落地摘要（一句）                                                                                                                                                                                                                                                                                                                                                                        |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P18  | 冻结 [14 §9](./14-user-profile-sync.md) 四项开放问题（hooks 不纳入；任务级授权默认全开 + 条目级开关；偏好快照并入 `bootstrap.config.preferences`；数值上限）并落 shared 契约单一来源：`bootstrap.resources` 帧、`bootstrap.config.preferences` 块、profile 条目/上传/回显 schema 与端点常量、四个归一错误码；矩阵行与 SDK 索引留待 P19 成对登记。                                       |
+| P19a | 控制面半边：cloud.db 两表 profile store（`(category, entry_id, sha256)` 内容寻址行 + 版本 manifest，保留 8 版）、上传/查询 4 端点 + SDK 4 方法、Run 预约事务内冻结 `resources_profile_version`（无 TOCTOU）、按 `transferId` 分块下发 `bootstrap.resources`（空 profile 显式 `chunkCount=0` 清单帧）、`bootstrap.config` 携带实值偏好快照（内容寻址 `configVersion`）。                 |
+| P19b | 执行节点半边：`transferId` 入站重组 + 逐块/整包 sha256 与条目内容寻址复核、两阶段提交安装器（journal + `applied-resources.json` 幂等、`config.json` 单写者 0600）、services 新增唯一权威解包 `@zcode/services/archive`、ready 条件 `resources-installed` 由真实安装结论驱动、`preferencesInstalled` 去硬编码、沙箱 responder 读已应用快照（含 `bridgeSession` 假 ready 既有缺陷修复）。 |
+| P20  | W8 设置页「用户资源」分区（MCP 表单 CRUD、四类归档上传、AGENTS.md 单例编辑、条目开关与删除、版本/总量展示、结构化错误 i18n 63 键 ×2 locale）：先冻结两个契约小追加（`PATCH` 条目开关 = 值变化才递增版本；`GET` 条目回显 = HTTP 面唯一正文出口），并修掉元数据权威缺陷（读路径以 manifest 为版本元数据来源，U-08 恢复有效）；本批不动 `cloud/execution/**`。                             |
+
+终验（2026-10-11 晚，仓库根，全部真实执行；计数为本次实测，不引用分批记录旧数；既有失败与本次分开）：
+
+| 命令                                                                                                                                                   | 结果                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `node scripts/check-workspace-freshness.mjs`                                                                                                           | 基线新鲜：feat/cloud-agent 与 origin 同步；相对 origin/main ahead 8 / behind 1（阈值 50）                                                                                                                                                                                                                                                                            |
+| `pnpm typecheck`                                                                                                                                       | 通过（0 错误）                                                                                                                                                                                                                                                                                                                                                       |
+| `pnpm lint`                                                                                                                                            | **0 error / 78 warning**；77 条落在未改动文件或未改动行（其中 9 条在本会话改过但警告行未动的文件：services/node.ts ×4、shared/validation.ts ×3、server assembleCloudControlPlane.ts ×1、entry-cloud-server.ts ×1）；**1 条在本会话新文件**（见下"新发现"）                                                                                                           |
+| `pnpm fmt:check`                                                                                                                                       | 收口修复本会话 1 文件（`packages/services/src/archive/safeArchiveExtract.ts`，仅折行与尾逗号，语义不变）：全仓失败 **37 → 36**；剩余 36 条全部为既有失败（35 个 tracked 且未改动文件 + 本地 `.zcode/plans/*.md`，按范围约定不动）；**本会话文件 0 失败**                                                                                                             |
+| `pnpm architecture:check --changed`                                                                                                                    | OK：violations 0 / baseline 0 / new 0                                                                                                                                                                                                                                                                                                                                |
+| `pnpm knip`                                                                                                                                            | **exit 1（既有基线）**：40 unused files / 52 unused deps / 32 unused devDeps / 579 unused exports / 593 unused exported types / 37 duplicate exports / 10 hints，绝大多数在未改动文件与 apps/zcode-cli、packages/desktop 等；本会话新增符号命中 43 处（新文件内 22 + `contract.ts` barrel 17 + ui 两个索引 4），全部为模块内共享类型/契约常量/有意别名，见下"新发现" |
+| `pnpm --filter @zcode/shared test`                                                                                                                     | 69 tests / 69 pass / 0 fail                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm --filter @zcode/server test`                                                                                                                     | 679 tests / 671 pass / 0 fail / 8 skip                                                                                                                                                                                                                                                                                                                               |
+| `pnpm --filter @zcode/client test`                                                                                                                     | 38 tests / 38 pass / 0 fail                                                                                                                                                                                                                                                                                                                                          |
+| `pnpm --filter @zcode/ui test`                                                                                                                         | 233 tests / 233 pass / 0 fail                                                                                                                                                                                                                                                                                                                                        |
+| `packages/services` 新增用例（`node --import tsx --test test/{safeArchiveExtract,runtimePreferencesSnapshot}.test.ts`，在 `packages/services` 下执行） | 9 tests / 9 pass / 0 fail；该包 `pnpm test` 脚本只跑既有 `settingServiceRetiredRemoteMigration.test.ts`（2 tests / 2 pass），**未纳入这两个新文件**（如实记录，未改脚本）                                                                                                                                                                                            |
+| `pnpm --filter @zcode/server build:sandbox-assets`                                                                                                     | 通过：`supervisor.bundle.mjs` 3563.0 KiB（sha256 `1f5029d7fb9d`）、`runtimeStub.bundle.mjs` 3283.1 KiB（与 P20 记录一致；P19b 记录的 3647KB 本轮未复现，以实测为准）                                                                                                                                                                                                 |
+
+范围核对（`git status --short` + `git diff --stat`，本次，含本记录自身）：121 条改动 = 72 个已跟踪文件（+1992/−347）+ 49 个新文件，全部落在 `packages/{server,ui,shared,services,client}`（server 70 / ui 16 / shared 10 / services 6 / client 5）、`specs/cloud-agent/**`（10）与 `architecture-policy.yaml`（P19b 的 `publicEntrypoints` 增补）；`packages/desktop`、`apps/zcode-cli`、`packages/web`、`packages/rpc`、根 `package.json`/`pnpm-lock.yaml` 零改动。**web 无需改动即可见 P20 分区**：web 的 `CloudApp` 渲染 `@zcode/ui` 的 `Root` → `SettingsPage`（`activeSection === "cloudRuntime"`）→ `CloudRuntimeSection` → `CloudUserResourcesSection`，挂载在共享 UI 层（非 web 侧）。三处关键语义抽查仍在：①`bootstrapResourcesFrameSchema` 的 `chunkCount=0` 空清单不变量（`chunkIndex=0`、`entries=[]`、无 hash/payload；有分块则三者必有且清单非空）；②`readyGate` 的 `resources-installed` 由本连接真实安装结论驱动、`preferencesInstalled` 已去硬编码（`installedPolicyVersion`/`policy.applied()` 真实落盘证据，`resourcesInstalled` 仅在 intake 结论为 `installed` 后置真）；③`CLOUD_ATTACHMENT_SERVICE_ALLOWLIST` 原样（`endpoints.ts` 的 diff 未触碰该数组，9 个 channel 未增）。
+
+本次终验新发现（**未修**，按"本次不改功能代码"如实记录，待决议）：
+
+- `pnpm lint` 在本会话新文件 `packages/ui/test/cloudUserResources.test.ts:418` 报 1 条 warning（未使用的循环变量 `match`）——P20 记录中"本批新文件 0 warning"与本次实测不符；修法是一行的测试内清理，未在本轮执行。
+- `pnpm knip` 有 2 类本会话新增命中：①`packages/server/src/cloud/domain/userProfileBundle.ts:13` 直接 `import ... from "zod"`，而 `packages/server/package.json` 未声明 `zod`（Unlisted dependency；该文件是 server 内唯一 zod 直连点，同类既有告警在 `packages/desktop` 两文件）——属依赖声明缺口，不影响 typecheck/构建/测试；②本会话新增符号的 unused-export 与 duplicate-export 命中 43 处（新文件内 22 处：内部/契约类型与常量，含上述 zod；`contract.ts` barrel 的 M8 新增再导出 17 处；`ui` 的 `hooks/cloud/index.ts`/`store/cloud/index.ts` 新导出 4 处；`shared/cloud/user-profile.ts` 的 P20 别名 `cloudUserProfileEntryPatchResponseSchema` 与既有 `...UploadResponseSchema` 同形）。原因：knip 的 server entry 仅 `src/index.ts`/`src/entry-stdio.ts`/`build-remote.ts`，cloud 模块 barrel 与沙箱 esbuild 独立入口不在可达图内，与既有基线（579 + 593 条，含大量未改动 cloud 文件）同型；无"应删的私有符号被导出"或功能死代码。
+
+统一悬项（P18–P20 合并为一份；已落地项不再列——`transferId` 复用规则见 [14 §9.2⑤](./14-user-profile-sync.md) 已落地，两个契约小追加见 [14 §9.4①](./14-user-profile-sync.md) 已落地）：
+
+| 悬项                                                       | 现状与依据                                                                                                                                                                           |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| marketplace-source 镜像与 marketplace 注册                 | P19b 明确不做（[14 §9.3⑥](./14-user-profile-sync.md)），P20 也不提供上传入口；profile 只下发 inline 插件目录                                                                         |
+| 三处 tar 解包实现收敛为 `@zcode/services/archive` 单一实现 | P19b 已落权威入口且安装器唯一使用；SSH skill/plugin sync 的两个既有 extract 未收敛（各自带 UI 结构化错误码与 plugin 元数据语义），收敛前"禁止第二份权威校验"继续有效                 |
+| agents-md 单例的 store/service 级约束                      | P20 只做 UI 单例（固定 `entryId = user-agents`）+ 安装器 claim 冲突 fail-closed；直接经 API 写入第二个 agents-md 条目仍会成功、到安装才失败（[14 §9.4⑥](./14-user-profile-sync.md)） |
+| 大归档分块/流式上传                                        | P20 为整包 base64 + 单次 PUT（请求体上限 80MiB，客户端峰值内存约 2.4x 文件）；分块上传属契约变更，未列本批                                                                           |
+| UI 的浏览器 E2E                                            | W8 §6 要求项未执行：`packages/ui` 测试布局为 `node --test` 纯逻辑（无 React renderer/jsdom），P20 以 store + 纯逻辑用例 + 一次 `react-dom/server` 结构冒烟为准                       |
+| 真实沙箱端到端联调与故障注入（W10）                        | 全部四批均未执行：E2B/真实 runtime + 真实控制面下的"上传 → 新 Run 安装生效（7 类）"、安装中途 kill、超大归档、真实 HOME 权限（U-01–U-07/U-09/U-11 的真实侧证据）                     |
+
+结论：**M8 契约与实现链路完成，端到端真实沙箱联调待做。**
+
+### 2026-10-11 P20 用户资源管理 UI + 两个契约小追加（M8；W8 设置页分区 + PATCH/GET 条目端点）
+
+触发与来源：P20「M8 云设置页用户资源管理」。先冻结两个契约小追加，再落 UI；同时修掉实现期发现的元数据权威缺陷。落 [14 §9.4](./14-user-profile-sync.md)（决议全文）与 [W11 §12](./modules/W11-user-profile-sync.md)（决议 → 落地物映射）。动 `packages/ui`、`packages/shared`（契约追加）、`packages/server`（store 两方法 + 两 handler）、`packages/client`（SDK 两方法）与 spec；**不动 `cloud/execution/**`\*\*。
+
+决议要点：
+
+1. **两个契约小追加**（先冻结、后实现）：`PATCH …/entries/:category/:entryId`（body 只含 `{enabled}`，无 `.default(true)`——漏传即 400）与 `GET …/entries/:category/:entryId`（`{entry, payload}`，UI 编辑回显的唯一通路）。**toggle 递增 `profileVersion`**（交付集合 = manifest 的 enabled 子集，属于版本事实），但**值变化才递增**（同值重复提交返回当前版本）。
+2. **错误码复用**：条目不存在 → 404 `not_found`；body 形状 → 400 `invalid_entry`；不新增 wire 错误码（错误码目录是 shared 冻结面）。
+3. **凭据边界收窄**：HTTP 面唯一的正文出口 = 条目回显 GET（已鉴权、单个条目、按类别有界）；快照/版本端点仍只回元数据，日志/诊断/投影/历史/attachment 不变（[14 §9.4②](./14-user-profile-sync.md)）。U-10 断言相应限定。
+4. **元数据权威修复（P20 必修）**：读路径原经内容寻址行取元数据，一次 `enabled` 改写会回溯改变旧版本的下发集合（U-08 失效）；现统一以 manifest 为版本元数据来源，行只提供正文（[14 §9.4③](./14-user-profile-sync.md)）。
+5. **W8 设置页 UI**：分区挂进云分组（GitHub → Sandbox → 用户资源）、**只在云模式渲染**；MCP 表单 CRUD、四类归档上传（客户端前置：entryId 形状/类别上限/80MiB 上传体预检/分块 base64）、AGENTS.md 单例文本编辑（固定 `entryId = user-agents`）、条目开关与删除（confirm 复用 `useConfirmDialog`）、版本/总量/上限展示、结构化错误 → i18n（`settings.cloudUserResources.*` 63 键 ×2 locale）。
+6. **行数门禁的两处拆分**（导出名与 import 面不变）：`userProfileRepoHelpers.ts`（仓储内部共享件）、`test/cloudCoreUserProfileFakes.ts`（profile fake 转出）。
+
+落地物：
+
+```text
+packages/shared/src/cloud/       user-profile.ts（PATCH/GET schema + 别名 + 路径常量注释）、userProfileEndpoints.ts（+2 行）、endpoints.ts（注释）、CONTRACT.md（+2 行 + 凭据边界修订）
+packages/client/src/cloud/       cloudWireSchemas.ts（+2 条）、cloudControlPlaneClient.ts（getUserProfileEntry/setUserProfileEntryEnabled）
+packages/client/test/            cloudFixtures.ts、cloudSdkInvocations.ts、cloudSdk.test.ts（+1 用例）
+packages/server/src/cloud/       domain/userProfile.ts（userProfileEntryPayloadFromContent）、app/ports/userProfileStorePort.ts（readEntry/setEntryEnabled）、
+                                 app/userProfile/userProfileService.ts（+2 用例）、app/provisioning/bootstrapResources.ts（共用负载转换）、
+                                 adapters/http/userProfileRoutes.ts（+2 路由）、adapters/storage/repositories/userProfileRepo{,Helpers}.ts、
+                                 adapters/storage/{storageMethodTypes,cloudStorageClient}.ts
+packages/server/test/            cloudUserProfileHttp.test.ts（+3 用例）、cloudCoreUserProfileFakes.ts（新）、cloudCoreAdapterFakes.ts（转出）
+packages/ui/src/cloud/           userResourcesModel.ts（新，纯逻辑）、cloudPorts.ts（+5 方法）
+packages/ui/src/store/cloud/     cloudUserResourcesStore.ts（新）
+packages/ui/src/hooks/cloud/     useCloudUserResources.ts（新）
+packages/ui/src/settings/        CloudUserResourcesSection.tsx、cloudUserResourcesSectionParts.tsx、cloudUserResourcesArchivePanel.tsx、cloudUserResourcesMcpPanel.tsx、cloudUserResourcesAgentsMdPanel.tsx（新）、CloudRuntimeSection.tsx（挂载）
+packages/ui/src/i18n/locales/    zh-CN.ts、en-US.ts（settings.cloudUserResources.* 各 63 键）
+packages/ui/src/                 index.ts、hooks/cloud/index.ts、store/cloud/index.ts（公开导出）
+packages/ui/test/                cloudUserResources.test.ts（新，14 用例）
+specs/cloud-agent/               14 §5/§7/§9.4、03 §6、W11 §12、10 §10（本记录）
+```
+
+验证（真实执行，仓库根；既有失败与本次分开）：
+
+| 命令                                               | 结果                                                                                                                                                                      |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm typecheck`                                   | 通过（0 错误）                                                                                                                                                            |
+| `pnpm lint`                                        | **0 error / 78 warning**（与 P19b 基线同数，全部在未改动文件；本批新文件 0 warning）                                                                                      |
+| `pnpm fmt:check`（本次涉及文件）                   | 全部通过（`oxfmt --check` 干净）                                                                                                                                          |
+| `pnpm architecture:check --changed`                | **OK：violations 0 / baseline 0 / new 0**（首轮曾因 `userProfileRepo.ts` 471 行超 max-file-lines 失败，拆出 `userProfileRepoHelpers.ts` 后清零）                          |
+| `pnpm --filter @zcode/shared test`                 | **69 tests / 69 pass / 0 fail**（较基线 +3）                                                                                                                              |
+| `pnpm --filter @zcode/server test`                 | **679 tests / 671 pass / 0 fail / 8 skip**（较基线 +3：toggle 递增/幂等/404 与 U-08、PATCH 形状、GET 回显/404/503）                                                       |
+| `pnpm --filter @zcode/client test`                 | **38 tests / 38 pass / 0 fail**（较基线 +1；其余两方法与 fixture 由既有不变量自动覆盖）                                                                                   |
+| `pnpm --filter @zcode/ui test`                     | **233 tests / 233 pass / 0 fail**（较基线 +15：store 投影/overlay/回填/回滚/缓存失效、分块 base64 对齐 `Buffer` 参考实现、前置校验、错误映射、i18n 键覆盖、分区渲染冒烟） |
+| `pnpm --filter @zcode/server build:sandbox-assets` | 通过（supervisor bundle 3563.0 KiB；本批未改执行节点）                                                                                                                    |
+
+未执行/悬项（如实记录）：UI 的数据驱动渲染级行为与浏览器 E2E（`packages/ui` 测试布局是 `node --test` 纯逻辑，无 React renderer/jsdom；本批以 store + 纯逻辑用例为准，另加一次 `react-dom/server` 结构冒烟——zustand v5 的 SSR `getServerSnapshot` 取初始状态，故 SSR 只能断言结构）；agents-md 单例的 store/service 级约束（现仅 UI 单例 + 安装器 fail-closed）；大归档分块/流式上传；marketplace-source 镜像与注册；三处 tar 解包实现收敛；真实沙箱端到端联调与故障注入（W10）。既有缺口（非本批引入）：zh-CN locale 缺 `settings.memory.viewer.disabled`。
+
+### 2026-10-11 P19b 执行节点用户资源（M8；入站重组 + 安装器 + ready 条件 + 偏好应答）
+
+触发与来源：P19b「M8 执行节点落地」。落 [14 §9.3](./14-user-profile-sync.md) 遗留的全部执行节点内容：`bootstrap.resources` 入站重组与安装、`ready` 条件 `resources-installed` 与 `bootstrap.ts` 去硬编码、`~/.agents/*` 镜像悬项、沙箱 responder 读已应用快照。**不动控制面 `cloud/` 其余面**（只增一个窄公开入口供执行节点复用 bundle schema）与 UI（P20）。
+
+决议要点（全文见 [14 §9.3](./14-user-profile-sync.md)；W11 §11 为"决议 → 落地物"映射）：
+
+1. **入站重组**：按 `transferId` 建缓冲（变化即整批重置）、`chunkIndex` 严格从 0 递增、逐帧 `chunkCount`/`profileVersion`/条目清单一致（清单按 `(category,entryId)` 身份比对）、逐块 `chunkSha256` + 整包 `archiveSha256` + 累计字节有界；bundle 过**控制面同一 schema** 且逐条内容寻址复核；失败 → `bootstrap_failed`（retryable）/缺帧 → `not_ready`，都不 ready、不半安装。
+2. **安装器两阶段提交**：解包到目标根 `.install-tmp-<uuid>` → 全部冲突预检 → 顶层条目 rename 进目标根；同名冲突 fail-closed 不覆盖；提交前写 journal、成功后删（中断后下次安装按其自清理 → U-09 可修复，且不误删用户内容）。
+3. **幂等**：`applied-resources.json` `{version, profileVersion, appliedAt, products[]}`；同版本直接成功返回、版本变化按 `products` 清理后全量重装；`config.json` 读取-合并-写回由安装器单写者串行（保留其余键、0600 原子写，损坏 fail-closed）。
+4. **归档安全解包落位收官**：services 新增通用 `@zcode/services/archive`（gzip magic/流式解包/穿越与绝对路径拒绝/symlink 与未知类型拒绝/成员与总量上限/膨胀 ≤类别上限 ×4/可选模式恢复），安装器唯一使用；SSH skill/plugin sync 的两个既有 extract 本批不收敛（列悬项），"禁止第二份权威校验"在收敛前继续有效。
+5. **偏好快照实值**：`applied-policy.json` v2（`+configVersion`、`preferences` 实值；v1 兼容读）→ `ZCODE_APPLIED_POLICY_SNAPSHOT` 注入沙箱 runtime → services 在 `cloud-execution-node` 权威下取五键实值（`integratedTerminalShell` 仅 `user-execution`），缺失/损坏回落本地默认值 + 一条 warn（不 fail）；`bridge.ready.configVersion` 有偏好块时用快照版本。
+6. **ready 门控**：`READY_CONDITIONS`/`ReadyChecklist` 增 `resources-installed`（真实安装结论驱动，空清单帧=显式满足）；`preferencesInstalled` 去硬编码；相位枚举加 `installing-resources`（shared 冻结帧最小扩展，执行侧类型直接引用 + 编译期穷尽断言）。
+7. **顺带修复既有缺陷**：`bridgeSession` 在 `bootstrap.config` 超时未到时仍发 `bridge.ready`（`configVersion="unknown"`），会让全部自举条件被绕过（假 ready）——现改为自举未完成即关连接重连。
+8. **窄公开入口（自主决定，已记入 §9.3①）**：执行节点复用 bundle schema 需要一条不拉整模块 barrel 的入口（`userProfileBundleContract.ts`），否则控制面装配/HTTP/SQLite 会被 esbuild 打进沙箱 supervisor 单文件产物；实测 barrel 路由 +2.0MB、窄入口后整包仅 +62KB（3584KB → 3647KB）。`cloud-control-plane` 的 `publicEntrypoints`（policy + `module.ts`）同步增补。
+
+落地物：
+
+```text
+packages/shared/src/               cloud/bridge-protocol.ts（相位枚加 installing-resources）、runtimeEnv.ts（快照 env + 两张剔除表）、validation.ts（再导出 shell 选择 schema）
+packages/services/src/             archive/safeArchiveExtract.ts（新，export "./archive"）、runtimePreferencesSnapshot.ts（新）、node.ts（responder 读快照 + 回落）
+packages/services/test/            safeArchiveExtract.test.ts、runtimePreferencesSnapshot.test.ts（新）
+packages/services/package.json     exports +"./archive"
+packages/server/src/cloud/         userProfileBundleContract.ts（新，窄公开入口）、module.ts、contract.ts、architecture-policy.yaml（publicEntrypoints）
+packages/server/src/cloud/execution/domain/  resourcesBundle.ts（新）
+packages/server/src/cloud/execution/app/     resourceIntake.ts（新）、bootstrap.ts（resources 端口 + 真实证据 + 相位）、bridgeInbound.ts（bootstrap.resources 路由）、
+                                             bridgeSession.ts（begin/结论门控/假 ready 修复）、bridgeState.ts（timings/state）
+packages/server/src/cloud/execution/adapters/ resourcesInstaller.ts、resourcesStaging.ts、resourcesHome.ts、resourcesState.ts（新）、
+                                             provisioningInstaller.ts（applied-policy v2 + applied()）、supervisorRuntime.ts（intake/installer 装配 + env 注入）
+packages/server/test/              cloudResourceArchives.ts（测试支撑：tar/恶意样本/帧组装）、cloudResourcesBundle.test.ts、cloudResourcesInstall.test.ts、
+                                   cloudExecutionResourcesReady.test.ts、cloudExecutionResourcesE2e.test.ts（新）、cloudBridgeFakes.ts（resourcesFrames/preferences/sockets）、
+                                   cloudExecutionFakes.ts（intake 假件）、既有 bootstrap/会话用例适配
+```
+
+验证（真实执行，仓库根；既有失败与本次分开）：
+
+| 命令                                               | 结果                                                                                                                                                             |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm typecheck`                                   | 通过（0 错误）                                                                                                                                                   |
+| `pnpm lint`                                        | **1 error → 0**（本次唯一 error 是新文件超 max-lines，拆文件后清零；余下 78 条警告全部在未改动文件/行）                                                          |
+| `pnpm architecture:check --changed`                | **OK：violations 0 / baseline 0 / new 0**（含 policy 增补 publicEntrypoints 后）                                                                                 |
+| `pnpm fmt:check`（本次涉及文件）                   | 全部通过（15 个新/改文件 `oxfmt --check` 干净）                                                                                                                  |
+| `pnpm fmt:check`（全仓）                           | 既有失败 54 文件（未改动的 ui/desktop/services 存量格式问题，与本次无关）                                                                                        |
+| `pnpm --filter @zcode/server test`                 | **676 tests / 668 pass / 0 fail / 8 skip**（较 P19a 后基线 +27 用例，全绿）                                                                                      |
+| `packages/services` 新增用例                       | **9 tests / 9 pass**（`node --import tsx --test test/{safeArchiveExtract,runtimePreferencesSnapshot}.test.ts`；该包 `pnpm test` 只跑既有单文件迁移用例，未改动） |
+| `pnpm --filter @zcode/shared test`                 | **66 tests / 66 pass / 0 fail**                                                                                                                                  |
+| `pnpm --filter @zcode/client test`                 | **37 tests / 37 pass / 0 fail**                                                                                                                                  |
+| `pnpm --filter @zcode/server build:sandbox-assets` | 通过；supervisor bundle **3584KB → 3647KB（+62KB）**，窄入口决策的量化验证                                                                                       |
+
+未执行/悬项（如实记录）：W8 设置页 UI（P20）；marketplace-source 镜像与 marketplace 注册；三处 tar 解包实现收敛为 `@zcode/services/archive` 单一实现；真实沙箱（E2B/真实 runtime + 真实控制面）端到端联调与故障注入（安装中途 kill、超大归档、真实 HOME 权限）；`profile_version_pruned` 独立错误码（P19a 已记，不新码）。
+
+### 2026-10-11 P19a 控制面用户资源 profile（M8；store + 上传 API + Run 冻结 + 下发编排 + 偏好快照）
+
+触发与来源：P19a「M8 控制面落地」。落 [14 §9.2](./14-user-profile-sync.md) 五项遗留决议（store 物理落位、归档校验代码落位收口为两段、传输 bundle 格式、`transferId` 规则、Run 冻结列与偏好组装），实现控制面半边：profile store（cloud.db 两表）、上传/查询 HTTP 端点 4 个、Run 冻结、`bootstrap.resources` 分块下发编排、`bootstrap.config.preferences` 组装，并按 P18 悬项完成端点矩阵行/SDK 索引成对登记与 03 §6 正文登记。**不动 `cloud/execution/**`\*\*（安装器、ready 条件、偏好应答属 P19b）与 UI（P20）。
+
+决议要点（全文见 [14 §9.2](./14-user-profile-sync.md)；含状态所有者与事件顺序图）：
+
+1. **store = cloud.db 两表**（迁移 `0008_user_profile`，追加编号不改历史）：`profile_entries`（`(category, entry_id, sha256)` 内容寻址行 + 文本正文 + `enabled`/`display_name`）与 `profile_versions`（版本 manifest，单调递增）；迁移种下空版本 1，使 GET 快照与"空 profile 显式空清单帧（profileVersion=1）"语义闭合。**冻结文本的 `PRIMARY KEY(category, entry_id)` 语义 = 同一键的当前内容唯一**（物理上允许旧 sha 行共存），否则"保留 8 个版本可解析"在条目被替换后立即失效（在途 Run 断连重装会假失败）——这是对冻结列的**实现级澄清**，在 §9.2① 明示。sha256/bytes 全部服务端派生（归档 = 解码后字节；mcp = JSON 文本 UTF-8 字节 / JSON 字符数口径；agents-md = UTF-8 字节）。
+2. **上传侧最小前置 + 安装器侧权威**：上传只做 canonical base64（shared schema）、gzip magic（前缀 3 字节）、按类别解码字节上限；tar 安全解包/膨胀/穿越/manifest 权威校验留给 P19b 安装器（禁第二份权威校验；上传路径不解析 tar，避免 80MiB 归档在请求路径解包）。
+3. **bundle = ASCII 安全 JSON**：`{schemaVersion:1, profileVersion, entries[]}`，条目顺序 = 类别枚举次序 + entryId 字典序；非 ASCII 转义使"字符切片 = 字节切片"，`HashPort` 字符串摘要等于字节摘要；`archiveSha256` = bundle JSON 字节摘要（内容寻址），帧 payload = ≤512KiB 分片的 base64、`chunkSha256` = 分片字节摘要。
+4. **Run 冻结在预约事务内**（`runs.resources_profile_version`，无 TOCTOU；NULL = 历史 Run/空 profile），下发时序 = welcome → bootstrap.config（+preferences）→ bootstrap.resources（chunkIndex 升序、同版本复用 transferId）→ ready；任一帧失败整体 fail-closed（stop 屏障/终态/epoch 校验与 config 同款）；冻结版本解析不到 → `invalid_ref` + `profile-version-pruned`（**不新增 wire 错误码**，错误码目录是 shared 冻结面）。
+5. **偏好快照**：`configVersion = "prefs-" + sha256(键名排序后的 values JSON).slice(0,16)`（同值同 hash）；`values` 只含显式设置过的键 + 与节点同源的预算策略常量；空对象省略整块；未接线/读取失败不 fail（偏好缺失不是 run 失败条件）。
+6. **端点成对登记**：矩阵 4 行 + SDK 4 方法；PUT 路径与正文 `category` 不一致在 SDK 与服务端**双侧**拒绝；请求体上限 80MiB（hono body-limit，413）。为满足 `endpoints.ts` 文件行数门禁，行表落 `userProfileEndpoints.ts`、路径常量落 `user-profile.ts`（导出名与公共入口不变，矩阵仍单点持有）。
+7. **配套重构（行数门禁）**：`AttachmentPort` 的 bridge 实现抽到 `adapters/ws/attachmentPort.ts`（帧投递一族语义集中，拒绝语义逐字保持）；GitHub 未配置的 fail-closed 端口抽到 `adapters/github/adapter.ts`（`createFailClosedGitHubPort`）。
+
+落地物：
+
+```text
+packages/shared/src/cloud/       user-profile.ts（+路径常量）、userProfileEndpoints.ts（新）、endpoints.ts（矩阵 4 行）
+packages/client/src/cloud/       cloudWireSchemas.ts（4 条）、cloudControlPlaneClient.ts（4 方法）
+packages/client/test/            cloudSdk.test.ts（+2 用例）、cloudFixtures.ts、cloudSdkInvocations.ts
+packages/server/src/cloud/domain/        userProfile.ts、userProfileBundle.ts（新）
+packages/server/src/cloud/app/           ports/userProfileStorePort.ts、ports/userPreferencesPort.ts（新）、
+                                         userProfile/userProfileService.ts、provisioning/bootstrapResources.ts（新）、
+                                         provisioning/bootstrapConfig.ts（preferences）、deps.ts、attachments/registry.ts、
+                                         ports/attachmentPort.ts、ports/runPort.ts、assembleCloudControlPlane.ts、contract.ts
+packages/server/src/cloud/adapters/      storage/sqlite/tables/profile.ts、repositories/userProfileRepo.ts（新）、
+                                         sqlite/schema.ts（0008）、storage/{storageMethodTypes,cloudStorageClient,storageWorkerRuntime}.ts、
+                                         repositories/runRepo.ts（冻结列）、http/userProfileRoutes.ts（新）、http/{routes,support}.ts、
+                                         ws/attachmentPort.ts（新，抽取）、ws/{bridgeChannel,handshake}.ts、
+                                         sandbox/hostUserPreferences.ts（新）、entry-cloud-{control-plane,startup,server}.ts、
+                                         github/adapter.ts（+fail-closed 端口）
+packages/server/test/            cloudUserProfileStore.test.ts、cloudUserProfileDomain.test.ts、
+                                 cloudUserProfileHttp.test.ts、cloudBootstrapResources.test.ts（新，+28 用例）
+```
+
+验证（真实执行，仓库根；既有失败与本次分开）：
+
+| 命令                                | 结果                                                                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `pnpm typecheck`                    | 通过（0 错误）                                                                                          |
+| `pnpm lint`                         | **0 errors / 77 warnings**；77 条警告全部落在未改动的文件/行（与 HEAD 基线同量，新文件 0 警告）         |
+| `pnpm architecture:check --changed` | **OK：violations 0 / baseline 0 / new 0**                                                               |
+| `pnpm fmt:check`（本次涉及文件）    | 全部通过（63 文件 `oxfmt --check` 干净）                                                                |
+| `pnpm fmt:check`（全仓）            | **既有失败 36 文件**（未改动的 ui/desktop/execution/spec 存量格式问题，与本次无关；本次文件已不在其中） |
+| `pnpm --filter @zcode/server test`  | **649 tests / 641 pass / 0 fail / 8 skip**（较 P18 后基线 +28 用例，全绿）                              |
+| `pnpm --filter @zcode/client test`  | **37 tests / 37 pass / 0 fail**（新增 profile 端点 2 用例）                                             |
+| `pnpm --filter @zcode/shared test`  | **66 tests / 66 pass / 0 fail**                                                                         |
+
+为迁移链头推进而更新的既有断言（非缺陷）：`cloudStorageMigrations.test.ts`（pending 列表/schemaVersion 7→8）、`cloudStorageHealth.test.ts`（`lastAppliedMigrationId`）、`cloudLifecycleBatch2.test.ts`（链头）、`cloudCoreEntry.test.ts`（握手帧序新增 `bootstrap.resources`，并断言空清单帧 `chunkCount=0`/`profileVersion=1`）。
+
+未执行/悬项（如实记录）：P19b 侧全部（tar 权威校验与安装布局、`applied-resources.json` 幂等、ready 条件 `resources-installed` 与 `bootstrap.ts` 去硬编码、`~/.agents/*` 镜像决策、沙箱 responder 读已应用快照）；P20 的 W8 设置页 UI；真实沙箱联调（`bootstrap.resources` 端到端安装）在 P19b 完成后进行。**口径澄清**：`profile_version_pruned` 未新增为 wire 错误码（复用 `invalid_ref` + reason），如需独立码须走 shared 错误码契约修订。
+
+### 2026-10-11 P18 开放问题冻结 + shared 契约（M8；spec 决议 + W0 扩展三文件 + 契约测试）
+
+触发与来源：P18「M8 契约扩展冻结」。冻结 [14](./14-user-profile-sync.md) §9 四项开放问题并落 shared 契约层（schema 单一来源）：新增 `packages/shared/src/cloud/user-profile.ts` 与 `packages/shared/test/cloudUserProfile.test.ts`，修订 `bridge-protocol.ts`（`bootstrap.resources` 帧、`bootstrap.config.preferences` 块）、`endpoints.ts`（路径常量）、`errors.ts`（新错误码）、`CONTRACT.md`。端点矩阵行与 SDK 索引按既有覆盖不变量随 P19 实现成对登记（矩阵写端点必须同时在 `CLOUD_SDK_ENDPOINT_SCHEMAS`）。
+
+决议要点（全文见 [14 §9.1](./14-user-profile-sync.md)）：
+
+1. **hooks 不纳入 M8**（用户 2026-10-11 确认）；调查事实：SSH 模式 hooks 同样本机零推送（无 sync service/对话框），仅远端 scope 直读远端文件 + 信任按机器独立授予，不构成"SSH 有、云缺"的先例。
+2. **任务级授权默认全开**：新建 Task 引用全部 enabled 条目；条目级 `enabled` 开关逐条关闭；v1 不做任务粒度勾选 UI（默认全关仅作部署模型变更时的条件性基线）。
+3. **偏好快照帧归属 = 扩展 `bootstrap.config`**：新增可选 `preferences` 块（`configVersion` + 实值 `values`）；`bridge.ready.configVersion` 继续上报已应用版本；`bootstrap.resources` 保持只承载资源归档。
+4. **数值冻结**：单条目（tar+gzip 归档后字节）skills/commands/subagents 20MiB、plugins 50MiB；mcp 单条 ≤256KiB（config JSON）；agents-md 单条 ≤256KiB（UTF-8）；profile 总量 ≤128MiB、条目数 ≤256；版本保留最近 8 个（条目按 sha256 去重存储，修剪无引用旧条目）；帧分块 payload ≤512KiB（原始字节，base64 传输）；上传 HTTP 请求体上限 80MiB。
+5. **同批追加冻结**：上传/查询端点形状（`PUT|DELETE /api/cloud/user-profile/entries/:category/:entryId`、`GET /api/cloud/user-profile`、`GET /api/cloud/user-profile/version`；PUT 为矩阵首个 PUT，语义=幂等整条替换）与新增归一错误码 `payload_too_large`(413)/`invalid_entry`(400)/`profile_total_exceeded`(409)/`profile_entries_exceeded`(409)。
+6. **仍未冻结（P19 实施期）**：store 物理落位（cloud.db vs 受控附件存储）；`~/.agents/*` 兼容读取面是否镜像安装；`transferId` 同版本重连的复用/重开规则；归档校验代码落位（services 公开入口 vs 提为 shared；禁复制第二份校验代码）。
+
+验证口径：**代码验证见后续 P19/P20 记录**（本轮验证命令与计数记录在 P19/P20 各自的修订记录中，此处不重复粘贴）。
+
+### 2026-10-11 用户资源与设置同步（M8 目标设计；本轮只改 spec，不动代码）
+
+触发与来源：用户要求把"设置同步"作为独立任务纳入设计。当前云 Run 只经 provisioning envelope 安装 provider/model 配置与账号凭据（[01 §6.2](./01-provisioning.md)、[12 §6](./12-account-domain.md)）；用户级 MCP servers、skills、自定义命令、plugins、subagents、用户全局 AGENTS.md、agent 行为偏好在沙箱内缺失（空目录或默认值）。SSH 模式有三个手动推送对话框（`RemoteMcpSyncDialog`/`RemoteSkillSyncDialog`/`RemotePluginSyncDialog`）可参照，但云沙箱按 Run 一次性创建销毁且云会话面（`web-remote-replayable`）不展示同步动作，无法照搬"手动导入"。本批只新增/修订 spec：新增 [14](./14-user-profile-sync.md) 与 [W11](./modules/W11-user-profile-sync.md)，00/01/02/07/10/13 加指引与登记；不改任何源码。
+
+决议要点：
+
+1. **新增里程碑 M8（目标设计）**，不回改 v1 首版范围结论：00 §1 追加指引（并补 14/W11 索引），00 §9 阶段表保持 M0–M7 原文；实施前按 13 §5 扩展 W0 契约冻结。
+2. **状态所有者**：控制面新增用户资源 profile store（属主=账号域，[12 §1.2](./12-account-domain.md) 口径；落 cloud.db 或受控附件存储由 W11 细化），`profileVersion` 单调递增、每类资源独立条目 + sha256；Run 创建时冻结 `resourcesProfileVersion`（同 01 §6.2 冻结 baseSha/taskBranch 语义），保证"运行中 Run 不变、新 Run 生效"。
+3. **传输**：`provisioningEnvelopeJson` 保持有界 JSON 不变，不塞资源正文；新增 bridge 认证通道帧 `bootstrap.resources`（[02 §4](./02-bridge-protocol.md)），`bootstrap.config` 之后、`ready` 之前分块下发，每块有界 + 整包 sha256，按 profileVersion 幂等；发送失败沿 02 §8 fail-closed（不静默空安装、不假 ready、等下次连接重装；先例 12 §6 A-08）。
+4. **安装布局**：沙箱 HOME 与 SSH 远端同构——`~/.zcode/skills`、`~/.zcode/commands`、`~/.zcode/agents`、`~/.zcode/plugins`（+写 `~/.zcode/cli/config.json` 的 `plugins.dirs`/`enabledPlugins` 注册）、`~/.zcode/cli/config.json` 的 `mcp.servers`（0o600）、`~/.zcode/AGENTS.md`；安装器复用 SSH 同步归档格式、上限与校验（tar+gzip、skills 20MiB、plugins 50MiB、解包膨胀/manifest/路径穿越）。
+5. **ready 新增 `resources-installed` 条件**（[W6](./modules/W6-cloud-execution.md)/W11 交界）：`readyGate.ts` 条件位由真实安装结果驱动，替换 `bootstrap.ts` 硬编码占位的延伸方向。
+6. **凭据边界**：MCP token/headers/env 加密存储、只经 bridge 认证通道下发；不进 provider env/元数据、日志、任务投影与 attachment 面（`endpoints.ts` 白名单不新增 mcp/skills 通道）。修订 01 §7.1 MCP 行：v1"默认空"结论保留为历史，M8 来源=用户资源 profile、按任务显式授权，purpose/origin 白名单语义保留。
+7. **行为偏好（07 §8 表首行）从版本号占位升级为实值快照**：控制面从 host `settingService` 读值随自举帧下发（帧归属二选一待 W11 冻结，建议扩展 `bootstrap.config`），沙箱 responder 从快照应答；"Config version 属于 Run 已应用配置，设置存储属于账号"划分不变。
+8. **不纳入**：hooks（执行面安全敏感，单列开放问题）、workspace 级资源、Run 运行中热更新（profile 变更下一 Run 生效）、多账号共享/RBAC。
+
+开放问题（W11 冻结）：①hooks 是否纳入（建议不纳入，单列安全评审）；②任务级授权默认值（建议默认全开，与可信单用户 + 自动安装目标一致）；③偏好快照帧归属（建议扩展 `bootstrap.config`，改动最小）；④profile 总量上限数值（按传输时长与 10GiB 磁盘反推）。
+
+验收口径：14 §8 `U-01–U-12`——7 类资源各自"上传→创建任务→沙箱内生效"、运行中 Run 不变/新 Run 生效、断线重连幂等、凭据不落日志/投影/attachment 面、超限/损坏归档 fail-closed 且错误定位到条目、空 profile 与缺帧语义。本批未执行代码验证（纯文档工作），未新增或修改任何源码、测试与配置。
 
 ### 2026-10-09 生命周期 v2 修订（冻结 spec 修订；本轮不改代码）
 
@@ -304,7 +846,7 @@ architecture baseline不能自动刷新消除新增违规。报告改变模块�
 
 本批实测（仓库根）：`typecheck` 0 错误；`lint` 0 errors / 71 warnings；`architecture:check` **0 violations**；shared 48、client 35、server **429（421 pass / 0 fail / 8 skip）**、ui 62、web 22、services 2。
 
-未执行（环境阻塞，如实记录）：**本机 DNS 全断**（`registry.npmjs.org`/`api.e2b.dev`/`github.com` 均 EAI_AGAIN）→ ① E2B 模板构建（构建上下文已装配在 `/tmp/zcode-template-build-1225`，48MB，不含凭据；命令见 [templates/README](./../packages/server/src/cloud/adapters/sandbox/templates/README.md)）② 真实 GitHub App 与 E2B 联调（列仓库→建项目→建任务→沙箱 create→bridge 回连→首输入→checkpoint→PR）③ 浏览器 E2E 仍是人工无头复核（已跑门禁/引导/侧栏/新建任务，证据截图在仓库根 `cloud-ui-*.png`，未纳入自动化 runner）。
+未执行（环境阻塞，如实记录）：**本机 DNS 全断**（`registry.npmjs.org`/`api.e2b.dev`/`github.com` 均 EAI_AGAIN）→ ① E2B 模板构建（构建上下文已装配在 `/tmp/zcode-template-build-1225`，48MB，不含凭据；命令见 [templates/README](../../packages/server/src/cloud/adapters/sandbox/templates/README.md)）② 真实 GitHub App 与 E2B 联调（列仓库→建项目→建任务→沙箱 create→bridge 回连→首输入→checkpoint→PR）③ 浏览器 E2E 仍是人工无头复核（已跑门禁/引导/侧栏/新建任务，证据截图在仓库根 `cloud-ui-*.png`，未纳入自动化 runner）。
 
 流程记录（本会话第 8 次同类现象）：**单测全绿 ≠ 真的可用**——本批 8 条缺口**没有一条**来自代理自查或单测，全部由「真跑服务 + 真浏览器 + 真实凭据」暴露；并行代理的「外部归因/遗留」与实测不符累计 ≥6 次，一律以仓库根实测为准。
 

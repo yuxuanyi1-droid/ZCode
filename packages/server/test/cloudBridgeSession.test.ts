@@ -258,6 +258,8 @@ test("B-05：epoch 接管单一有效——旧 socket 的 ready/rpc 帧被拒绝
     {
       protocolVersion: 1,
       type: "rpc.open",
+      // 浏览器转发的流必带 `serviceScope`（14 §4.2；旧 socket 的帧先被代际校验拒绝）。
+      serviceScope: "client",
       runId: RUN_ID,
       runGeneration: 1,
       connectionEpoch: 1,

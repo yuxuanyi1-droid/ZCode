@@ -7,6 +7,7 @@ import {
   CLOUD_ATTACHMENT_DENIED_SERVICE_CHANNELS,
   CLOUD_ATTACHMENT_SERVICE_ALLOWLIST,
   CLOUD_ATTACHMENT_UPLOAD_FORM,
+  CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST,
   CLOUD_ERROR_HTTP_STATUS,
   CLOUD_ERROR_HTTP_STATUS_DEFAULT,
   CLOUD_HTTP_ENDPOINTS,
@@ -23,6 +24,7 @@ import {
   findCloudHttpEndpoint,
   forceStopCloudTaskRequestSchema,
   isCloudAttachmentServiceAllowed,
+  isCloudControlPlaneServiceAllowed,
   isSupportedCloudWireProtocolVersion,
   localCapabilitiesResponseSchema,
   patchCloudTaskRequestSchema,
@@ -305,6 +307,44 @@ test("attachment allowlist reuses existing V4 channel names and never leaks acco
     [...(CLOUD_SERVICE_CHANNEL_FACETS.taskAttachment?.domains ?? [])],
     [...CLOUD_ATTACHMENT_SERVICE_ALLOWLIST],
   );
+});
+
+test("control-plane allowlist is the frozen sync-service set and stays disjoint from the browser face", () => {
+  // 14 §4.2：控制面 scope 只放行既有 sync/资源服务通道（服务名与 ServiceChannels 同源）。
+  assert.deepEqual(
+    [...CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST],
+    ["mcp-sync", "skill-sync", "plugin-sync", "commands", "subagents", "settings-sync"],
+  );
+  const known = new Set(Object.values(shared.ServiceChannels));
+  for (const channel of CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST) {
+    assert.ok(known.has(channel), `allowlist must use an existing V4 channel name: ${channel}`);
+  }
+  assert.equal(
+    new Set(CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST).size,
+    CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST.length,
+  );
+  // 浏览器白名单不变：控制面白名单不得与它混用（分面各走各的白名单）。
+  for (const channel of CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST) {
+    assert.equal(
+      (CLOUD_ATTACHMENT_SERVICE_ALLOWLIST as readonly string[]).includes(channel),
+      false,
+      `${channel} must not be exposed through the browser attachment face`,
+    );
+  }
+  // denylist 对两面继续生效（账号域能力不进控制面白名单）。
+  for (const denied of CLOUD_ATTACHMENT_DENIED_SERVICE_CHANNELS) {
+    assert.equal(
+      (CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST as readonly string[]).includes(denied),
+      false,
+      `${denied} must not be reachable from the control-plane scope`,
+    );
+  }
+  assert.equal(isCloudControlPlaneServiceAllowed(shared.ServiceChannels.SkillSync), true);
+  assert.equal(isCloudControlPlaneServiceAllowed(shared.ServiceChannels.SettingsSync), true);
+  assert.equal(isCloudControlPlaneServiceAllowed(shared.ServiceChannels.File), false);
+  assert.equal(isCloudControlPlaneServiceAllowed(shared.ServiceChannels.Git), false);
+  assert.equal(isCloudControlPlaneServiceAllowed(shared.ServiceChannels.Credential), false);
+  assert.equal(isCloudControlPlaneServiceAllowed(shared.ServiceChannels.Skills), false);
 });
 
 test("attachment upload freezes the multipart field names", () => {

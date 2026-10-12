@@ -149,6 +149,9 @@ export function createCloudCommandTransport(
     const accepted = options.send({
       protocolVersion: CLOUD_RPC_PROTOCOL_VERSION,
       type: "rpc.open",
+      // 本流由**控制面**发起（命令投递/事实查询），不是浏览器转发：按 `control-plane` 分面
+      // 准入（14 §4.2）。`zcode-agent` 在控制面面可达集（浏览器面 ∪ 控制面面）内，因此通过。
+      serviceScope: "control-plane",
       runId: context.runId,
       runGeneration: context.runGeneration,
       connectionEpoch: context.connectionEpoch,

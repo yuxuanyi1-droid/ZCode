@@ -41,6 +41,26 @@ export interface SettingsSyncClaudeAgentsFileCopyResult {
   skippedReason?: "missingSource" | "targetExists";
 }
 
+/**
+ * 用户级 `~/.zcode/AGENTS.md` 整文件写入上限（UTF-8 字节，specs/cloud-agent 14 §4.5）。
+ *
+ * 唯一数值来源：`ISettingsSyncService.writeUserAgentsFile` 的准入上限；云用户资源 profile 的
+ * 文本条目上限（agents-md / commands / subagents ≤256KiB）与 settings-sync 的写入上限是
+ * 同一个用户级文本条目口径，`cloud/user-profile.ts` 直接复用本常量而不是另写一个字面量。
+ */
+export const SETTINGS_SYNC_USER_AGENTS_FILE_MAX_BYTES = 256 * 1024;
+
+/**
+ * `writeUserAgentsFile` 结果：落点绝对路径 + 写入字节数（UTF-8）+ 内容 sha256。
+ * `bytes`/`sha256` 由服务端从实际写入的正文派生，调用方（控制面用户资源同步）据此
+ * 核对条目元数据，不自行计算（14 §4.5）。
+ */
+export interface SettingsSyncUserAgentsFileWriteResult {
+  path: string;
+  bytes: number;
+  sha256: string;
+}
+
 export type SettingsSyncSkillSkipReason = "targetExists" | "sameNameExists";
 
 export interface SettingsSyncSourceSkillSummary {

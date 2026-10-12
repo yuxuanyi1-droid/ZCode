@@ -25,12 +25,15 @@ import {
   describeCloudSettingsError,
 } from "@/settings/cloudRuntimeSectionParts.js";
 import { CloudSandboxSettingsSection } from "@/settings/CloudSandboxSettingsSection.js";
+import { CloudUserResourcesSection } from "@/settings/CloudUserResourcesSection.js";
 import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
 
 // 公开入口（packages/ui/src/index.ts）历史上从本文件导出沙箱分区与错误描述：
 // 拆分后在此原样转出，外部 import 路径不变。
 export { describeCloudSettingsError } from "@/settings/cloudRuntimeSectionParts.js";
 export { CloudSandboxSettingsSection } from "@/settings/CloudSandboxSettingsSection.js";
+// P20（14 §9.4；W11 §12）：云用户资源管理分区的公开入口（供 W9 注入的设置页宿主持有）。
+export { CloudUserResourcesSection } from "@/settings/CloudUserResourcesSection.js";
 
 /** 供设置导航注册的 id 常量（导航配置不在本工作单 roots 内，由设置 owner 接线）。 */
 export const CLOUD_RUNTIME_SETTINGS_GROUP_ID = "cloudRuntime";
@@ -170,6 +173,9 @@ export function CloudRuntimeSection() {
     <div className="space-y-6">
       <CloudGithubSettingsSection />
       <CloudSandboxSettingsSection />
+      {/* 用户资源（M8）：位置沿云分组排列（GitHub → Sandbox → 用户资源）；
+          本组件已在云模式守卫内，非云模式走上面的 notCloudMode 提示。 */}
+      <CloudUserResourcesSection />
       <p className="flex items-center gap-1.5 px-0.5 text-ui-base text-foreground-subtle">
         <ExternalLink className="size-3.5" aria-hidden="true" />
         {intl.formatMessage({ id: "settings.cloudRuntime.description" })}

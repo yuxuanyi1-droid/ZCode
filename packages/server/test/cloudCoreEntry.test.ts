@@ -22,7 +22,9 @@ import {
   createFakeSandboxDriver,
   createFakeTemplateResolver,
   createFakeGitGrantBroker,
+  createFakeUserProfileStore,
 } from "./cloudCoreAdapterFakes.js";
+import { createFakeControlPlaneRpc } from "./cloudUserProfileSyncFakes.js";
 import {
   FakeClock,
   FakeHash,
@@ -79,6 +81,8 @@ function entryContext(
       readiness: () => planeContext.storage.readiness(),
       storage: planeContext.storage,
       operations: planeContext.outbox,
+      // M8：资源下发组装需要 profile store（14 §9.2④）；未接线时按 not_configured fail-closed。
+      userProfile: planeContext.userProfile,
     },
     github: planeContext.github,
     templates: undefined,
@@ -96,6 +100,7 @@ test("入口装配：readiness 门槛 + 路由注册 + 循环句柄 + 关闭顺�
         readiness: () => planeContext.storage.readiness(),
         storage: planeContext.storage,
         operations: planeContext.outbox,
+        userProfile: planeContext.userProfile,
         close: async () => {
           closed = true;
         },
@@ -239,6 +244,20 @@ test("bridge 握手：hello → welcome → bootstrap.config；ready 后才发�
     hash: { sha256Hex: async (value: string) => createHash("sha256").update(value).digest("hex") },
     ids: new FakeIds(),
   });
+  // M8 连接期同步（14 §4.6）：ready 之后自动同步一次；这里接记录型 RPC fake 断言调用与分面。
+  const controlPlaneRpc = createFakeControlPlaneRpc();
+  const profileStore = createFakeUserProfileStore();
+  profileStore.versions.set(1, [
+    {
+      category: "agents-md",
+      entryId: "user-agents",
+      enabled: true,
+      sha256: "a".repeat(64),
+      bytes: 8,
+      contentKind: "agents-md",
+      content: "# AGENTS",
+    },
+  ]);
   planeRef = assembleCloudCoreControlPlane(
     {
       storage,
@@ -246,12 +265,14 @@ test("bridge 握手：hello → welcome → bootstrap.config；ready 后才发�
       github: createFakeGitHub(),
       drivers: createFakeDriverRegistry(createFakeSandboxDriver()),
       attachments: bridge.port,
+      controlPlaneRpc,
       runtimeCommands: bridge.runtimeCommands,
       clock,
       ids,
       hash: new FakeHash(),
       templates: createFakeTemplateResolver(),
       provisioningEnvelope: createFakeProvisioningEnvelope(),
+      userProfile: profileStore,
       ...gitGrantDeps,
     },
     { registry },
@@ -321,6 +342,8 @@ test("bridge 握手：hello → welcome → bootstrap.config；ready 后才发�
     }),
   );
   await waitFor(() => fake.sent.length >= 2, "welcome + bootstrap.config");
+  // 稍等一拍：自举帧的下发是同步完成的，若还会追加资源帧，这里必然已经出现（U-13 退役断言）。
+  await new Promise<void>((resolve) => setImmediate(resolve));
   const frames = fake.sent.map(
     (item) =>
       JSON.parse(item) as {
@@ -339,8 +362,15 @@ test("bridge 握手：hello → welcome → bootstrap.config；ready 后才发�
   );
   assert.deepEqual(
     frames.map((frame) => frame.type),
+    // 14 §4.8/§9.5：自举期资源下发退役——握手只发 welcome + bootstrap.config，
+    // 用户资源同步改在 ready 之后经 `rpc.*` 帧（连接期同步）触发。
     ["bridge.welcome", "bootstrap.config"],
-    "welcome 之后立即下发 bootstrap.config（02 §5.3）",
+    "welcome 之后只下发 bootstrap.config（不再有 bootstrap.resources 帧）",
+  );
+  assert.equal(
+    frames.some((frame) => frame.type === "bootstrap.resources"),
+    false,
+    "U-13：退役帧不得再出现在任何连接上",
   );
   assert.equal(
     (await planeContext.storage.runs.get(runId))?.workspacePath,
@@ -366,6 +396,19 @@ test("bridge 握手：hello → welcome → bootstrap.config；ready 后才发�
   );
   assert.equal((await storage.runs.get(runId))?.status, "ready");
   assert.equal(registry.current(runId)?.ready, true);
+
+  // 连接期自动同步（14 §4.6）：ready 之后异步触发一次，控制面经 `rpc.open`（serviceScope =
+  // "control-plane"）调用沙箱既有 sync 服务；同 epoch 只触发一次（重复 ready 不出第二次）。
+  await waitFor(
+    () => controlPlaneRpc.callsOf("settings-sync", "writeUserAgentsFile").length === 1,
+    "auto profile sync",
+  );
+  assert.deepEqual(controlPlaneRpc.callsOf("settings-sync", "writeUserAgentsFile")[0]?.args, [
+    { content: "# AGENTS" },
+  ]);
+  // 同 epoch 重复 ready（重连前）不再触发第二次同步。
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(controlPlaneRpc.callsOf("settings-sync", "writeUserAgentsFile").length, 1);
   await bridge.close();
 });
 
@@ -401,6 +444,8 @@ test("bridge 握手：hello 上报的 workspacePath 与持久事实不一致即�
       hash: new FakeHash(),
       templates: createFakeTemplateResolver(),
       provisioningEnvelope: createFakeProvisioningEnvelope(),
+      // M8：资源下发组装需要 profile store（14 §9.2④）；未接线时握手会按 not_configured 出 fault。
+      userProfile: createFakeUserProfileStore(),
       ...gitGrantDeps,
     },
     { registry },
@@ -542,6 +587,8 @@ test("bridge 通道日志：连接/握手/拒绝各留痕、心跳不刷 info、
       hash: new FakeHash(),
       templates: createFakeTemplateResolver(),
       provisioningEnvelope: createFakeProvisioningEnvelope(),
+      // M8：资源下发组装需要 profile store（14 §9.2④）；未接线时握手会按 not_configured 出 fault。
+      userProfile: createFakeUserProfileStore(),
       ...gitGrantDeps,
     },
     { registry },

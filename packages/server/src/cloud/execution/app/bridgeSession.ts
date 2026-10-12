@@ -1,10 +1,10 @@
 /**
- * Bridge 会话编排（specs/cloud-agent/02 §5 握手/旋转/ready 门控、§8 背压与故障、
+ * Bridge 会话编排（specs/cloud-agent 02 §5 握手/旋转/ready 门控、§8 背压与故障、
  * 07 §10 故障表；W6 §3「出站 WSS bridge」）。
  *
  * 一次连接的生命周期：
  *   persist(候选) → hello → welcome(epoch/rotationId/ingestCursors) → bootstrap.config
- *   → bootstrap(clone/runtime/envelope/exporter) → ready → heartbeat/批次 → 断开重连。
+ *   → bootstrap(clone/runtime/envelope/偏好快照/exporter) → ready → heartbeat/批次 → 断开重连。
  *
  * 边界（02 §2 不变量 7、§3）：
  * - 本文件**不持有**本地 stdio 与 runtime：网络断开只关自己的 socket 与 relay 会话；
@@ -90,6 +90,17 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
       return;
     }
     await bootstrapIfNeeded(connection);
+    if (!state.bootstrapped) {
+      // 自举未完成：`bootstrap.config` 超时未到（自举失败已在上面按 fault 抛出）。02 §5.3
+      // 要求 welcome 只证明认证、条件逐条满足才 ready——这里**不得**补发 ready（否则
+      // `preferences-installed` 等真实证据条件会被静默绕过，等于假 ready）。关连接走既有
+      // 重连路径，等下次连接重试（2026-10-11 P19b 修复：此前该分支会带着
+      // configVersion="unknown" 直接发 ready）。
+      logBridgeState(state, logger, "bootstrapping", { reason: "bootstrap-incomplete" });
+      connection.close("bootstrap-incomplete");
+      state.closeReason = "socket-close";
+      return;
+    }
     sendReady(connection);
     logBridgeState(state, logger, "ready", {
       connectionEpoch: state.epoch,
@@ -136,7 +147,10 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
       });
     });
     try {
-      await options.bootstrap.run(delivered);
+      const report = await options.bootstrap.run(delivered);
+      // 已应用配置版本（14 §6）：偏好快照 configVersion（无快照时 = policyVersion）；
+      // ready 帧按它上报"Run 已应用配置版本"（重连沿用同一值）。
+      state.configVersion = report.configVersion;
       state.bootstrapped = true;
     } catch (error) {
       // 明确阶段 + fault 上报，不制造假 ready（01 §5.2、02 §8）。
@@ -165,7 +179,8 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
       protocolVersion: CLOUD_BRIDGE_PROTOCOL_VERSION,
       type: "bridge.ready",
       connectionEpoch: state.epoch,
-      configVersion: state.config?.policyVersion ?? "unknown",
+      // 已应用配置版本（14 §6）：有偏好快照时是快照 configVersion，否则维持 policyVersion。
+      configVersion: state.configVersion ?? state.config?.policyVersion ?? "unknown",
       runtimeIncarnation: facts.incarnation ?? `runtime-${process.pid}`,
       exporterReady: projectionReady.exporterReady,
       walReady: projectionReady.walReady,
@@ -217,7 +232,9 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
             }
             if (error instanceof FatalBridgeError) {
               // 本地事实源不可用：不进入退避重连（重试不会好，只会拖到控制面超时）。
-              logger.error(undefined, "bridge failed: irreversible local error", { error: message });
+              logger.error(undefined, "bridge failed: irreversible local error", {
+                error: message,
+              });
               logBridgeState(state, logger, "failed-closed", { reason: "fatal-local-error" });
               options.onFatal?.(message);
               return;

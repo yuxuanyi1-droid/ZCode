@@ -40,6 +40,7 @@ import { ScopedErrorBoundary } from "@/ErrorBoundary.js";
 import { CloudDraftStartConfigControl } from "@/cloud/CloudDraftStartConfigControl.js";
 import { CloudTaskArchivedBanner } from "@/cloud/CloudTaskArchivedBanner.js";
 import { CloudTaskRunStatusBanner } from "@/cloud/CloudTaskRunStatusBanner.js";
+import { CloudTaskUserProfileSyncRow } from "@/cloud/CloudTaskUserProfileSyncRow.js";
 import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
 import {
   resolveCloudMobileSidebarDockedRestorePlan,
@@ -1974,6 +1975,11 @@ export const WorkspaceShellLayout = memo(function WorkspaceShellLayoutComponent(
                               failed 等状态的可见呈现。非云工作区（identity 不是 cloud-task:…）
                               返回 null，本地模式零渲染。 */}
                           <CloudTaskRunStatusBanner workspaceIdentity={workspaceIdentity} />
+                          {/* 连接态用户资源同步入口（specs/cloud-agent/14 §4.6、W11 §13D）：
+                              只在 Run 连接态（attachment 在线、activeRun ready）且非终态渲染；
+                              未连接/终态返回 null（不是禁用态）。与运行状态横幅相邻——
+                              云任务的操作/状态呈现都在这一个槽位区。 */}
+                          <CloudTaskUserProfileSyncRow workspaceIdentity={workspaceIdentity} />
                           {/* 已归档只读横幅（04 §3.3 archived 行、2026-10-08 巡检修订）：
                               说明只读 + 恢复入口；非 archived 返回 null。 */}
                           <CloudTaskArchivedBanner workspaceIdentity={workspaceIdentity} />

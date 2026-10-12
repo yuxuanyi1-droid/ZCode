@@ -12,6 +12,7 @@ import type { OperationOutboxPort } from "../../app/ports/operationOutboxPort.js
 import type { GitGrantStore } from "../../app/ports/gitGrantPort.js";
 import type { GitHubEffectStore } from "../../app/ports/gitHubEffectPort.js";
 import type { InteractionDecisionRepo } from "../../app/ports/inputPort.js";
+import type { UserProfileStorePort } from "../../app/ports/userProfileStorePort.js";
 import type {
   InputRepo,
   InputPayloadRead,
@@ -67,6 +68,8 @@ export interface CloudStorage {
   readonly effects: GitHubEffectStore;
   /** 交互决定与取消意向（02 §6.3）：W1/W5 的审批通路消费。 */
   readonly interactions: InteractionDecisionRepo;
+  /** 用户资源 profile（M8；14 §9.2①）：上传用例与 `bootstrap.resources` 组装消费。 */
+  readonly userProfile: UserProfileStorePort;
   /** 受控附件存储（字节 IO 在调用进程异步执行）。 */
   readonly attachments: ReturnType<typeof createCloudAttachmentStore>;
   /** 部署主体持久化（03 §3）。 */
@@ -265,12 +268,26 @@ export async function createCloudStorage(options: CloudStorageOptions): Promise<
     listUnsettled: () => request("operations.listUnsettled", undefined),
   };
 
+  // 用户资源 profile（M8；14 §9.2①/§9.4）：与 runs 冻结列同一个 cloud.db，经同一 worker 执行
+  // （事务与唯一约束语义由 repositories/userProfileRepo.ts 承担）。
+  const userProfile: UserProfileStorePort = {
+    snapshot: () => request("userProfile.snapshot", undefined),
+    readVersion: (profileVersion) => request("userProfile.readVersion", { profileVersion }),
+    readVersionEntries: (profileVersion) =>
+      request("userProfile.readVersionEntries", { profileVersion }),
+    readEntry: (readRequest) => request("userProfile.readEntry", readRequest),
+    upsertEntry: (upsertRequest) => request("userProfile.upsertEntry", upsertRequest),
+    deleteEntry: (deleteRequest) => request("userProfile.deleteEntry", deleteRequest),
+    setEntryEnabled: (enabledRequest) => request("userProfile.setEntryEnabled", enabledRequest),
+  };
+
   return {
     storage,
     operations,
     grants,
     effects,
     interactions,
+    userProfile,
     attachments,
     ensurePrincipal: (principalRequest) => request("principals.ensure", principalRequest),
     readiness: storage.readiness,

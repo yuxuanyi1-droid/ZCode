@@ -64,3 +64,14 @@ export {
   type UseCloudWorkspaceControllerOptions,
 } from "./useCloudWorkspaceController.js";
 export { useCloudWorkspaceServices } from "./useCloudWorkspaceServices.js";
+export {
+  useCloudUserResources,
+  type UseCloudUserResourcesOptions,
+  type UseCloudUserResourcesResult,
+  type UserResourceActionError,
+  type UserResourceActionResult,
+} from "./useCloudUserResources.js";
+export {
+  useCloudTaskUserProfileSync,
+  type UseCloudTaskUserProfileSyncResult,
+} from "./useCloudTaskUserProfileSync.js";

@@ -13,6 +13,13 @@ import type {
   CloudAttachmentUploadResponse,
   CloudBranchPage,
   CloudDeletedResponse,
+  CloudUserProfileCategory,
+  CloudUserProfileEntryDeleteResponse,
+  CloudUserProfileEntryReadResponse,
+  CloudUserProfileEntryUploadRequest,
+  CloudUserProfileEntryUploadResponse,
+  CloudUserProfileSnapshot,
+  CloudUserProfileSyncResponse,
   CloudHistoryPage,
   CloudHistoryQuery,
   CloudListQuery,
@@ -173,4 +180,57 @@ export interface CloudControlPlanePort {
     file: Blob,
     options?: CloudControlPlaneRequestOptions & { readonly taskId?: string | undefined },
   ): Promise<CloudAttachmentUploadResponse>;
+
+  // ── 用户资源 profile（M8；14 §9.2⑦/§9.4；W11 §12）──
+  // UI 只声明真正会调的方法：快照（列表 + 版本）、单条回显（编辑）、PUT（上传/替换）、
+  // DELETE（删除）、PATCH（条目开关）。`GET …/version` 不在 UI 使用面内（版本随快照与每次
+  // 写的响应一起回来，多一个取数点等于多一条可漂移的路径）。
+
+  /** 快照摘要（条目元数据 + `profileVersion` + `totalBytes` + `createdAtMs`）：无正文。 */
+  listUserProfile(options?: CloudControlPlaneRequestOptions): Promise<CloudUserProfileSnapshot>;
+  /**
+   * 读**单个**条目元数据 + 正文（14 §9.4①）：AGENTS.md 编辑器与 MCP 表单回显的唯一通路；
+   * 键不存在时抛 `not_found`。
+   */
+  getUserProfileEntry(
+    category: CloudUserProfileCategory,
+    entryId: string,
+    options?: CloudControlPlaneRequestOptions,
+  ): Promise<CloudUserProfileEntryReadResponse>;
+  /**
+   * 幂等整条替换：负载 + 可选 `displayName`/`enabled`（省略 `enabled` 时服务端按 true 归一，
+   * 因此「保留现有开关」必须显式传当前值，14 §9.4①）。
+   */
+  putUserProfileEntry(
+    category: CloudUserProfileCategory,
+    entryId: string,
+    body: CloudUserProfileEntryUploadRequest,
+    options?: CloudControlPlaneRequestOptions,
+  ): Promise<CloudUserProfileEntryUploadResponse>;
+  /** 删除条目；键不存在时服务端幂等无操作（版本不变）。 */
+  deleteUserProfileEntry(
+    category: CloudUserProfileCategory,
+    entryId: string,
+    options?: CloudControlPlaneRequestOptions,
+  ): Promise<CloudUserProfileEntryDeleteResponse>;
+  /** 条目级开关（PATCH，body 只含 `{enabled}`）；开关值变化才递增版本。 */
+  setUserProfileEntryEnabled(
+    category: CloudUserProfileCategory,
+    entryId: string,
+    enabled: boolean,
+    options?: CloudControlPlaneRequestOptions,
+  ): Promise<CloudUserProfileEntryUploadResponse>;
+  /**
+   * 手动同步一次**最新** profile 到该 Task 当前 Run 的沙箱（14 §4.6；B 批端点
+   * `POST /api/cloud/tasks/:taskId/user-profile-sync`，响应 = 本次逐条结果 +
+   * 承载本次同步的真实 `trigger`）。
+   *
+   * 门控在服务端：未连接 → 409 `not_ready`(reason `run-not-connected`)、终态 →
+   * 409 `not_ready`(reason `run-terminal`)；UI 的"未连接不显示入口"只是双保险，
+   * 不是权限边界。
+   */
+  syncTaskUserProfile(
+    taskId: string,
+    options?: CloudControlPlaneRequestOptions,
+  ): Promise<CloudUserProfileSyncResponse>;
 }

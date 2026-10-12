@@ -88,6 +88,9 @@ export function createBrowserRpcMultiplexer(input: {
       const sent = input.sendFrame({
         protocolVersion: CLOUD_RPC_PROTOCOL_VERSION,
         type: "rpc.open",
+        // 分面（14 §4.2，A 批冻结）：浏览器字节只作为有界 payload 被包装，**不能自报 scope**；
+        // 控制面为浏览器流固定写 `"client"`（沙箱侧按它选浏览器面白名单）。
+        serviceScope: "client",
         runId: state.runId,
         runGeneration: state.runGeneration,
         connectionEpoch: state.connectionEpoch,

@@ -9,12 +9,17 @@ import type {
   SandboxDriverRegistryPort,
   SandboxProviderEntry,
 } from "../src/cloud/app/ports/sandboxDriverRegistryPort.js";
+import type { BootstrapConfigFrame } from "@zcode/shared";
 import type {
   AttachmentPort,
   AttachmentSendResult,
 } from "../src/cloud/app/ports/attachmentPort.js";
 import type { RuntimeCommandQueryPort } from "../src/cloud/app/ports/runtimeCommandQueryPort.js";
 import type { ProvisioningEnvelopeSource } from "../src/cloud/app/ports/provisioningEnvelopePort.js";
+import type {
+  CloudUserPreferencesValues,
+  UserPreferencesPort,
+} from "../src/cloud/app/ports/userPreferencesPort.js";
 import { canAdvanceDeliveryStatus } from "../src/cloud/domain/deliveryStatus.js";
 import type {
   InteractionCancelIntent,
@@ -113,6 +118,8 @@ export interface FakeAttachmentPort extends AttachmentPort {
   readonly drains: string[];
   readonly checkpoints: string[];
   readonly bootstrapConfigs: { runId: string; taskId: string; workspacePath: string }[];
+  /** 完整 bootstrap.config 载荷记录（M8 偏好块断言用：`preferences` 块的有无与取值）。 */
+  readonly bootstrapConfigPayloads: Omit<BootstrapConfigFrame, "protocolVersion" | "type">[];
   sendResult: AttachmentSendResult;
   /** 令 bootstrap.config 下发失败（fail-closed 路径测试）。 */
   bootstrapResult: AttachmentSendResult;
@@ -123,11 +130,13 @@ export function createFakeAttachmentPort(): FakeAttachmentPort {
   const drains: string[] = [];
   const checkpoints: string[] = [];
   const bootstrapConfigs: { runId: string; taskId: string; workspacePath: string }[] = [];
+  const bootstrapConfigPayloads: Omit<BootstrapConfigFrame, "protocolVersion" | "type">[] = [];
   return {
     sent,
     drains,
     checkpoints,
     bootstrapConfigs,
+    bootstrapConfigPayloads,
     sendResult: { status: "sent" },
     bootstrapResult: { status: "sent" },
     async sendBootstrapConfig(request) {
@@ -137,6 +146,7 @@ export function createFakeAttachmentPort(): FakeAttachmentPort {
         taskId: request.taskId,
         workspacePath: request.config.workspacePath,
       });
+      bootstrapConfigPayloads.push(request.config);
       return { status: "sent" };
     },
     async sendCommand(request) {
@@ -155,6 +165,29 @@ export function createFakeAttachmentPort(): FakeAttachmentPort {
       return null;
     },
   };
+}
+
+/** 行为偏好 fake（14 §9.2⑥）：`values` 可变；`fail` 模拟设置读取故障（回空对象）。 */
+export interface FakeUserPreferences extends UserPreferencesPort {
+  values: CloudUserPreferencesValues;
+  fail: boolean;
+  readCount: number;
+}
+
+export function createFakeUserPreferences(
+  values: CloudUserPreferencesValues = {},
+): FakeUserPreferences {
+  const fake: FakeUserPreferences = {
+    values,
+    fail: false,
+    readCount: 0,
+    async readUserPreferences() {
+      fake.readCount += 1;
+      if (fake.fail) throw new Error("settings unavailable");
+      return { ...fake.values };
+    },
+  };
+  return fake;
 }
 
 export function createFakeRuntimeCommands(): RuntimeCommandQueryPort & {
@@ -251,6 +284,10 @@ export function createFakeProvisioningEnvelope(): ProvisioningEnvelopeSource & {
 }
 
 // ── 拆出的替身经本文件转出（保持测试 import 面稳定；实现分别在相邻文件）──
+export {
+  createFakeUserProfileStore,
+  type FakeUserProfileStore,
+} from "./cloudCoreUserProfileFakes.js";
 export { createFakeSandboxDriver } from "./cloudCoreDriverFake.js";
 export type { FakeSandboxDriver } from "./cloudCoreDriverFake.js";
 export {

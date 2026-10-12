@@ -444,6 +444,10 @@ import {
 import { ensureAppCaCert } from "./runtime-tools/appCaCert.js";
 import { buildHelperOpenArgs, isCuaLocalDevelopmentRuntime } from "@zcode/zcode-cua/broker/server";
 import { createServiceLogger, type ServiceLogger } from "#src/logger/serviceLogger.js";
+import {
+  mergeRuntimePreferences,
+  readRuntimePreferencesSnapshot,
+} from "#src/runtimePreferencesSnapshot.js";
 import { IOffPeakTaskService } from "./session/offPeakTask.js";
 import { OffPeakTaskService } from "./session/offPeakTaskService.js";
 import { OffPeakTaskRepo } from "./session/offPeakTaskRepo.js";
@@ -1414,6 +1418,8 @@ export function createLocalServices(options: {
       overrideOrigin: (await settingService.get()).zcodeEndpointOrigin,
     });
   const provisioningOAuthKeys = new Set<string>(PROVIDER_PROVISIONING_OAUTH_CREDENTIAL_KEYS);
+  // 云执行节点偏好快照读取的诊断口（只在损坏/缺失时输出一条 warn；见 runtimePreferencesSnapshot）。
+  const runtimePreferencesLog = createServiceLogger("runtime-preferences-snapshot");
   const credentialService = createCredentialService({
     onDidMutate: ({ key }) => {
       if (provisioningOAuthKeys.has(key) || isProviderProvisioningAccountCredentialKey(key)) {
@@ -2266,19 +2272,33 @@ export function createLocalServices(options: {
           resolveSessionRuntimePreferences: async (scope) => {
             // 预算已统一，不能把可选远端配置作为本地/手机 shared-host 建会话的前置条件。
             const settings = await settingService.get();
-            const modelContextBudgetStrategy = DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY;
-            return {
-              askUserQuestionAutoResolutionEnabled:
-                settings.askUserQuestionAutoResolutionEnabled !== false,
-              nativeSearchEnhancementsEnabled: settings.nativeSearchEnhancementsEnabled !== false,
-              memoryEnabled: settings.memoryEnabled === true,
-              modelContextBudgetStrategy,
-              // user-execution 只消费 Shell；共享默认策略是统一 result schema 的兼容占位，
-              // 不会覆盖 runtime-materialization 阶段已经固定的 strategy。
-              ...(scope === "user-execution" && settings.integratedTerminalShell
-                ? { integratedTerminalShell: settings.integratedTerminalShell }
-                : {}),
-            };
+            // 云执行节点：优先用控制面下发的**已应用快照实值**（14 §6/§9.3）。快照缺失/
+            // 损坏只记一条 warn 并回落下面的沙箱本地设置默认值，不让建会话失败。
+            const snapshot = authority.isCloudExecutionNode
+              ? await readRuntimePreferencesSnapshot({
+                  onWarning: ({ reason, path }) =>
+                    runtimePreferencesLog.warn(undefined, "runtime preferences snapshot unusable", {
+                      reason,
+                      path,
+                    }),
+                })
+              : null;
+            return mergeRuntimePreferences({
+              snapshot,
+              scope,
+              defaults: {
+                askUserQuestionAutoResolutionEnabled:
+                  settings.askUserQuestionAutoResolutionEnabled !== false,
+                nativeSearchEnhancementsEnabled: settings.nativeSearchEnhancementsEnabled !== false,
+                memoryEnabled: settings.memoryEnabled === true,
+                modelContextBudgetStrategy: DEFAULT_ZCODE_MODEL_CONTEXT_BUDGET_STRATEGY,
+                // user-execution 只消费 Shell；共享默认策略是统一 result schema 的兼容占位，
+                // 不会覆盖 runtime-materialization 阶段已经固定的 strategy。
+                ...(settings.integratedTerminalShell
+                  ? { integratedTerminalShell: settings.integratedTerminalShell }
+                  : {}),
+              },
+            });
           },
         }),
   });

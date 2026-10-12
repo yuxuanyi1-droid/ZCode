@@ -42,6 +42,16 @@ import {
   cloudRepositoriesQuerySchema,
   cloudSnapshotQuerySchema,
   cloudTaskEventsQuerySchema,
+  // M8 用户资源 profile（14 §9.2⑦/§9.4）：形状唯一来源仍是 shared，SDK 只登记引用。
+  cloudUserProfileSnapshotSchema,
+  cloudUserProfileVersionResponseSchema,
+  cloudUserProfileEntryUploadRequestSchema,
+  cloudUserProfileEntryUploadResponseSchema,
+  cloudUserProfileEntryDeleteResponseSchema,
+  cloudUserProfileEntryReadResponseSchema,
+  cloudUserProfileEntryEnabledPatchRequestSchema,
+  // M8 连接期手动同步响应（14 §4.6，B 批）：SDK 方法 `syncTaskUserProfile` 的响应形状。
+  cloudUserProfileSyncResponseSchema,
   type CloudHistoryQuery,
   type CloudListQuery,
   type CloudRepositoriesQuery,
@@ -82,6 +92,27 @@ export const CLOUD_SDK_ENDPOINT_SCHEMAS = {
   taskEvents: { request: null, response: cloudTaskEventsResponseSchema },
   taskSnapshot: { request: null, response: cloudProjectionSnapshotSchema },
   uploadAttachment: { request: null, response: cloudAttachmentUploadResponseSchema },
+  userProfile: { request: null, response: cloudUserProfileSnapshotSchema },
+  userProfileVersion: { request: null, response: cloudUserProfileVersionResponseSchema },
+  putUserProfileEntry: {
+    request: cloudUserProfileEntryUploadRequestSchema,
+    response: cloudUserProfileEntryUploadResponseSchema,
+  },
+  deleteUserProfileEntry: {
+    request: null,
+    response: cloudUserProfileEntryDeleteResponseSchema,
+  },
+  // P20 追加（14 §9.4）：条目回显（GET，无请求体）与条目级开关（PATCH，body = {enabled}）。
+  readUserProfileEntry: { request: null, response: cloudUserProfileEntryReadResponseSchema },
+  patchUserProfileEntryEnabled: {
+    request: cloudUserProfileEntryEnabledPatchRequestSchema,
+    response: cloudUserProfileEntryUploadResponseSchema,
+  },
+  // B 批追加（14 §4.6）：连接期手动同步一次最新 profile（无请求体的 task-scoped 动作端点）。
+  syncTaskUserProfile: {
+    request: cloudEmptyBodySchema,
+    response: cloudUserProfileSyncResponseSchema,
+  },
 } as const;
 
 export type CloudSdkEndpointId = keyof typeof CLOUD_SDK_ENDPOINT_SCHEMAS;

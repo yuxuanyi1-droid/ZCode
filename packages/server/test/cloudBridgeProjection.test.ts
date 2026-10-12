@@ -298,6 +298,8 @@ test("rpcRelay：浏览器 ChannelClient 经 rpc.* 帧往返，旧代际帧不�
       runGeneration: 1,
       connectionEpoch: 7,
       streamId,
+      // 浏览器转发的流按 `client` 分面 open（14 §4.2）：request/close 不带 scope。
+      ...(type === "rpc.open" ? { serviceScope: "client" as const } : {}),
       ...(payload === undefined ? {} : { payload }),
     }) as CloudRpcFrame;
 
@@ -527,7 +529,11 @@ test("命令传输释放只作用于关闭的那条连接：其它 run / 新 epo
   });
   // 无应答方：开流成功但调用超时——code 是 network_unknown 而不是 attachment_unavailable。
   assert.equal(a1.status, "rejected");
-  assert.equal((a1 as { code?: string }).code, "network_unknown", "开流成功后只允许超时，不允许 closed");
+  assert.equal(
+    (a1 as { code?: string }).code,
+    "network_unknown",
+    "开流成功后只允许超时，不允许 closed",
+  );
   assert.ok(
     sentFrames.some((frame) => frame.type === "rpc.open" && frame.runId === "run-a"),
     "run A 必须已发 rpc.open",
@@ -549,7 +555,10 @@ test("命令传输释放只作用于关闭的那条连接：其它 run / 新 epo
   );
 
   // 另一个 run B 或同 run 的新 epoch：必须重新开流并可用，而不是被 A 的关闭毒化。
-  for (const [label, next] of [["run-b", mk("run-b", 1)], ["run-a 新 epoch", mk("run-a", 2)]] as const) {
+  for (const [label, next] of [
+    ["run-b", mk("run-b", 1)],
+    ["run-a 新 epoch", mk("run-a", 2)],
+  ] as const) {
     const openedBefore = sentFrames.filter((frame) => frame.type === "rpc.open").length;
     context = next;
     const result = await transport.sendCommand({

@@ -19,10 +19,19 @@ import type { SandboxDriverPort } from "../src/cloud/app/ports/sandboxDriverPort
 import { assembleCloudControlPlane } from "../src/cloud/app/assembleCloudControlPlane.js";
 import type { CloudCoreConfig } from "../src/cloud/app/config.js";
 import type { BrowserWatchPort } from "../src/cloud/app/ports/browserWatchPort.js";
+import type { ControlPlaneRpcPort } from "../src/cloud/app/ports/controlPlaneRpcPort.js";
+import type { UserPreferencesPort } from "../src/cloud/app/ports/userPreferencesPort.js";
+import type { UserProfileStorePort } from "../src/cloud/app/ports/userProfileStorePort.js";
 import { sessionFromAddress } from "../src/cloud/app/attachments/registry.js";
+import {
+  createFakeControlPlaneRpc,
+  type FakeControlPlaneRpc,
+} from "./cloudUserProfileSyncFakes.js";
 import {
   createFakeArtifacts,
   createFakeAttachmentPort,
+  createFakeUserPreferences,
+  createFakeUserProfileStore,
   createFakeDriverRegistry,
   createFakeExecutionProjections,
   createFakeGitGrantBroker,
@@ -70,6 +79,9 @@ export class FakeIds implements IdGeneratorPort {
 export class FakeHash implements HashPort {
   async sha256Hex(value: string): Promise<string> {
     return createHash("sha256").update(value).digest("hex");
+  }
+  async sha256HexBytes(bytes: Uint8Array): Promise<string> {
+    return createHash("sha256").update(bytes).digest("hex");
   }
 }
 
@@ -241,6 +253,14 @@ export interface TestPlane {
   gitGrantBrokerDeps: ReturnType<typeof createFakeGitGrantBrokerDeps>;
   /** 浏览器观看事实 fake（生产实现是 bridge 通道的多路复用器）。 */
   browserWatch: FakeBrowserWatch;
+  /** M8 用户资源 profile store（缺省 = 空版本 1 的 fake；显式 null 时未接线）。 */
+  userProfile?: UserProfileStorePort;
+  /** M8 偏好来源；未接线（缺省）时 `bootstrap.config` 不带 preferences 块。 */
+  userPreferences?: ReturnType<typeof createFakeUserPreferences>;
+  /** M8 连接期同步的控制面 RPC 端口（缺省 = 记录型 fake；显式 null 时未接线）。 */
+  controlPlaneRpc?: ControlPlaneRpcPort | null;
+  /** 记录型 fake（显式注入自有实现时为 undefined）。 */
+  fakeControlPlaneRpc?: FakeControlPlaneRpc;
 }
 
 /** 浏览器观看连接 fake：`open/close` 模拟任务通道流的建立与关闭（关即清）。 */
@@ -270,6 +290,12 @@ export function buildTestPlane(
     storage?: FakeStorageOptions;
     driver?: SandboxDriverPort | null;
     config?: Partial<CloudCoreConfig>;
+    /** M8：资源下发组装的 profile store 覆盖（缺省自建空版本 1 的 fake；null = 未接线）。 */
+    userProfile?: UserProfileStorePort | null;
+    /** M8：偏好快照来源；缺省不接线（`bootstrap.config` 不带 preferences 块）。 */
+    userPreferences?: UserPreferencesPort;
+    /** M8：连接期同步的控制面 RPC 端口（缺省自建记录型 fake；null = 未接线）。 */
+    controlPlaneRpc?: ControlPlaneRpcPort | null;
   } = {},
 ): TestPlane {
   const clock = new FakeClock();
@@ -291,12 +317,27 @@ export function buildTestPlane(
   const gitGrantBroker = gitGrant.broker;
   const gitGrantBrokerDeps = gitGrant.deps;
   const browserWatch = createFakeBrowserWatch();
+  const userProfile =
+    options.userProfile === null
+      ? undefined
+      : (options.userProfile ?? createFakeUserProfileStore());
+  const userPreferences = options.userPreferences;
+  // M8 连接期同步：缺省给一个记录型 fake（用例可直接编程响应），显式 null = 未接线。
+  const fakeControlPlaneRpc =
+    options.controlPlaneRpc === null
+      ? undefined
+      : options.controlPlaneRpc === undefined
+        ? createFakeControlPlaneRpc()
+        : undefined;
+  const controlPlaneRpc =
+    options.controlPlaneRpc === null ? undefined : (options.controlPlaneRpc ?? fakeControlPlaneRpc);
   const plane = assembleCloudControlPlane({
     storage,
     operations: outbox,
     github,
     drivers: createFakeDriverRegistry(options.driver === undefined ? driver : options.driver),
     attachments: attachmentPort,
+    ...(controlPlaneRpc ? { controlPlaneRpc } : {}),
     browserWatch,
     runtimeCommands,
     clock,
@@ -309,6 +350,8 @@ export function buildTestPlane(
     provisioningEnvelope,
     gitGrantStore,
     gitGrantBroker,
+    ...(userProfile ? { userProfile } : {}),
+    ...(userPreferences ? { userPreferences } : {}),
     ...(options.config ? { config: options.config } : {}),
   });
   return {
@@ -327,6 +370,10 @@ export function buildTestPlane(
     gitGrantStore,
     gitGrantBrokerDeps,
     browserWatch,
+    ...(userProfile ? { userProfile } : {}),
+    ...(userPreferences ? { userPreferences } : {}),
+    ...(controlPlaneRpc ? { controlPlaneRpc } : {}),
+    ...(fakeControlPlaneRpc ? { fakeControlPlaneRpc } : {}),
   };
 }
 

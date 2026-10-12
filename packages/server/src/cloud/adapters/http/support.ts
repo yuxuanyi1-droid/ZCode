@@ -108,8 +108,19 @@ export function errorResponse(
 }
 
 /** app 用例统一失败 → 错误信封（不为每个端点重复映射）。 */
-export function respondFailure(c: Context, failure: { code: CloudErrorCode; reason: string }) {
-  return errorResponse(c, failure.code, failure.reason, { reason: failure.reason });
+export function respondFailure(
+  c: Context,
+  failure: {
+    code: CloudErrorCode;
+    reason: string;
+    details?: Record<string, string | number | boolean>;
+  },
+) {
+  // details 随失败一起透出（U-11：上传类错误必须能定位到 category/entryId），有界且无正文。
+  return errorResponse(c, failure.code, failure.reason, {
+    reason: failure.reason,
+    ...failure.details,
+  });
 }
 
 export function notImplemented(c: Context, reason: string) {

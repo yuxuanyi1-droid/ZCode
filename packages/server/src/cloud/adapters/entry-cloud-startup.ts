@@ -14,6 +14,8 @@ import type { StoragePort, StorageReadiness } from "../app/ports/storagePort.js"
 import type { OperationOutboxPort } from "../app/ports/operationOutboxPort.js";
 import type { SandboxDriverRegistryPort } from "../app/ports/sandboxDriverRegistryPort.js";
 import type { SandboxRuntimeSettingsPort } from "../app/ports/sandboxRuntimeSettingsPort.js";
+import type { UserPreferencesPort } from "../app/ports/userPreferencesPort.js";
+import type { UserProfileStorePort } from "../app/ports/userProfileStorePort.js";
 import type { SandboxTemplateResolverPort } from "../app/ports/sandboxDriverPort.js";
 import type { CloudGitGrantService } from "../app/gitGrants.js";
 import type { GitGrantStore } from "../app/ports/gitGrantPort.js";
@@ -54,6 +56,8 @@ export interface CloudStorageReadinessSource {
    * 用于装配执行节点的 `/api/cloud/runs/:runId/git-grant`。
    */
   readonly grants?: GitGrantStore;
+  /** 用户资源 profile store（M8；14 §9.2①）：控制面复用同一实例（上传与资源下发组装）。 */
+  readonly userProfile?: UserProfileStorePort;
   /** W2 客户端的启动门（迁移/可写性/磁盘/锁）；注入裸 `StoragePort` 时不存在。 */
   assertReady?(): Promise<StoredStorageReadiness>;
   /** 只有**打开方**负责关闭：注入方持有生命周期时入口不调它。 */
@@ -106,6 +110,11 @@ export interface CloudControlPlaneContext {
   readonly templates: SandboxTemplateResolverPort;
   /** host 的 provisioning source（12 §6）：envelope 的账号态来源，控制面只读。 */
   readonly hostProvisioningSource?: ProviderProvisioningSource;
+  /**
+   * 账号行为偏好来源（M8；14 §6/§9.2⑥）：`bootstrap.config.preferences` 的唯一来源；
+   * 由入口在 host 本体就绪后接上服务图（同 `sandboxRuntimeSettings` 的惰性取用模式）。
+   */
+  readonly userPreferences?: UserPreferencesPort;
   readonly storage?: CloudStorageReadinessSource;
   readonly loopScheduler: LoopSchedulerPort;
   /** 12 §6 A-08 代际事件源：控制面订阅后做「标记 + 下次 bridge 连接重装」。 */
@@ -212,6 +221,7 @@ export async function openCloudStorage(
     storage: client.storage,
     operations: client.operations,
     grants: client.grants,
+    userProfile: client.userProfile,
     readiness: () => client.readiness(),
     assertReady: () => client.assertReady(),
     close: () => client.close(),
