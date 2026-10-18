@@ -89,8 +89,8 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
       await advanceRecoveryLadder();
       return;
     }
-    await bootstrapIfNeeded(connection);
-    if (!state.bootstrapped) {
+    const bootstrapApplied = await bootstrapIfNeeded(connection);
+    if (!bootstrapApplied) {
       // 自举未完成：`bootstrap.config` 超时未到（自举失败已在上面按 fault 抛出）。02 §5.3
       // 要求 welcome 只证明认证、条件逐条满足才 ready——这里**不得**补发 ready（否则
       // `preferences-installed` 等真实证据条件会被静默绕过，等于假 ready）。关连接走既有
@@ -125,14 +125,33 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
     await advanceRecoveryLadder();
   }
 
-  /** 只在节点尚未 bootstrap 时走 clone/安装；重连只补发 ready（B-02：不重建沙箱）。 */
-  async function bootstrapIfNeeded(connection: BridgeConnectionPort): Promise<void> {
-    if (state.bootstrapped) return;
+  /**
+   * 每次新连接都等待并应用 `bootstrap.config`（02 §5.3）：
+   * - 首次：完整 clone/runtime/envelope/exporter 自举（行为不变）；
+   * - 已 bootstrap：只核对并重装 envelope/policy（A-08），不重新 clone、不重启 runtime、
+   *   不重新 start exporter，完成后继续 ready。
+   *
+   * 修复依据（2026-10-17 review R5 A-08）：原实现 `if (state.bootstrapped) return` 让重连
+   * 完全忽略新的 `bootstrap.config`——token 刷新后的更高 `credentialGeneration` 永远不会
+   * 被安装。现在每次连接都经 `configSlot` 等待控制面重推，未有变化时 refresh 是 no-op。
+   */
+  async function bootstrapIfNeeded(connection: BridgeConnectionPort): Promise<boolean> {
     logBridgeState(state, logger, "bootstrapping", { connectionEpoch: state.epoch });
-    const delivered =
-      state.config ?? (await waitForBootstrapConfig(state, options, timings, connection));
-    if (!delivered) return;
-    state.config = delivered;
+    const delivered = await waitForBootstrapConfig(state, options, timings, connection);
+    if (!delivered) return false;
+    if (state.bootstrapped) {
+      try {
+        // 重连只应用代际/policy 变化；进程级资源（workspace/runtime/exporter）保持原状。
+        const report = await options.bootstrap.refresh(delivered);
+        state.config = delivered;
+        // 已应用配置版本（14 §6）：ready 帧必须反映本次重推后的新版本（A-08）。
+        state.configVersion = report.configVersion;
+      } catch (error) {
+        reportBootstrapFailure(connection, error);
+        throw error;
+      }
+      return true;
+    }
     // 阶段上报（02 §4 `bridge.phase`）：只带阶段与归一错误码，无 token/prompt/秘密。
     const phases = options.bootstrap.onPhase((phase) => {
       const parsedCode = phase.errorCode ? cloudErrorCodeSchema.safeParse(phase.errorCode) : null;
@@ -148,27 +167,33 @@ export function createBridgeSession(options: BridgeSessionOptions): BridgeSessio
     });
     try {
       const report = await options.bootstrap.run(delivered);
+      state.config = delivered;
       // 已应用配置版本（14 §6）：偏好快照 configVersion（无快照时 = policyVersion）；
       // ready 帧按它上报"Run 已应用配置版本"（重连沿用同一值）。
       state.configVersion = report.configVersion;
       state.bootstrapped = true;
     } catch (error) {
-      // 明确阶段 + fault 上报，不制造假 ready（01 §5.2、02 §8）。
-      const failure = error as { code?: string; message?: string };
-      const parsedCode = failure.code ? cloudErrorCodeSchema.safeParse(failure.code) : null;
-      logger.error(undefined, "bootstrap failed", { code: failure.code ?? "unknown" });
-      sendFrame(connection, {
-        protocolVersion: CLOUD_BRIDGE_PROTOCOL_VERSION,
-        type: "bridge.fault",
-        faultCode: parsedCode?.success ? parsedCode.data : "bootstrap_failed",
-        message: (failure.message ?? "bootstrap failed").slice(0, 512),
-        retryable: true,
-        ...(state.epoch === null ? {} : { connectionEpoch: state.epoch }),
-      });
+      reportBootstrapFailure(connection, error);
       throw error;
     } finally {
       phases.dispose();
     }
+    return true;
+  }
+
+  /** 自举/重推失败：明确阶段 + fault 上报，不制造假 ready（01 §5.2、02 §8）。 */
+  function reportBootstrapFailure(connection: BridgeConnectionPort, error: unknown): void {
+    const failure = error as { code?: string; message?: string };
+    const parsedCode = failure.code ? cloudErrorCodeSchema.safeParse(failure.code) : null;
+    logger.error(undefined, "bootstrap failed", { code: failure.code ?? "unknown" });
+    sendFrame(connection, {
+      protocolVersion: CLOUD_BRIDGE_PROTOCOL_VERSION,
+      type: "bridge.fault",
+      faultCode: parsedCode?.success ? parsedCode.data : "bootstrap_failed",
+      message: (failure.message ?? "bootstrap failed").slice(0, 512),
+      retryable: true,
+      ...(state.epoch === null ? {} : { connectionEpoch: state.epoch }),
+    });
   }
 
   function sendReady(connection: BridgeConnectionPort): void {

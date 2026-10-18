@@ -7,6 +7,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import type { CloudProjectionRecord } from "@zcode/shared";
 import {
   cloudBridgeControlFrameSchema,
@@ -402,6 +403,56 @@ test("快照声明覆盖范围，且旧快照不覆盖新快照", async () => {
   });
 });
 
+// 2026-10-18 复审修复：历史 ts 与快照 createdAt 必须是**持久时间**。旧实现在读取时用
+// clock.now() 生成，同一行两次读取得到不同时间戳；快照 createdAt 同样漂移。
+test("readHistory 返回持久 ingestedAt，readSnapshot 返回持久 createdAt", async () => {
+  await withSeededRun(async ({ handle, taskId, runId }) => {
+    const beforeInsert = Date.now();
+    await handle.storage.storage.projections.appendBatch([
+      projectionRecord({ taskId, runId, sourceSeq: 0, contentHash: "a".repeat(64) }),
+    ]);
+
+    const first = await handle.storage.storage.projections.readHistory({ taskId, limit: 10 });
+    const second = await handle.storage.storage.projections.readHistory({ taskId, limit: 10 });
+    const item = first.items[0];
+    assert.ok(item);
+    assert.ok(item.ingestedAt >= beforeInsert, "ingestedAt 来自落库时间");
+    assert.equal(second.items[0]?.ingestedAt, item.ingestedAt, "同一行两次读取的 ts 相同");
+
+    // 等于 projection_events.ingested_at 列值（不是读取时钟）。
+    const db = new DatabaseSync(handle.databasePath);
+    try {
+      const row = db
+        .prepare("SELECT ingested_at FROM projection_events WHERE task_id = ?")
+        .get(taskId);
+      assert.equal(item.ingestedAt, Number(row?.["ingested_at"]));
+    } finally {
+      db.close();
+    }
+
+    const createdAt = nextNow(12_345);
+    await handle.storage.storage.projections.writeSnapshot({
+      taskId,
+      runId,
+      topic: "conversation",
+      logEpoch: "epoch-1",
+      coveredSourceSeq: 0,
+      snapshot: { messages: ["m1"] },
+      now: createdAt,
+    });
+    const snapshot = await handle.storage.storage.projections.readSnapshot({
+      taskId,
+      topic: "conversation",
+    });
+    const reread = await handle.storage.storage.projections.readSnapshot({
+      taskId,
+      topic: "conversation",
+    });
+    assert.equal(snapshot?.createdAt, createdAt, "createdAt 等于写入时的持久时间");
+    assert.equal(reread?.createdAt, createdAt, "快照重复读取 createdAt 不变");
+  });
+});
+
 test("投影记录归属校验：taskId 必须与 run 一致", async () => {
   await withSeededRun(async ({ handle, runId }) => {
     await assert.rejects(
@@ -473,4 +524,139 @@ test("readHistory 族名 topic 返回该族全部话题，完整话题仍精确�
     });
     assert.deepEqual(missing.items, []);
   });
+});
+
+// 08 §7「审批等待不是业务空闲」（2026-10-17 修复）：生命周期读取该 run 最新持久投影的
+// pendingInteractions 数量。覆盖 snapshot/delta 两种落库形态、空数组、损坏 JSON 与跨 run 隔离。
+test("readLatestPendingInteractionCount：snapshot/delta 形态与跨 run 隔离", async () => {
+  const handle = await openTestStorage();
+  try {
+    const first = await seedDraftTask(handle.storage);
+    const firstRun = await seedActiveRun(handle.storage, first);
+    const second = await seedDraftTask(handle.storage);
+    const secondRun = await seedActiveRun(handle.storage, second);
+    const pending = (count: number) =>
+      Array.from({ length: count }, (_unused, index) => ({ interactionId: `pi-${index}` }));
+
+    const exported = (input: {
+      taskId: string;
+      runId: string;
+      sourceSeq: number;
+      contentHash: string;
+      frame: unknown;
+    }): CloudProjectionRecord =>
+      projectionRecord({
+        taskId: input.taskId,
+        runId: input.runId,
+        sourceSeq: input.sourceSeq,
+        contentHash: input.contentHash,
+        payload: {
+          topic: "conversation/sess-pi",
+          fromSeq: input.sourceSeq,
+          toSeq: input.sourceSeq,
+          sentAt: 0,
+          payload: input.frame,
+        },
+      });
+
+    // snapshot 形态：快照对象直接携带数组。
+    await handle.storage.storage.projections.appendBatch([
+      exported({
+        taskId: first.taskId,
+        runId: firstRun.runId,
+        sourceSeq: 0,
+        contentHash: "a".repeat(64),
+        frame: { kind: "snapshot", snapshot: { pendingInteractions: pending(2) } },
+      }),
+    ]);
+    assert.equal(
+      await handle.storage.storage.projections.readLatestPendingInteractionCount(firstRun.runId),
+      2,
+      "snapshot 形态读取数组长度",
+    );
+
+    // delta 形态：state.updated 键级整体替换，取该帧最后一个声明。
+    await handle.storage.storage.projections.appendBatch([
+      exported({
+        taskId: first.taskId,
+        runId: firstRun.runId,
+        sourceSeq: 1,
+        contentHash: "b".repeat(64),
+        frame: {
+          kind: "deltas",
+          deltas: [
+            { op: "state.updated", patch: { pendingInteractions: pending(1) } },
+            { op: "state.updated", patch: { pendingInteractions: pending(3) } },
+          ],
+        },
+      }),
+    ]);
+    assert.equal(
+      await handle.storage.storage.projections.readLatestPendingInteractionCount(firstRun.runId),
+      3,
+      "取最新事件；帧内多个 patch 取最后一个",
+    );
+
+    // 最新事件声明空数组：0 = 交互已清空（与「没有该事实」区分，但数值上都不阻塞）。
+    await handle.storage.storage.projections.appendBatch([
+      exported({
+        taskId: first.taskId,
+        runId: firstRun.runId,
+        sourceSeq: 2,
+        contentHash: "c".repeat(64),
+        frame: {
+          kind: "deltas",
+          deltas: [{ op: "state.updated", patch: { pendingInteractions: [] } }],
+        },
+      }),
+    ]);
+    assert.equal(
+      await handle.storage.storage.projections.readLatestPendingInteractionCount(firstRun.runId),
+      0,
+      "最新空数组覆盖旧值",
+    );
+
+    // 跨 run 不串：第二个 run 没有该事实，读 0；第一个 run 的投影不参与。
+    assert.equal(
+      await handle.storage.storage.projections.readLatestPendingInteractionCount(secondRun.runId),
+      0,
+    );
+
+    // 损坏 JSON：直接改库模拟坏事件，读取失败按 0 处理（不抛、不猜）。
+    await handle.storage.storage.projections.appendBatch([
+      exported({
+        taskId: second.taskId,
+        runId: secondRun.runId,
+        sourceSeq: 0,
+        contentHash: "d".repeat(64),
+        frame: { kind: "snapshot", snapshot: { pendingInteractions: pending(1) } },
+      }),
+    ]);
+    assert.equal(
+      await handle.storage.storage.projections.readLatestPendingInteractionCount(secondRun.runId),
+      1,
+    );
+    const db = new DatabaseSync(handle.databasePath);
+    try {
+      db.prepare("UPDATE projection_events SET payload_json = ? WHERE run_id = ?").run(
+        "{broken-json",
+        secondRun.runId,
+      );
+    } finally {
+      db.close();
+    }
+    assert.equal(
+      await handle.storage.storage.projections.readLatestPendingInteractionCount(secondRun.runId),
+      0,
+      "解析失败返回 0（不猜、不抛）",
+    );
+    assert.equal(
+      await handle.storage.storage.projections.readLatestPendingInteractionCount(firstRun.runId),
+      0,
+      "损坏事件不影响其它 run",
+    );
+  } finally {
+    await handle.close();
+    await removeTestRoot(handle.root);
+  }
 });

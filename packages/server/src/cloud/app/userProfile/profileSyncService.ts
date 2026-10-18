@@ -9,7 +9,7 @@
  *   （`run-not-found`/`run-terminal`/`run-not-connected`/`stop-requested`，14 §4.6）；
  * - **逐类别调既有服务**（14 §4.3，翻译在 `profileSyncCategories.ts`）：mcp 分批
  *   `importMcpServers`、skills/plugins 分块导入（begin/append/complete）、commands 经
- *   `writeCommandFile`/`updateCommandFile`、subagents 经 `createAgent`/`updateAgent`、
+ *   `writeCommandFile`/`updateCommandFile`、subagents 经 `writeUserAgentMarkdownFile`（原样写入）、
  *   agents-md 经 `writeUserAgentsFile`；全部经**控制面 RPC 端口**
  *   （`serviceScope:"control-plane"`，14 §4.2），通道白名单在此预检；
  * - **逐条 try**：单条失败记 `failed` 不中断其余（14 §4.2「失败不 fail run」）；整体响应
@@ -19,7 +19,8 @@
  *   重连（新 epoch）后的自动触发各一次。
  *
  * 凭据边界（14 §5）：日志与逐条诊断只含 `category`/`entryId`/状态与有界错误文本，
- * 不含条目正文（mcp 的 token/headers/env 是凭据载体）。
+ * 不含条目正文（mcp 的 token/headers/env 是凭据载体）。mcp 正文落库为 `enc:v1:` 密文
+ * （R4），本服务在组装批次前解密；密文损坏按该条 `failed` 收口，不向沙箱下发密文。
  */
 import {
   isCloudControlPlaneServiceAllowed,
@@ -28,6 +29,7 @@ import {
   type CloudUserProfileSyncTrigger,
   type McpSyncImportResult,
 } from "@zcode/shared";
+import { createCredentialCipherProvider } from "@zcode/services/node";
 import type { AttachmentRegistry } from "../attachments/registry.js";
 import type { CloudCoreDeps } from "../deps.js";
 import { cloudCoreLogger } from "../logger.js";
@@ -81,6 +83,8 @@ export function createProfileSyncService(
   registry: AttachmentRegistry,
 ): ProfileSyncService {
   const { storage, userProfile, controlPlaneRpc, hash } = deps;
+  // R4（14 §5）：mcp 正文落库为 `enc:v1:` 密文，下发前解密；旧明文行由 decrypt 原样返回。
+  const cipher = deps.credentialCipher ?? createCredentialCipherProvider();
   const inflight = new Map<string, Promise<CloudAppResult<CloudUserProfileSyncResponse>>>();
   const autoTriggered = new Set<string>();
 
@@ -176,10 +180,13 @@ export function createProfileSyncService(
         .filter((record) => record.category === "mcp")
         .flatMap((record) => {
           try {
+            // R4（14 §5）：解密后再解析；损坏密文/密钥不匹配与非法 JSON 同口径——
+            // 该条 fail-closed，不把密文当正文下发，也不中断其余条目/类别。
+            const plaintext = cipher.decrypt(record.content);
             return [
               {
                 entryId: record.entryId,
-                config: JSON.parse(record.content) as Record<string, unknown>,
+                config: JSON.parse(plaintext) as Record<string, unknown>,
               },
             ];
           } catch {
@@ -273,7 +280,9 @@ export function createProfileSyncService(
             if (subagentIndex === null) {
               throw new Error(subagentIndexError ?? "subagent index failed");
             }
-            await syncSubagentEntry(call, target, record, subagentIndex);
+            // list 结论用于判断存在（14 §4.5）；新增/已存在都走同一原生 markdown 覆盖写，
+            // 不再按存在性分叉 createAgent/updateAgent（后者会规范化正文，见 categories 文件）。
+            await syncSubagentEntry(call, target, record);
             break;
           }
           case "agents-md":

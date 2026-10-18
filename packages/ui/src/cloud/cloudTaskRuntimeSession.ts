@@ -54,6 +54,8 @@ export interface CloudTaskRuntimeSessionResolution {
 /** 详情投影里 pane 绑定需要的最小形状（测试可直接构造，不依赖完整 schema）。 */
 export interface CloudTaskRuntimeSessionDetail {
   readonly task: { readonly taskId: string };
+  /** 当前 run 的 bridge attachment 是否已回连（瞬态连接事实；undefined=旧服务端/未知）。 */
+  readonly attachmentReady?: boolean;
   readonly activeRun?:
     | {
         readonly status?: string | undefined;
@@ -94,12 +96,19 @@ export function resolveCloudTaskRuntimeSession(params: {
   // 历史由控制面权威历史呈现、发送走 paused→resume 通路；status 缺省（旧用例/旧投影）
   // 维持原判定，不改变既有绑定语义。
   const runPaused = detail.activeRun?.status === "paused";
+  // resume 窗口（2026-10-18 修订）：控制面已 CAS 把 run 置为 ready，但执行域 bridge 尚未
+  // 回连——此时订阅必然得到 `has no ready run attachment`，全屏连接错误会遮蔽历史/草稿。
+  // 只有 `attachmentReady === false`（服务端明确告知未回连）才延迟绑定，等 attachment 回连
+  // 后的详情刷新（run 观察轮询）再绑定；`undefined` 是旧服务端/未知，维持原有绑定语义。
+  const attachmentNotReady = detail.attachmentReady === false;
   return {
     isCloudTaskWorkspace: true,
     // 路径未落定时即使 runtimeSessionId 已出现也不绑定：避免 pane 拿空串路径发订阅
     // （P1 巡检缺陷，见文件头注释）。pane 停在等待态，路径落定后随详情刷新绑定。
     runtimeSessionId:
-      runtimeSessionId && runWorkspacePath !== null && !runPaused ? runtimeSessionId : null,
+      runtimeSessionId && runWorkspacePath !== null && !runPaused && !attachmentNotReady
+        ? runtimeSessionId
+        : null,
     runWorkspacePath,
   };
 }

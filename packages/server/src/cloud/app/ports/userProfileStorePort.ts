@@ -24,6 +24,10 @@ export interface UserProfileEntryRecord extends CloudUserProfileEntry {
   /**
    * 正文（文本）：`archive-base64` = canonical base64（skills/plugins）；`mcp-config` =
    * JSON 文本；`markdown` = 单文件正文（commands/subagents，14 §4.5）；`agents-md` = 正文。
+   *
+   * R4（14 §5）例外：mcp-config 现在以 `enc:v1:` 密文保存；store 对正文透明，解密只在
+   * app 读路径（`readEntry` 回显、连接期同步）。新增消费方不得把密文当正文，也不得从
+   * 密文重新派生 sha256/bytes。
    */
   content: string;
 }
@@ -62,6 +66,15 @@ export interface UserProfileUpsertRequest {
   contentKind: UserProfileEntryContentKind;
   /** 正文文本（形态同 `UserProfileEntryRecord.content`）；sha256/bytes 由 store 派生。 */
   content: string;
+  /**
+   * 明文派生事实覆盖（R4；14 §5）：仅 mcp-config 使用。mcp 正文以 `enc:v1:` 密文落库，
+   * store 无法从密文派生明文 `sha256`/`bytes`，必须由写入方按**明文**给出；否则随机 IV
+   * 会让同一明文每次得到不同 sha，幂等整条替换失效、版本无限递增。
+   *
+   * 其他类别不允许覆盖（store 拒绝 `invalid_entry`/`content-facts-not-allowed`）：
+   * 客户端不能自报 sha256/bytes，派生规则仍只有 store 一份（14 §9.2①）。
+   */
+  contentFacts?: { sha256: string; bytes: number };
   now: number;
 }
 

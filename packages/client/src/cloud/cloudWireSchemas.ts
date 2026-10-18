@@ -26,6 +26,8 @@ import {
   cloudTaskEventsResponseSchema,
   cloudTaskPageSchema,
   cloudTaskRecordSchema,
+  cancelCloudInteractionDecisionRequestSchema,
+  cloudInteractionDecisionReceiptSchema,
   createCloudProjectRequestSchema,
   createCloudTaskRequestSchema,
   forceStopCloudTaskRequestSchema,
@@ -35,6 +37,7 @@ import {
   patchCloudProjectRequestSchema,
   patchCloudTaskRequestSchema,
   reopenCloudTaskRequestSchema,
+  submitCloudInteractionDecisionRequestSchema,
   submitTaskInputSchema,
   taskDetailResponseSchema,
   cloudHistoryQuerySchema,
@@ -80,6 +83,16 @@ export const CLOUD_SDK_ENDPOINT_SCHEMAS = {
   listInputs: { request: null, response: inputRecordPageSchema },
   getInput: { request: null, response: inputReceiptSchema },
   cancelInput: { request: cloudEmptyBodySchema, response: inputReceiptSchema },
+  // R6 交互决定（03 §7.2）：durable HTTP 通路，形状唯一来源仍是 shared。
+  submitInteractionDecision: {
+    request: submitCloudInteractionDecisionRequestSchema,
+    response: cloudInteractionDecisionReceiptSchema,
+  },
+  cancelInteractionDecision: {
+    request: cancelCloudInteractionDecisionRequestSchema,
+    response: cloudInteractionDecisionReceiptSchema,
+  },
+  getInteractionDecision: { request: null, response: cloudInteractionDecisionReceiptSchema },
   reopenTask: { request: reopenCloudTaskRequestSchema, response: taskDetailResponseSchema },
   stopTask: { request: cloudEmptyBodySchema, response: taskDetailResponseSchema },
   forceStopTask: { request: forceStopCloudTaskRequestSchema, response: taskDetailResponseSchema },

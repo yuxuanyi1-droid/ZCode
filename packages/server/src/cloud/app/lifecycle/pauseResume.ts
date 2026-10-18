@@ -297,15 +297,15 @@ export function createPauseResumeControl(
       });
       return fail("provider_unreachable", "pause-not-confirmed", { status: observation.status });
     }
-    // B-4 第 3 步：detach registry（暂停期间 heartbeat/投递/看门狗都不应再见到该连接；
-    // watchdog 对 paused 的显式跳过在 markDisconnected，双保险）。
+    // B-4 第 3 步：detach registry（暂停期间 heartbeat/投递/看门狗都不应再见该连接）。
     registry.detach({
       runId: run.runId,
       at: clock.now(),
       reason: input.reason,
       expectedRunGeneration: run.runGeneration,
     });
-    // B-4 第 4 步：ready→paused CAS。
+    // 暂停即关闭 socket：否则执行节点把半开连接当故障退避，恢复后还要等累计档位（2026-10-18）。
+    await deps.attachments.closeConnection(run.runId, "paused");
     const updated = await storage.runs.transitionStatus({
       runId: run.runId,
       runGeneration: run.runGeneration,

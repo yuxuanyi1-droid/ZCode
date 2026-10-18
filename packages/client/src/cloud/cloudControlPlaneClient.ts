@@ -11,6 +11,7 @@
  */
 import { CLOUD_ATTACHMENT_UPLOAD_FORM } from "@zcode/shared";
 import type {
+  CancelCloudInteractionDecisionRequest,
   CapabilitiesResponse,
   CloudAttachmentUploadResponse,
   CloudBranchPage,
@@ -18,25 +19,18 @@ import type {
   CloudExtensionResponse,
   CloudHistoryPage,
   CloudHistoryQuery,
+  CloudInteractionDecisionReceipt,
   CloudListQuery,
   CloudProjectPage,
-  CloudProjectRecord,
-  CloudRepositoryPage,
   CloudProjectionSnapshot,
+  CloudProjectRecord,
   CloudRepositoriesQuery,
+  CloudRepositoryPage,
   CloudSnapshotQuery,
   CloudTaskEventsQuery,
   CloudTaskEventsResponse,
   CloudTaskPage,
   CloudTaskRecord,
-  CloudUserProfileCategory,
-  CloudUserProfileEntryDeleteResponse,
-  CloudUserProfileEntryReadResponse,
-  CloudUserProfileEntryUploadRequest,
-  CloudUserProfileEntryUploadResponse,
-  CloudUserProfileSnapshot,
-  CloudUserProfileSyncResponse,
-  CloudUserProfileVersionResponse,
   CreateCloudProjectRequest,
   CreateCloudTaskRequest,
   ForceStopCloudTaskRequest,
@@ -45,11 +39,25 @@ import type {
   PatchCloudProjectRequest,
   PatchCloudTaskRequest,
   ReopenCloudTaskRequest,
+  SubmitCloudInteractionDecisionRequest,
   SubmitTaskInput,
   TaskDetailResponse,
 } from "@zcode/shared";
 import { CloudResyncRequiredError, cloudValidationError } from "./cloudApiError.js";
 import type { CloudHttpTransport } from "./cloudHttpTransport.js";
+import type { CloudInputSubmission, CloudInteractionDecisionSubmission } from "./cloudReceipts.js";
+import {
+  CLOUD_EVENTS_TIMEOUT_GRACE_MS,
+  type CloudRequestOptions,
+  type CloudUploadAttachmentOptions,
+} from "./cloudRequestTypes.js";
+import type { CloudUserProfileControlPlaneClient } from "./cloudUserProfileControlPlaneContract.js";
+
+export { isRuntimeAckPending, isRuntimeAdmitted } from "./cloudReceipts.js";
+export type { CloudInputSubmission, CloudInteractionDecisionSubmission } from "./cloudReceipts.js";
+export { CLOUD_EVENTS_TIMEOUT_GRACE_MS } from "./cloudRequestTypes.js";
+export type { CloudRequestOptions, CloudUploadAttachmentOptions } from "./cloudRequestTypes.js";
+export type { CloudUserProfileControlPlaneClient } from "./cloudUserProfileControlPlaneContract.js";
 import {
   CLOUD_SDK_QUERY_SCHEMAS,
   assertSupportedCloudProtocolVersion,
@@ -61,12 +69,6 @@ import {
   type CloudWriteEndpointId,
 } from "./cloudWireSchemas.js";
 
-export interface CloudRequestOptions {
-  readonly signal?: AbortSignal | undefined;
-  /** 单请求超时覆盖；events 长轮询由 SDK 按 waitMs 自动上调。 */
-  readonly timeoutMs?: number | undefined;
-}
-
 // 分页响应类型直接取 shared 冻结的类型别名（W7 CR-6），SDK 不自行推导字段名。
 export type {
   CloudBranchPage,
@@ -75,25 +77,7 @@ export type {
   CloudTaskPage,
 } from "@zcode/shared";
 
-/** 附件上传入参：multipart 字段名由 shared `CLOUD_ATTACHMENT_UPLOAD_FORM` 冻结（W7 CR-4）。 */
-export interface CloudUploadAttachmentOptions extends CloudRequestOptions {
-  /** 归属任务；未声明支持 task-owned 上传的部署返回 `not_configured`（03 §6、11 §9）。 */
-  readonly taskId?: string | undefined;
-}
-
-/** events 有界长轮询的传输超时余量：waitMs 之上留出服务端处理时间（03 §6 events 行）。 */
-export const CLOUD_EVENTS_TIMEOUT_GRACE_MS = 5_000;
-
-/**
- * 输入提交结果：`httpStatus` 是 HTTP 事实（202 = 控制面已持久接收），
- * `receipt` 是权威投递投影（`deliveryStatus` 才是语义）。二者都不是 runtime ACK。
- */
-export interface CloudInputSubmission {
-  readonly httpStatus: number;
-  readonly receipt: InputReceipt;
-}
-
-export interface CloudControlPlaneClient {
+export interface CloudControlPlaneClient extends CloudUserProfileControlPlaneClient {
   readonly origin: string;
   getCapabilities(options?: CloudRequestOptions): Promise<CapabilitiesResponse>;
   listRepositories(
@@ -144,6 +128,23 @@ export interface CloudControlPlaneClient {
     commandId: string,
     options?: CloudRequestOptions,
   ): Promise<InputReceipt>;
+  submitCloudInteractionDecision(
+    taskId: string,
+    interactionId: string,
+    body: SubmitCloudInteractionDecisionRequest,
+    options?: CloudRequestOptions,
+  ): Promise<CloudInteractionDecisionSubmission>;
+  cancelCloudInteractionDecision(
+    taskId: string,
+    interactionId: string,
+    body: CancelCloudInteractionDecisionRequest,
+    options?: CloudRequestOptions,
+  ): Promise<CloudInteractionDecisionReceipt>;
+  getCloudInteractionDecision(
+    taskId: string,
+    interactionId: string,
+    options?: CloudRequestOptions,
+  ): Promise<CloudInteractionDecisionReceipt>;
   reopenTask(
     taskId: string,
     body: ReopenCloudTaskRequest,
@@ -185,77 +186,6 @@ export interface CloudControlPlaneClient {
     file: Blob,
     options?: CloudUploadAttachmentOptions,
   ): Promise<CloudAttachmentUploadResponse>;
-  /** 用户资源 profile 快照摘要（M8；14 §9.2⑦）：条目元数据，**不含归档正文**。 */
-  listUserProfile(options?: CloudRequestOptions): Promise<CloudUserProfileSnapshot>;
-  /** 当前 `profileVersion`（Run 冻结锚点/帧幂等键）。 */
-  getUserProfileVersion(options?: CloudRequestOptions): Promise<CloudUserProfileVersionResponse>;
-  /**
-   * 幂等整条替换一个 profile 条目（矩阵首个 PUT）。请求体形状由 shared 严格 schema
-   * 校验；路径与正文的 `category` 必须一致（不一致在发出请求前拒绝，14 §9.2⑦）。
-   */
-  putUserProfileEntry(
-    category: CloudUserProfileCategory,
-    entryId: string,
-    body: CloudUserProfileEntryUploadRequest,
-    options?: CloudRequestOptions,
-  ): Promise<CloudUserProfileEntryUploadResponse>;
-  /** 删除一个 profile 条目并递增版本；键不存在时幂等无操作（服务端语义）。 */
-  deleteUserProfileEntry(
-    category: CloudUserProfileCategory,
-    entryId: string,
-    options?: CloudRequestOptions,
-  ): Promise<CloudUserProfileEntryDeleteResponse>;
-  /**
-   * 读**单个**条目的元数据 + 正文（14 §9.4①）：UI 编辑回显（AGENTS.md 文本、MCP 表单）的
-   * 唯一通路，响应按类别有界；键不存在抛 `not_found`（404）。
-   */
-  getUserProfileEntry(
-    category: CloudUserProfileCategory,
-    entryId: string,
-    options?: CloudRequestOptions,
-  ): Promise<CloudUserProfileEntryReadResponse>;
-  /**
-   * 条目级开关（14 §9.4①，矩阵首个 PATCH）：只发 `{enabled}`、不重发正文；开关值变化才
-   * 递增 `profileVersion`（服务端语义），键不存在抛 `not_found`（404）。
-   */
-  setUserProfileEntryEnabled(
-    category: CloudUserProfileCategory,
-    entryId: string,
-    enabled: boolean,
-    options?: CloudRequestOptions,
-  ): Promise<CloudUserProfileEntryUploadResponse>;
-  /**
-   * 手动同步一次最新 profile 到该 Task 当前 Run 的沙箱（M8 连接期同步；14 §4.6）。
-   *
-   * 前置在服务端权威裁决：Run 非终态且连接态（bridge ready）、无 `stopRequested`；
-   * 不满足 → 409 `not_ready`（`run-not-connected`/`run-terminal`/`stop-requested`）。
-   * 响应 = `{runId, profileVersion, trigger, results[]}`（逐条定位 `category/entryId`）；
-   * 逐条 `failed` 不影响 HTTP 200（失败不 fail run，靠手动或下次连接重试）。
-   */
-  syncTaskUserProfile(
-    taskId: string,
-    options?: CloudRequestOptions,
-  ): Promise<CloudUserProfileSyncResponse>;
-}
-
-/**
- * runtime 是否已准入该命令（02 §6.2）：控制面投递投影为 `admitted`，或 runtime 自己的
- * CommandAck 已返回 accepted/duplicate。`deliveryStatus="accepted"` 只表示控制面持久接收，
- * 不能被当成 runtime ACK（03 §6.2）。
- */
-export function isRuntimeAdmitted(receipt: InputReceipt): boolean {
-  if (receipt.deliveryStatus === "admitted") return true;
-  const status = receipt.runtimeAck?.status;
-  return status === "accepted" || status === "duplicate";
-}
-
-/** 仍需要对账的投递状态：accepted/delivering 未确认，uncertain 必须先查询再决定（02 §6.3）。 */
-export function isRuntimeAckPending(receipt: InputReceipt): boolean {
-  return (
-    receipt.deliveryStatus === "accepted" ||
-    receipt.deliveryStatus === "delivering" ||
-    receipt.deliveryStatus === "uncertain"
-  );
 }
 
 export function createCloudControlPlaneClient(
@@ -384,6 +314,23 @@ export function createCloudControlPlaneClient(
 
     async cancelInput(taskId, commandId, options) {
       return write("cancelInput", { taskId, commandId }, {}, options);
+    },
+
+    async submitCloudInteractionDecision(taskId, interactionId, body, options) {
+      const response = await transport.request({
+        endpointId: "submitInteractionDecision",
+        pathParams: { taskId, interactionId },
+        json: parseCloudRequestBody("submitInteractionDecision", body),
+        ...(options?.signal === undefined ? {} : { signal: options.signal }),
+        ...(options?.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      });
+      return { httpStatus: response.status, receipt: response.data };
+    },
+    async cancelCloudInteractionDecision(taskId, interactionId, body, options) {
+      return write("cancelInteractionDecision", { taskId, interactionId }, body, options);
+    },
+    async getCloudInteractionDecision(taskId, interactionId, options) {
+      return read("getInteractionDecision", { taskId, interactionId }, undefined, options);
     },
 
     async reopenTask(taskId, body, options) {

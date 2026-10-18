@@ -76,14 +76,20 @@ export function classifyDisconnect(reason: DisconnectReason): DisconnectPolicy {
 /** 心跳周期（02 §8 实施数值：心跳可取 30s）。 */
 export const HEARTBEAT_INTERVAL_MS = 30_000;
 
-/** 退避上限（02 §8：退避上限 60s），timer 只触发探测/恢复，不证明死亡。 */
-export const MAX_RECONNECT_DELAY_MS = 60_000;
+/**
+ * 退避上限（2026-10-18 恢复慢修复）：从 60s 降到 10s。
+ *
+ * provider pause/resume 会冻结沙箱：执行节点在恢复前已经积累了若干次重连退避，
+ * 恢复时还要等当前档位（实测 17–30s）。交互式云任务无法接受这个等待；单沙箱场景
+ * 下 10s 上限（0.1 次/秒）不会造成重连风暴，仍保留指数退避与 jitter。
+ */
+export const MAX_RECONNECT_DELAY_MS = 10_000;
 
 const BASE_RECONNECT_DELAY_MS = 1_000;
 
 /**
  * 有界指数退避 + jitter。`jitter` 取值 [0,1)（调用方注入随机源，测试可固定）。
- * 1s, 2s, 4s, 8s, 16s, 32s, 60s(封顶)，再加 0..25% 抖动。
+ * 1s, 2s, 4s, 8s, 10s(封顶)，再加 0..25% 抖动。
  */
 export function nextReconnectDelayMs(attempt: number, jitter: number): number {
   const exponent = Math.max(0, Math.min(attempt, 6));

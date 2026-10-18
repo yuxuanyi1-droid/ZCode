@@ -12,6 +12,7 @@
  * 同一套口径同时约束正文输入（`InputRepo.markDelivery`）与交互决定
  * （`InteractionDecisionRepo.setDecisionDeliveryStatus`）：
  * - 只允许状态机内的前进；终态（admitted/rejected/cancelled）不再改变；
+ *   唯一例外是 R2 的 delivering→accepted：必须先查询 runtime 明确 unknown 才重投；
  * - `accepted → admitted/rejected` 是合法推进：runtime 的 ACK 可能快于控制面的
  *   `delivering` 写入，ACK 是权威结论，不能被「中间态还没写」挡掉；
  * - `uncertain` 是**待对账**状态：允许退回 `accepted`（对账确认未到达后由
@@ -23,7 +24,10 @@ export const INPUT_DELIVERY_TRANSITIONS: Readonly<
   Record<InputDeliveryStatus, readonly InputDeliveryStatus[]>
 > = {
   accepted: ["delivering", "admitted", "rejected", "uncertain", "cancelled"],
-  delivering: ["admitted", "rejected", "uncertain"],
+  // delivering → accepted：修复依据（2026-10-17 R2，spec 15 §3、02 §6.3）——dispatcher
+  // 只有先用同一 commandId 查询 runtime 并得到明确 unknown，才把 delivering 退回
+  // accepted 重新投递；不能把 delivering 直接当 uncertain 重投（可能重复副作用）。
+  delivering: ["accepted", "admitted", "rejected", "uncertain"],
   // uncertain → delivering：对账确认未到达后，用同一 commandId 直接重投（02 §6.3
   // 「unknown 且确认同 Run/runtime 可安全去重才重发原信封」）；uncertain → cancelled：
   // 已投递但 ACK 未知的取消先对账，对账确认 runtime 无该命令事实后落 cancelled（CP-14）。

@@ -88,6 +88,11 @@ export const taskDetailResponseSchema = z
   .object({
     task: cloudTaskRecordSchema,
     activeRun: cloudRunRecordSchema.optional(),
+    /**
+     * 当前 run 是否存在 ready attachment（瞬态连接事实；缺省=未知/旧服务端）。
+     * run=ready 不代表 attachment ready（resume 窗口），UI 据此延迟绑定实时会话。
+     */
+    attachmentReady: z.boolean().optional(),
     execution: cloudExecutionProjectionSchema.optional(),
     /** 最近确认 checkpoint：saved 必须已有 remote SHA 证据（08 §2）。 */
     latestCheckpoint: cloudCheckpointRecordSchema.optional(),
@@ -117,6 +122,20 @@ export const inputReceiptSchema = z
   })
   .strict();
 export type InputReceipt = z.infer<typeof inputReceiptSchema>;
+
+/**
+ * 交互决定回执（03 §7.2、04 §3.0.2）：`accepted` 只表示控制面持久接纳，
+ * `admitted` 才表示 runtime 已裁决；`deliveryStatus` 与正文输入共用同一状态词表。
+ */
+export const cloudInteractionDecisionReceiptSchema = z
+  .object({
+    taskId: cloudTaskIdSchema,
+    /** V4 interactionId（快照 pendingInteractions[].interactionId），不是 cloud uuid。 */
+    interactionId: nonEmptyString.max(256),
+    deliveryStatus: inputDeliveryStatusSchema,
+  })
+  .strict();
+export type CloudInteractionDecisionReceipt = z.infer<typeof cloudInteractionDecisionReceiptSchema>;
 
 export const inputRecordPageSchema = cloudCursorPageSchema(cloudTaskInputRecordSchema, 100);
 export type InputRecordPage = z.infer<typeof inputRecordPageSchema>;

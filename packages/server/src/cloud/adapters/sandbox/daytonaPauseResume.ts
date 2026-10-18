@@ -80,7 +80,7 @@ export async function resumeDaytonaSandbox(input: {
   /** 请求寿命 → TTL 分钟（向上取整：绝不欠配期限；01 §4.3 上限收敛）。 */
   ttlMinutes: () => Promise<number>;
 }): Promise<ProviderObservation> {
-  const { rest, logger, now, sandboxId, requestedDeadline, ttlMinutes } = input;
+  const { rest, logger, now, sandboxId, ttlMinutes } = input;
   const evidenceOf = (outcome: string) =>
     boundEvidence(`daytona POST ${DAYTONA_PATH_START(sandboxId)} -> ${outcome}`);
   let response;

@@ -110,6 +110,12 @@ export function createKeepaliveLoop(
     const pendingInputCount = pendingInputs.filter(
       (input) => input.deliveryStatus === "accepted" || input.deliveryStatus === "delivering",
     ).length;
+    // 修复依据（08 §7「审批等待不是业务空闲」，2026-10-17）：审批保护需要续期，事实源
+    // 是该 run 最新的持久投影（与空闲 pause/idle drain 同一读取口径）；旧实现恒传 0
+    // 会在「执行已空闲、无 pending 输入、等待审批」时停止续期。
+    const pendingInteractionCount = await storage.projections.readLatestPendingInteractionCount(
+      run.runId,
+    );
     const deadline = resolveEffectiveDeadline({
       expiresAt: run.expiresAt,
       deadlineEstimate: run.deadlineEstimate,
@@ -119,8 +125,7 @@ export function createKeepaliveLoop(
       now,
       execution: executionFreshness(run, now),
       pendingInputCount,
-      // pending 交互的持久记录端口未冻结（见报告 CR-3）：不猜交互数量，只用输入与写操作。
-      pendingInteractionCount: 0,
+      pendingInteractionCount,
       writeInFlight: run.status === "draining",
       hardDeadlineAt: run.hardDeadlineAt,
       autoRenewEnabled: config.autoRenewEnabled,

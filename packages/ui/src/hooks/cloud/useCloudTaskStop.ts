@@ -7,9 +7,12 @@
  * 03 §6），agent command 通道在云链路上不承载任务生命周期，于是零请求、零状态变化。
  * 本 hook 把停止接线到控制面生命周期端点：
  * - 成功后刷新详情投影：run 进入 draining 时 CloudTaskRunStatusBanner 呈现「正在停止」；
- * - 失败把服务端理由返回给调用方（toast），不吞错、不自动升级 force-stop（08 §8.2）。
+ * - 失败把服务端理由返回给调用方（toast），不吞错、不自动升级 force-stop（08 §8.2）；
+ * - 2026-10-18 用户决议：首条消息尚未进入 runtime（provisioning / attachment 未回连）
+ *   时停止置灰，不提供取消首条输入的入口（`canStop`，纯函数见 cloudTaskPanel.ts）。
  */
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
+import { resolveCloudTaskStopAvailability } from "@/cloud/cloudTaskPanel.js";
 import { describeCloudSubmissionError } from "@/cloud/cloudTaskSubmission.js";
 import { resolveCloudTaskIdFromWorkspaceIdentity } from "@/cloud/cloudUiBootstrap.js";
 import type { CloudControlPlanePort } from "@/cloud/cloudPorts.js";
@@ -20,8 +23,15 @@ export interface UseCloudTaskStopResult {
   /** 当前工作区是否是云任务（非云调用方必须走原 v4 stop 命令路径）。 */
   readonly enabled: boolean;
   /**
-   * 请求控制面停止当前任务。服务端按 run 状态裁决（无 run / 已终态自行幂等），
-   * 这里不预判 canStop——那会形成与服务端两套事实。
+   * 是否允许发起停止（2026-10-18 用户决议：首条消息发送期间禁止停止）。
+   * 只有详情里存在 run 且其状态可停（ready+paused+draining）时为 true；
+   * provisioning / 无 run / ready 但 attachment 未就绪（首条或恢复中）为 false。
+   * 服务端仍独立裁决状态转移，这里只决定 UI 是否发出请求。
+   */
+  readonly canStop: boolean;
+  /**
+   * 请求控制面停止当前任务。服务端按 run 状态裁决（无 run / 已终态自行幂等）；
+   * 调用方应先检查 `canStop`，首条输入窗口不应发出停止。
    */
   stopTask(): Promise<{ ok: boolean; reason: string | null }>;
 }
@@ -35,6 +45,9 @@ export function useCloudTaskStop(workspaceIdentity?: string | null): UseCloudTas
   const ownTask = useCloudTask({ taskId: isSelectedTask ? null : taskId });
   const controlPlane: CloudControlPlanePort | null = context?.controlPlane ?? null;
   const reloadTask = context?.reloadTask;
+  // 选中任务复用 context 的唯一投影；非选中工作区用 ownTask 自取的详情。
+  const detail = isSelectedTask ? (context?.taskDetail ?? null) : ownTask.detail;
+  const canStop = useMemo(() => resolveCloudTaskStopAvailability(detail), [detail]);
 
   const stopTask = useCallback(async (): Promise<{ ok: boolean; reason: string | null }> => {
     if (taskId === null) {
@@ -59,5 +72,5 @@ export function useCloudTaskStop(workspaceIdentity?: string | null): UseCloudTas
     }
   }, [controlPlane, isSelectedTask, ownTask, reloadTask, taskId]);
 
-  return { enabled: taskId !== null, stopTask };
+  return { enabled: taskId !== null, canStop, stopTask };
 }

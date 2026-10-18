@@ -93,6 +93,7 @@ test("fresh-DB 迁移与增量迁移得到同一 schema 与账本", async () => 
         "0006_attachment_objects",
         "0007_run_status_paused",
         "0008_user_profile",
+        "0009_project_archive",
       ]);
       runCloudMigrations(incremental, { now: MIGRATION_NOW });
     } finally {
@@ -112,7 +113,7 @@ test("fresh-DB 迁移与增量迁移得到同一 schema 与账本", async () => 
       assert.equal(schemaDump(reopenedIncremental), schemaDump(reopenedFresh));
       assert.equal(appliedLedger(reopenedIncremental), appliedLedger(reopenedFresh));
       const facts = readCloudMigrationFacts(reopenedFresh);
-      assert.equal(facts.schemaVersion, 8);
+      assert.equal(facts.schemaVersion, 9);
       assert.deepEqual(facts.pendingMigrationIds, []);
     } finally {
       closeStorageDatabase(reopenedIncremental);
@@ -141,6 +142,7 @@ test("全新库账本包含退役 0004 墓碑且重复迁移幂等", async () =>
     assert.match(ledgerAfterFirst, /0006_attachment_objects/);
     assert.match(ledgerAfterFirst, /0007_run_status_paused/);
     assert.match(ledgerAfterFirst, /0008_user_profile/);
+    assert.match(ledgerAfterFirst, /0009_project_archive/);
     assert.ok(!ledgerAfterFirst.includes("0004_external_operations_ssh_attach retired 0"));
   } finally {
     await handle.close();
@@ -215,6 +217,7 @@ test("迁移未就绪时启动门拒绝服务", async () => {
       "0006_attachment_objects",
       "0007_run_status_paused",
       "0008_user_profile",
+      "0009_project_archive",
     ]);
     const report = {
       db: {
@@ -297,8 +300,8 @@ test("0007 表重建在有子行数据的增量库上成功且 FK 恢复（2026-
 
       runCloudMigrations(context, { now: MIGRATION_NOW });
 
-      // 账本推进到链头（0008），三张带子行的表行数无损。
-      assert.equal(readCloudMigrationFacts(context).schemaVersion, 8);
+      // 账本推进到链头（0009），三张带子行的表行数无损。
+      assert.equal(readCloudMigrationFacts(context).schemaVersion, 9);
       for (const table of ["runs", "run_credentials", "projection_events"]) {
         assert.equal(
           context.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n,

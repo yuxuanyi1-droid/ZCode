@@ -6,6 +6,7 @@
  * 由本文件统一转出，测试只 import 这里。
  */
 import { createHash } from "node:crypto";
+import type { CredentialCipherProvider } from "@zcode/services/node";
 import type { CloudRunRecord } from "@zcode/shared";
 import type {
   ExternalOperationRecord,
@@ -296,6 +297,8 @@ export function buildTestPlane(
     userPreferences?: UserPreferencesPort;
     /** M8：连接期同步的控制面 RPC 端口（缺省自建记录型 fake；null = 未接线）。 */
     controlPlaneRpc?: ControlPlaneRpcPort | null;
+    /** R4：profile 凭据加密器（缺省由服务按部署密钥构造；测试注入固定密钥实例）。 */
+    credentialCipher?: CredentialCipherProvider;
   } = {},
 ): TestPlane {
   const clock = new FakeClock();
@@ -351,6 +354,7 @@ export function buildTestPlane(
     gitGrantStore,
     gitGrantBroker,
     ...(userProfile ? { userProfile } : {}),
+    ...(options.credentialCipher ? { credentialCipher: options.credentialCipher } : {}),
     ...(userPreferences ? { userPreferences } : {}),
     ...(options.config ? { config: options.config } : {}),
   });

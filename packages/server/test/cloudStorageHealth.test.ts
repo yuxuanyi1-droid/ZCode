@@ -102,11 +102,11 @@ test("worker 子进程承载全部持久语义", async () => {
     assert.equal(runs.length, 1);
 
     const readiness = await handle.storage.readiness();
-    // 0008_user_profile（M8）入链后链头为 8。
-    assert.equal(readiness.schemaVersion, 8);
+    // 0009_project_archive（15 §R3）入链后链头为 9。
+    assert.equal(readiness.schemaVersion, 9);
     assert.equal(readiness.writable, true);
     assert.equal(readiness.attachmentsWritable, true);
-    assert.equal(readiness.lastAppliedMigrationId, "0008_user_profile");
+    assert.equal(readiness.lastAppliedMigrationId, "0009_project_archive");
 
     await handle.close();
     await assert.rejects(

@@ -123,6 +123,14 @@ export interface FakeAttachmentPort extends AttachmentPort {
   sendResult: AttachmentSendResult;
   /** 令 bootstrap.config 下发失败（fail-closed 路径测试）。 */
   bootstrapResult: AttachmentSendResult;
+  /**
+   * 可控的瞬态连接事实（resume 窗口用例）：未显式设置的 run 默认 true，
+   * 既有用例行为不变。
+   */
+  readonly attachmentReadyByRunId: Map<string, boolean>;
+  /** 受控暂停主动关闭的连接（runId 记录；无连接时不应出现）。 */
+  readonly closedConnections: string[];
+  setReady(runId: string, ready: boolean): void;
 }
 
 export function createFakeAttachmentPort(): FakeAttachmentPort {
@@ -131,14 +139,28 @@ export function createFakeAttachmentPort(): FakeAttachmentPort {
   const checkpoints: string[] = [];
   const bootstrapConfigs: { runId: string; taskId: string; workspacePath: string }[] = [];
   const bootstrapConfigPayloads: Omit<BootstrapConfigFrame, "protocolVersion" | "type">[] = [];
+  const attachmentReadyByRunId = new Map<string, boolean>();
+  const closedConnections: string[] = [];
   return {
     sent,
     drains,
     checkpoints,
+    closedConnections,
     bootstrapConfigs,
     bootstrapConfigPayloads,
+    attachmentReadyByRunId,
     sendResult: { status: "sent" },
     bootstrapResult: { status: "sent" },
+    setReady(runId, ready) {
+      attachmentReadyByRunId.set(runId, ready);
+    },
+    async isReady(runId) {
+      // 默认 true：既有用例不关心连接事实时保持原行为。
+      return attachmentReadyByRunId.get(runId) ?? true;
+    },
+    async closeConnection(runId) {
+      closedConnections.push(runId);
+    },
     async sendBootstrapConfig(request) {
       if (this.bootstrapResult.status !== "sent") return this.bootstrapResult;
       bootstrapConfigs.push({

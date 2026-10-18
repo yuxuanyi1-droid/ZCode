@@ -155,23 +155,28 @@ export interface SandboxProviderGate {
 }
 
 /**
- * 门控表（本波次状态）：三家 driver 已实现 adapter contract 级语义，但**尚未用
- * 真实账号在本波次复验**（能力/期限/停止/启动开销四项证据不齐）→ 默认不可选。
- * 未实测项如实列出，供后续联调逐项勾选；解禁流程见 README「provider 解禁」。
+ * 门控表（当前状态）：E2B 已于 2026-10-13 按真实账号全链路证据解禁（见条目注释）；
+ * Modal/Daytona 尚未用真实账号复验（能力/期限/停止/启动开销四项证据不齐）→
+ * 默认不可选。未实测项如实列出，供后续联调逐项勾选；解禁流程见 README「provider 解禁」。
  */
 export const SANDBOX_PROVIDER_GATES: Readonly<Record<SandboxProviderId, SandboxProviderEvidence>> =
   {
     e2b: {
-      verifiedAt: null,
-      source: "specs/cloud-agent/01 §4.2/§6.2（历史联调结论，待本波次复验）",
-      unverified: [
-        "账号生命周期上限",
-        "setTimeout 续期确认",
-        "create 对账命中",
-        "出站 WSS 回连",
-        // pauseResume 项已于 2026-10-09 真实账号实测后从清单移除（解禁记录见
-        // SANDBOX_PAUSE_RESUME_GATES.e2b，覆盖 pause/resume 语义、暂停保留与到期语义）。
-      ],
+      // 解禁依据（01 §4.2：真实账号实测后才解禁；证据见 specs/cloud-agent/10 §10）：
+      // - 2026-10-07 第五~七批真实联调：create + 对账命中（#11 persistRunHandle、
+      //   #18 keepalive provider 事实核对）、inspect/terminate/clone/push/checkpoint/
+      //   draft PR 跑通；出站 WSS 回连（bridge attachment opened → welcome →
+      //   bootstrap.config → cloud run ready）。
+      // - 2026-10-09 生命周期 v2 真机：autoPause 到期转 paused（onTimeout 语义）与
+      //   账号寿命上限（Hobby 1h / Pro 24h，见 e2bBootstrap 注释）。
+      // - 2026-10-13 V4r：模板重建后全链路重验通过。
+      // 续期项仍保留的原因：setTimeout 续期确认只有实现与回归测试、无真机续期证据；
+      // 未实测项不得冒充已验证（01 §4.2）。
+      // pauseResume 项于 2026-10-09 实测后移除（解禁记录见 SANDBOX_PAUSE_RESUME_GATES.e2b）。
+      verifiedAt: "2026-10-13",
+      source:
+        "specs/cloud-agent/10 §10：2026-10-07 五~七批真实联调、2026-10-09 生命周期 v2 真机、2026-10-13 V4r 全链路",
+      unverified: ["setTimeout 续期确认"],
     },
     modal: {
       verifiedAt: null,

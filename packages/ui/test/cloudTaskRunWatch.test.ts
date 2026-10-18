@@ -3,7 +3,7 @@
  *
  * 覆盖 2026-10-08 实测缺陷「首条输入 202 后同页无反馈」的修复语义：
  * - 首发 202 后启动有界轮询，每轮刷新详情（唯一投影），run 可见且非 provisioning 即停；
- * - provisioning 期间继续；无 run（事务窗口）继续；
+ * - provisioning 期间继续；无 run（事务窗口）继续；disconnected 期间继续（等回连）；
  * - 60s 上限兜底；切换任务/卸载（cancel）立即停止并放弃未决定时器；
  * - 单轮刷新失败不中断，等待下一轮。
  */
@@ -35,8 +35,10 @@ function runWithStatus(status: string) {
 function detailWithRun(
   status: string | undefined,
   actions: readonly string[] = [],
+  attachmentReady?: boolean,
 ): TaskDetailResponse {
   return {
+    ...(attachmentReady === undefined ? {} : { attachmentReady }),
     task: {
       taskId: "8f14e45f-ceea-467a-9a1e-1f0d3b2a4c51",
       projectId: "p-1",
@@ -67,14 +69,83 @@ test("watch continues while paused so send-to-resume flips the detail back", () 
   assert.equal(shouldContinueCloudTaskRunWatch(detailWithRun("paused")), true);
 });
 
+// 2026-10-18 resume 窗口修订：paused→ready 的 CAS 完成时 bridge 可能还没回连，
+// `attachmentReady === false` 期间 pane 不能绑定；轮询必须继续把回连后的详情带回来，
+// 否则恢复后没人刷新、pane 永远不绑定。undefined（旧服务端/未知）维持 ready 即停。
+test("watch continues while ready but the attachment has not reconnected", () => {
+  assert.equal(shouldContinueCloudTaskRunWatch(detailWithRun("ready", [], false)), true);
+  assert.equal(shouldContinueCloudTaskRunWatch(detailWithRun("ready", [], true)), false);
+  assert.equal(shouldContinueCloudTaskRunWatch(detailWithRun("ready")), false);
+});
+
+test("resume window watch flips ready+not-ready to bound and then stops", async () => {
+  const clock = createManualClock();
+  const responses: TaskDetailResponse[] = [
+    // resume 窗口：控制面 ready、bridge 未回连——继续轮询。
+    detailWithRun("ready", [], false),
+    // attachment 回连（attachmentReady=true）——停止，pane 由详情刷新恢复绑定。
+    detailWithRun("ready", [], true),
+  ];
+  let refreshCount = 0;
+  const handle = startCloudTaskRunWatch({
+    refresh: async () => responses[Math.min(refreshCount++, responses.length - 1)],
+    now: clock.now,
+    schedule: clock.schedule,
+    cancelScheduled: clock.cancelScheduled,
+  });
+  await flushMicrotasks();
+  assert.equal(refreshCount, 1);
+  await clock.advance(CLOUD_TASK_RUN_WATCH_INTERVAL_MS);
+  assert.equal(refreshCount, 2);
+  await clock.advance(CLOUD_TASK_RUN_WATCH_INTERVAL_MS * 3);
+  assert.equal(refreshCount, 2);
+  handle.cancel();
+});
+
 test("watch stops at ready and terminal run states", () => {
-  for (const status of ["ready", "failed", "stopped", "expired", "disconnected", "draining"]) {
+  for (const status of ["ready", "failed", "stopped", "expired", "draining"]) {
     assert.equal(
       shouldContinueCloudTaskRunWatch(detailWithRun(status)),
       false,
       `${status} should stop the watch`,
     );
   }
+});
+
+// 2026-10-18 断连修订：disconnected 是连接瞬态而非终态，有界轮询继续，直到 bridge
+// 回连把详情翻回 ready（或 60s 上限）。否则横幅永远停在「正在自动重连」。
+test("watch continues while disconnected so reconnection refreshes the detail", () => {
+  assert.equal(shouldContinueCloudTaskRunWatch(detailWithRun("disconnected")), true);
+  assert.equal(
+    shouldContinueCloudTaskRunWatch(detailWithRun("disconnected", [], false)),
+    true,
+    "attachmentReady does not change the disconnected continuation",
+  );
+});
+
+test("disconnected watch refreshes until the run turns ready then stops", async () => {
+  const clock = createManualClock();
+  const responses: TaskDetailResponse[] = [
+    detailWithRun("disconnected"),
+    detailWithRun("disconnected"),
+    detailWithRun("ready", [], true),
+  ];
+  let refreshCount = 0;
+  const handle = startCloudTaskRunWatch({
+    refresh: async () => responses[Math.min(refreshCount++, responses.length - 1)],
+    now: clock.now,
+    schedule: clock.schedule,
+    cancelScheduled: clock.cancelScheduled,
+  });
+  await flushMicrotasks();
+  assert.equal(refreshCount, 1);
+  await clock.advance(CLOUD_TASK_RUN_WATCH_INTERVAL_MS);
+  assert.equal(refreshCount, 2);
+  await clock.advance(CLOUD_TASK_RUN_WATCH_INTERVAL_MS);
+  assert.equal(refreshCount, 3);
+  await clock.advance(CLOUD_TASK_RUN_WATCH_INTERVAL_MS * 3);
+  assert.equal(refreshCount, 3);
+  handle.cancel();
 });
 
 // 2026-10-08 终态 run 发送行为修订：服务端详情投影只携带非终态 run，run 从

@@ -98,6 +98,7 @@ import {
   resolveDraftModelThoughtOption,
   resolveDraftThoughtCurrentValue,
 } from "@/v4/composer/draftWorkspaceDefaults.js";
+import { shouldAttemptCustomModelRecovery } from "@/v4/composer/modelSelectRecovery.js";
 
 // 拆分件再导出（模式选择移居 V4ComposerModeControls，超行数拆分）：
 // 既有消费方（ConversationComposer）继续从本模块入口 import，接口面不变。
@@ -842,19 +843,31 @@ function V4ComposerModelControlsImpl({
           )
         : undefined;
       const customRecoveryEligible = isApiKeyAccess(selectedRegistryProvider?.config.access);
+      const decodedProviderId = decoded?.providerId ?? null;
+      const recoverCustomModelSelection = onRecoverCustomModelSelection;
       if (
-        configOptionsError &&
-        decoded?.providerId &&
-        customRecoveryEligible &&
-        onRecoverCustomModelSelection
+        shouldAttemptCustomModelRecovery({
+          configOptionsError,
+          decodedProviderId,
+          recoveryHandlerAvailable: recoverCustomModelSelection !== undefined,
+          providerApiKeyAccess: customRecoveryEligible,
+        }) &&
+        // 上面的纯判定不负责类型收窄，这里保留显式检查供 TS 使用。
+        recoverCustomModelSelection
       ) {
         setRecoveryPending(true);
-        void Promise.resolve(onRecoverCustomModelSelection(value, sourceModel))
+        void Promise.resolve(recoverCustomModelSelection(value, sourceModel))
           .catch((error) => {
             logger.warn("[v4-toolbar] custom provider recovery failed", {
               error: error instanceof Error ? error.message : String(error),
-              providerId: decoded.providerId,
+              providerId: decodedProviderId,
             });
+            // 恢复失败不能吞掉用户显式选择（2026-10-17 云任务真机：恢复依赖的
+            // zcode-task 频道不存在时点击被静默丢弃，选择器停留原模型）。恢复成功
+            // 路径内部已提交草稿意图；失败在此兜底走与正常路径相同的派发。
+            if (decoded) {
+              onSelectModel(decoded.providerId, decoded.modelName ?? "", sourceModel);
+            }
           })
           .finally(() => {
             setRecoveryPending(false);

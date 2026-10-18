@@ -14,10 +14,12 @@ import {
   cloudSnapshotQuerySchema,
   createCloudProjectRequestSchema,
   createCloudTaskRequestSchema,
+  cancelCloudInteractionDecisionRequestSchema,
   forceStopCloudTaskRequestSchema,
   patchCloudProjectRequestSchema,
   patchCloudTaskRequestSchema,
   reopenCloudTaskRequestSchema,
+  submitCloudInteractionDecisionRequestSchema,
   submitTaskInputSchema,
   CLOUD_WIRE_PROTOCOL_VERSION,
 } from "@zcode/shared";
@@ -31,6 +33,7 @@ import {
 } from "./support.js";
 import { registerCloudRepositoryRoutes } from "./repositoryRoutes.js";
 import { registerCloudUserProfileRoutes } from "./userProfileRoutes.js";
+import { cloudCoreLogger } from "../../app/logger.js";
 
 export function registerCloudHttpRoutes(app: Hono, deps: CloudHttpRouteDeps): void {
   const { plane, principalId } = deps;
@@ -147,6 +150,17 @@ export function registerCloudHttpRoutes(app: Hono, deps: CloudHttpRouteDeps): vo
       source: "http",
       request: body.data,
     });
+    if (receipt.ok) {
+      // 2026-10-18 恢复慢修复：paused append 过去要等下一个 30s 生命周期拍才自驱 resume。
+      // 输入已持久接收后立即 kick 一次同一 sweep（per-run inFlight 防重入），把 resume
+      // 延迟从「≤30s + provider 恢复」降到「provider 恢复」；失败不影响 202 语义。
+      void plane.lifecycle.pauseResume.sweep().catch((error: unknown) => {
+        cloudCoreLogger.warn(undefined, "cloud input resume kick failed", {
+          taskId: c.req.param("taskId"),
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
     return receipt.ok ? c.json(receipt.value, 202) : respondFailure(c, receipt);
   });
   app.get("/api/cloud/tasks/:taskId/inputs", async (c) => {
@@ -173,6 +187,39 @@ export function registerCloudHttpRoutes(app: Hono, deps: CloudHttpRouteDeps): vo
       principalId,
       taskId: c.req.param("taskId"),
       commandId: c.req.param("commandId"),
+    });
+    return receipt.ok ? c.json(receipt.value) : respondFailure(c, receipt);
+  });
+
+  // ── 交互决定（03 §7.2、04 §3.0.2；R6）：主体/代际/停止围栏与投递均由 InteractionCommands
+  // 承担；路由只做严格 body 校验与错误信封映射。202 = 控制面持久接纳，不是 runtime 裁决。
+  app.get("/api/cloud/tasks/:taskId/interactions/:interactionId", async (c) => {
+    const receipt = await plane.commands.interactions.getDecision({
+      principalId,
+      taskId: c.req.param("taskId"),
+      interactionId: c.req.param("interactionId"),
+    });
+    return receipt.ok ? c.json(receipt.value) : respondFailure(c, receipt);
+  });
+  app.post("/api/cloud/tasks/:taskId/interactions/:interactionId", async (c) => {
+    const body = submitCloudInteractionDecisionRequestSchema.safeParse(await readJson(c));
+    if (!body.success) return errorResponse(c, "validation_failed", "invalid body");
+    const receipt = await plane.commands.interactions.submitDecision({
+      principalId,
+      taskId: c.req.param("taskId"),
+      interactionId: c.req.param("interactionId"),
+      ...body.data,
+    });
+    return receipt.ok ? c.json(receipt.value, 202) : respondFailure(c, receipt);
+  });
+  app.post("/api/cloud/tasks/:taskId/interactions/:interactionId/cancel", async (c) => {
+    const body = cancelCloudInteractionDecisionRequestSchema.safeParse(await readJson(c));
+    if (!body.success) return errorResponse(c, "validation_failed", "invalid body");
+    const receipt = await plane.commands.interactions.cancelDecision({
+      principalId,
+      taskId: c.req.param("taskId"),
+      interactionId: c.req.param("interactionId"),
+      ...body.data,
     });
     return receipt.ok ? c.json(receipt.value) : respondFailure(c, receipt);
   });

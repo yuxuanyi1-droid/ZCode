@@ -21,6 +21,7 @@ import { taskRepoHandlers } from "./repositories/taskRepo.js";
 import { runRepoHandlers } from "./repositories/runRepo.js";
 import { inputRepoHandlers } from "./repositories/inputRepo.js";
 import { projectionRepoHandlers } from "./repositories/projectionRepo.js";
+import { projectionInteractionRepoHandlers } from "./repositories/projectionInteractionRepo.js";
 import { credentialRepoHandlers } from "./repositories/credentialRepo.js";
 import { operationOutboxHandlers } from "./repositories/operationOutboxRepo.js";
 import { principalRepoHandlers } from "./repositories/principalRepo.js";
@@ -87,6 +88,7 @@ function buildRuntime(
     ...runRepoHandlers,
     ...inputRepoHandlers,
     ...projectionRepoHandlers,
+    ...projectionInteractionRepoHandlers,
     ...credentialRepoHandlers,
     ...operationOutboxHandlers,
     ...principalRepoHandlers,

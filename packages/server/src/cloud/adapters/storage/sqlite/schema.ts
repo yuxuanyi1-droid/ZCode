@@ -36,6 +36,7 @@ import { grantTables } from "./tables/grants.js";
 import { interactionTables } from "./tables/interactions.js";
 import { attachmentTables } from "./tables/attachments.js";
 import { profileTables } from "./tables/profile.js";
+import { projectArchiveTables } from "./tables/projectArchive.js";
 
 export interface CloudMigration {
   readonly id: string;
@@ -91,6 +92,12 @@ export const CLOUD_MIGRATIONS: readonly CloudMigration[] = [
     id: "0008_user_profile",
     statements: splitStatements(profileTables),
   },
+  {
+    // Project 软删除（15 §R3、03 §6 deleteProject）：追加可空 archived_at，
+    // 不物理删除任务历史；读路径过滤已归档行。
+    id: "0009_project_archive",
+    statements: splitStatements(projectArchiveTables),
+  },
 ];
 
 /**
@@ -103,7 +110,7 @@ export const RETIRED_MIGRATIONS: readonly { id: string; reason: string }[] = [
 ];
 
 /** schema 版本：当前链的最大编号（降级启动检查用，10 §7）。 */
-export const CLOUD_SCHEMA_VERSION = 8;
+export const CLOUD_SCHEMA_VERSION = 9;
 
 export const OPERATION_KIND_VALUES: readonly ExternalOperationKind[] = [
   "create",

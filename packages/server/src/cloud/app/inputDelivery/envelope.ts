@@ -21,6 +21,12 @@ export interface BuildEnvelopeInput {
   prompt: string;
   /** createSession 的 workspaceId：仓库任务恒为 `cloud-task:<taskId>`（02 §2 不变量 1）。 */
   workspaceIdentity: string;
+  /**
+   * createSession 携带的真实工作区绝对路径（02 §2）：必须来自控制面可信事实
+   * （当前 ready attachment 的 address.workspacePath），不得取自用户输入正文。
+   * `cloud-task:` 身份不含路径；缺失时 createSession 构造 fail-closed。
+   */
+  workspacePath?: string;
   /** createSession 必须为 null；sendText 必须为当前 run 的 runtimeSessionId。 */
   runtimeSessionId?: string;
   config?: CloudExecutionConfig;
@@ -36,11 +42,18 @@ export function buildCloudCommandEnvelope(input: BuildEnvelopeInput): BuildEnvel
     // 02 §6.2：session 命令必须携带 sessionId；不得靠重连重造会话。
     return { ok: false, reason: "missing-runtime-session" };
   }
+  if (input.kind === "createSession" && !input.workspacePath) {
+    // 02 §2：cloud-task 身份不含路径，缺可信 workspacePath 时不得降级发无路径信封
+    // （否则 CLI 侧只能把身份当本地目录，2026-10-13 V4r 真机 cwd 污染即由此而来）。
+    return { ok: false, reason: "missing-workspace-path" };
+  }
   const config = input.config;
   const payload =
     input.kind === "createSession"
       ? {
           workspaceId: input.workspaceIdentity,
+          // 02 §2：身份与路径同时传递；路径只在可信值存在时携带（上面已 fail-closed）。
+          ...(input.workspacePath ? { workspacePath: input.workspacePath } : {}),
           firstInput: {
             text: input.prompt,
             ...(config?.modelSelection ? { modelSelection: config.modelSelection } : {}),

@@ -1020,15 +1020,22 @@ test("modal: 镜像来源缺配置在 create 前明确失败（不猜镜像）",
 
 // ───────────────────────── 能力门控与对账工具 ─────────────────────────
 
-test("能力门控：未实测 provider 默认不可选，显式 opt-in 才可用且保留证据", () => {
-  assert.deepEqual(listSelectableProviders(), []);
-  for (const provider of ["e2b", "modal", "daytona"] as const) {
+test("能力门控：e2b 已按真实账号证据解禁；modal/daytona 未实测默认不可选", () => {
+  // e2b 于 2026-10-13 解禁（证据见 specs/cloud-agent/10 §10）：默认可选、无需豁免。
+  assert.deepEqual(listSelectableProviders(), ["e2b"]);
+  const e2bGate = resolveProviderGate("e2b");
+  assert.equal(e2bGate.selectable, true);
+  assert.equal(e2bGate.evidence.verifiedAt, "2026-10-13");
+  assert.deepEqual(e2bGate.evidence.unverified, ["setTimeout 续期确认"]);
+
+  // modal/daytona 未复验：默认不可选，显式 opt-in 才可用且保留证据。
+  for (const provider of ["modal", "daytona"] as const) {
     const gate = resolveProviderGate(provider);
     assert.equal(gate.selectable, false);
     assert.equal(gate.evidence.verifiedAt, null);
     assert.ok(gate.evidence.unverified.length > 0, `${provider} 必须列出未验证项`);
   }
-  assert.deepEqual(listSelectableProviders({ allowUnverified: ["daytona"] }), ["daytona"]);
+  assert.deepEqual(listSelectableProviders({ allowUnverified: ["daytona"] }), ["e2b", "daytona"]);
   const optedIn = resolveProviderGate("daytona", { allowUnverified: ["daytona"] });
   assert.equal(optedIn.selectable, true);
   assert.match(optedIn.reason ?? "", /not verified/);
@@ -1137,11 +1144,13 @@ test("driver 绑定表：配置齐全各产出一条，缺秘密不产出，门�
   // 门控不改变能力声明：Modal 仍然如实声明不支持运行中续期。
   assert.equal((await modalDriver.describeCapabilities()).canExtendDeadline, false);
 
-  // 未实测解禁 → 默认不可选（入口据此拒绝启用）；显式 allowUnverified 才放行。
-  for (const binding of bindings) {
-    assert.equal(resolveProviderGate(binding.provider).selectable, false);
-    const optedIn = resolveProviderGate(binding.provider, {
-      allowUnverified: [binding.provider],
+  // e2b 已按真机证据解禁 → 默认可选；modal/daytona 未实测解禁 → 默认不可选
+  // （入口据此拒绝启用），显式 allowUnverified 才放行。
+  assert.equal(resolveProviderGate("e2b").selectable, true);
+  for (const provider of ["modal", "daytona"] as const) {
+    assert.equal(resolveProviderGate(provider).selectable, false);
+    const optedIn = resolveProviderGate(provider, {
+      allowUnverified: [provider],
     });
     assert.equal(optedIn.selectable, true);
     assert.match(optedIn.reason ?? "", /not verified/);

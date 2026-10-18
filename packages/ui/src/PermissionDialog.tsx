@@ -530,10 +530,13 @@ export function PermissionDialog({
 
     // 反馈输入框新增后，旧的 RAF 可能在用户获得输入焦点后才回调，重新抢回选项焦点。
     // 回调执行时再次确认焦点状态，避免打断用户输入。
+    // 原因：权限弹窗在发送消息后异步挂载，默认的程序化 focus 会把最近的可滚动祖先
+    // （时间线容器/页面）滚到焦点元素处，表现为发送后侧边滚动条跳到顶部；preventScroll
+    // 只移动焦点、不改变滚动位置，键盘上下导航仍走这里的同一 focus 路径。
     const frameId = requestAnimationFrame(() => {
       if (!feedbackInputFocusedRef.current) {
-        if (isFeedbackSelected) feedbackInputRef.current?.focus();
-        else optionRefs.current[selectedIndex]?.focus();
+        if (isFeedbackSelected) feedbackInputRef.current?.focus({ preventScroll: true });
+        else optionRefs.current[selectedIndex]?.focus({ preventScroll: true });
       }
     });
 
@@ -831,7 +834,8 @@ export function PermissionDialog({
               <div
                 onClick={(event) => {
                   if (event.target !== feedbackInputRef.current) {
-                    feedbackInputRef.current?.focus();
+                    // 同选项焦点：点击反馈行只转移焦点，不能让弹窗把时间线滚回顶部。
+                    feedbackInputRef.current?.focus({ preventScroll: true });
                   }
                 }}
                 className={cn(

@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { createCredentialCipherProvider } from "@zcode/services/node";
 import {
   CLOUD_USER_PROFILE_MAX_ENTRIES,
   CLOUD_USER_PROFILE_RETAINED_VERSIONS,
@@ -116,6 +117,61 @@ test("sha256/bytes 由服务端从正文派生（客户端不传；三类口径�
     // 归档：bytes/sha256 = **解码后**归档字节。
     assert.equal(skills.entry.bytes, Buffer.from(archive, "base64").byteLength);
     assert.equal(skills.entry.sha256, sha256Hex(Buffer.from(archive, "base64")));
+  });
+});
+
+test("R4 contentFacts：mcp 密文按明文事实落库；非 mcp 覆盖派生值被拒绝（14 §5）", async () => {
+  await withStorage(async (handle) => {
+    const store = profileOf(handle);
+    const cipher = createCredentialCipherProvider({
+      env: { ZCODE_CREDENTIAL_SECRET: "profile-store-r4" },
+    });
+    const ciphertext = cipher.encrypt(MCP_CONTENT);
+    const inserted = await store.upsertEntry({
+      category: "mcp",
+      entryId: "primary",
+      enabled: true,
+      contentKind: "mcp-config",
+      content: ciphertext,
+      contentFacts: { sha256: sha256Hex(MCP_CONTENT), bytes: MCP_CONTENT.length },
+      now: TEST_NOW,
+    });
+    assert.equal(inserted.status, "ok");
+    if (inserted.status === "ok") {
+      assert.equal(inserted.entry.sha256, sha256Hex(MCP_CONTENT), "sha256 按明文派生");
+      assert.equal(inserted.entry.bytes, MCP_CONTENT.length, "bytes 按明文口径");
+    }
+    // store 对正文透明：密文原样保存，解密只在 app 读路径（单一职责）。
+    assert.equal((await store.readVersionEntries(2))?.[0]?.content, ciphertext);
+
+    // 其他类别继续由 store 从正文派生，不允许调用方覆盖（客户端不能自报 sha256/bytes）。
+    const denied = await store.upsertEntry({
+      category: "agents-md",
+      entryId: "user-agents",
+      enabled: true,
+      contentKind: "agents-md",
+      content: AGENTS_CONTENT,
+      contentFacts: { sha256: "a".repeat(64), bytes: 1 },
+      now: TEST_NOW,
+    });
+    assert.equal(denied.status, "rejected");
+    if (denied.status === "rejected") {
+      assert.equal(denied.code, "invalid_entry");
+      assert.equal(denied.reason, "content-facts-not-allowed");
+    }
+
+    // 形状非法的明文事实同样拒绝（不把坏值写进 manifest）。
+    const invalid = await store.upsertEntry({
+      category: "mcp",
+      entryId: "bad",
+      enabled: true,
+      contentKind: "mcp-config",
+      content: ciphertext,
+      contentFacts: { sha256: "not-a-sha", bytes: -1 },
+      now: TEST_NOW,
+    });
+    assert.equal(invalid.status, "rejected");
+    if (invalid.status === "rejected") assert.equal(invalid.reason, "invalid-content-facts");
   });
 });
 

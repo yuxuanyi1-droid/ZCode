@@ -21,6 +21,7 @@ import type { CloudCoreDeps } from "../deps.js";
 import { cloudCoreLogger } from "../logger.js";
 import { resolveRuntimeSession } from "../runSession.js";
 import { buildCloudCommandEnvelope } from "./envelope.js";
+import { mapCommandAck, sessionIdFromAck } from "./deliveryControl.js";
 import type { AttachmentRegistry } from "../attachments/registry.js";
 
 export type DispatchOutcome =
@@ -71,7 +72,7 @@ export function createInputDispatcher(
   deps: CloudCoreDeps,
   registry: AttachmentRegistry,
 ): InputDispatcher {
-  const { storage, attachments, clock } = deps;
+  const { storage, attachments, runtimeCommands, clock } = deps;
 
   async function dispatchTask(taskId: string): Promise<DispatchReport> {
     const run = await storage.runs.activeOfTask(taskId);
@@ -87,6 +88,74 @@ export function createInputDispatcher(
       if (outcome.result !== "sent" && outcome.result !== "skipped") break;
     }
     return report;
+  }
+
+  async function reconcileInFlight(
+    run: CloudRunRecord,
+    commandId: string,
+  ): Promise<DispatchOutcome> {
+    const runtimeSessionId = await resolveRuntimeSession(deps, run);
+    const query = await runtimeCommands.queryCommand({
+      taskId: run.taskId,
+      runId: run.runId,
+      runGeneration: run.runGeneration,
+      commandId,
+      ...(runtimeSessionId ? { runtimeSessionId } : {}),
+    });
+    if (query.status === "found") {
+      // 复用既有 ACK 落地语义（02 §6.2）：落 receipt 与 run↔session 映射，不重发。
+      const mapped = mapCommandAck(query.ack);
+      const sessionId = sessionIdFromAck(query.ack);
+      if (sessionId) {
+        // 与 deliveryControl 的 ACK 收口同口径：按 runGeneration CAS，重连不重造会话。
+        await storage.runs.setRunRuntimeSessionId({
+          runId: run.runId,
+          runGeneration: run.runGeneration,
+          runtimeSessionId: sessionId,
+          now: clock.now(),
+        });
+      }
+      const landed = await storage.inputs.markDelivery({
+        taskId: run.taskId,
+        commandId,
+        to: mapped.deliveryStatus,
+        runtimeAck: query.ack,
+        runId: run.runId,
+        runtimeSessionId: sessionId,
+        lastError: mapped.lastError,
+        now: clock.now(),
+      });
+      return landed
+        ? { commandId, result: "skipped", reason: "reconciled-runtime-ack" }
+        : { commandId, result: "wait", reason: "reconcile-ack-not-landed" };
+    }
+    if (query.status === "unavailable") {
+      // 运行时不可达：保持 delivering/uncertain 原状，不把「未确认」当「未送达」重投。
+      return { commandId, result: "wait", reason: "runtime-unavailable" };
+    }
+    // runtime 明确没有该命令事实：只有当前 ready attachment 确认同 run/代际可安全去重，
+    // 才退回 accepted 并用同一 commandId 重走发送路径（02 §6.3）。
+    const resolution = registry.resolve({
+      runId: run.runId,
+      runGeneration: run.runGeneration,
+      requireReady: true,
+    });
+    if (resolution.status !== "ok") {
+      return { commandId, result: "wait", reason: `reconcile-${resolution.status}` };
+    }
+    const requeued = await storage.inputs.markDelivery({
+      taskId: run.taskId,
+      commandId,
+      to: "accepted",
+      runId: run.runId,
+      lastError: "requeued-after-reconcile",
+      now: clock.now(),
+    });
+    if (!requeued) {
+      // 状态已被并发推进（例如 ACK 先到）：本轮不发送，下一拍按最新事实处理。
+      return { commandId, result: "wait", reason: "reconcile-requeue-failed" };
+    }
+    return dispatchOne(run, requeued);
   }
 
   async function dispatchOne(
@@ -134,6 +203,17 @@ export function createInputDispatcher(
       };
     }
 
+    // 修复依据（2026-10-17 R2，spec 15 §3、02 §6.3「命令发送超时先查询 commandId」）：
+    // 旧实现对 delivering/uncertain 输入直接重发——可能把结果未知的已执行命令再投一次，
+    // 也可能把 delivering 当 uncertain 重投。这里先按同一 commandId 查询 runtime 事实：
+    // - found：落地 ACK（同一条 ACK 收口路径），不再发送；
+    // - unavailable：保持原状态（不确认也不重投），等待运行时可查询；
+    // - unknown：只有当前 ready attachment 可安全去重时，把状态 CAS 回 accepted，随后
+    //   用**同一 commandId** 走本函数既有的发送路径（V4 以 commandId 幂等）。
+    if (input.deliveryStatus === "delivering" || input.deliveryStatus === "uncertain") {
+      return reconcileInFlight(run, commandId);
+    }
+
     const first = isFirstInput(input, run.firstInputCommandId);
     const runtimeSessionId = await resolveRuntimeSession(deps, run);
     if (!first && !runtimeSessionId) {
@@ -150,17 +230,27 @@ export function createInputDispatcher(
       kind: first ? "createSession" : "sendText",
       prompt: payload.prompt,
       workspaceIdentity: `cloud-task:${run.taskId}`,
+      // 可信路径事实只来自当前 ready attachment 的地址（与 commandChannel.resolveContext
+      // 同一取法）；用户输入正文不能决定执行目录（02 §2）。缺失时 envelope 构造
+      // fail-closed（missing-workspace-path），不降级发送无路径 createSession。
+      workspacePath: resolution.session.address.workspacePath,
       runtimeSessionId,
       config: input.resolvedExecutionConfig ?? input.requestedConfig,
       now: clock.now(),
     });
     if (!envelope.ok) {
       // 确定未投递：按 03 §6.2 收口为 rejected（不是 uncertain）。
+      // missing-workspace-path 是可信事实缺失（attachment 未带路径），按同一拒绝
+      // 路径收口；保留具体原因便于诊断「为什么首个 createSession 没能发出」。
+      const failureReason =
+        envelope.reason === "missing-workspace-path"
+          ? "missing-workspace-path"
+          : "environment-preparation-failed";
       const marked = await storage.inputs.markDelivery({
         taskId: run.taskId,
         commandId,
         to: "rejected",
-        lastError: "environment-preparation-failed",
+        lastError: failureReason,
         now: clock.now(),
       });
       cloudCoreLogger.error(undefined, "cloud input envelope build failed", {
@@ -170,7 +260,7 @@ export function createInputDispatcher(
       return {
         commandId,
         result: marked ? "skipped" : "uncertain",
-        reason: "environment-preparation-failed",
+        reason: failureReason,
       };
     }
 

@@ -9,10 +9,14 @@
  *   （由 inputDelivery 的对账承担；本文件把重启时仍在途的 delivering 收口为 uncertain）。
  */
 import { createOperationKey } from "../../domain/idempotency.js";
+import { isTerminalRunStatus } from "../../domain/taskRunState.js";
 import type { CloudCoreDeps } from "../deps.js";
 import type { ProviderSandboxHandle } from "../ports/sandboxDriverPort.js";
 import { cloudCoreLogger } from "../logger.js";
 import type { RunOrchestrator } from "../runOrchestrator.js";
+import type { RunCompensation } from "../provisioning/compensation.js";
+import type { CloudGitGrantService } from "../gitGrants.js";
+import { createRunHandleEstablisher } from "../provisioning/recoverHandle.js";
 
 export interface ReconcileSummary {
   examined: number;
@@ -32,8 +36,13 @@ export interface StartupReconciler {
 export function createStartupReconciler(
   deps: CloudCoreDeps,
   orchestrator: RunOrchestrator,
+  compensation: RunCompensation,
+  gitGrants: CloudGitGrantService,
 ): StartupReconciler {
   const { storage, operations, drivers, clock } = deps;
+  // 统一 handle 恢复/启动（R1）：startup 不再自己 recordProviderHandle——那样会漏
+  // workspacePath 且从不拉起 supervisor，provider 里活着的沙箱永远没人连。
+  const establish = createRunHandleEstablisher(deps, compensation, gitGrants);
 
   return {
     async reconcileOnStartup(now = clock.now()) {
@@ -74,6 +83,7 @@ export function createStartupReconciler(
           let handle: ProviderSandboxHandle | null = run.providerHandle
             ? { provider: run.provider ?? "", sandboxId: run.providerHandle }
             : null;
+          let discovered = false;
           if (!handle) {
             // C-3（定稿附录 6）：对账必须带持久锚点——create op 的 createdAt 是跨重启
             // 可用的 create 尝试时间；没有它，「查不到」无法安全判 notFound（01 §4.1）。
@@ -109,19 +119,67 @@ export function createStartupReconciler(
               continue;
             }
             handle = reconciliation.handle;
-            await storage.runs.recordProviderHandle({
-              runId: run.runId,
-              runGeneration: run.runGeneration,
-              provider: handle.provider,
-              providerHandle: handle.sandboxId,
-              providerDeadline: handle.providerDeadline,
-              deadlineEstimate: handle.deadlineEstimate,
-              now,
+            discovered = true;
+          }
+
+          let current = run;
+          // R1：provisioning run 的 handle（持久或对账发现）统一走 establishRunHandle——
+          // 补持久 workspacePath、签发 clone grant、拉起 supervisor；停止意图在启动前检查。
+          // 非 provisioning 且 handle 来自对账（旧数据漏持久）时也只补持久事实，不重启连接。
+          if (run.status === "provisioning" || discovered) {
+            const capabilities = await driver.describeCapabilities();
+            const established = await establish.establish({
+              driver,
+              run,
+              handle,
+              deadlineSource: capabilities.deadlineSource,
             });
+            if (established.status === "skipped") {
+              if (established.reason === "stop-requested") summary.stopPending += 1;
+              else summary.settled += 1;
+              continue;
+            }
+            if (established.status === "failed") {
+              const after = await storage.runs.get(run.runId);
+              if (after && isTerminalRunStatus(after.status)) summary.settled += 1;
+              else summary.unknown += 1;
+              continue;
+            }
+            current = established.run;
           }
 
           const observation = await driver.inspect(handle);
           if (observation.status === "paused") {
+            // R1：provider 事实为 paused、run 仍是 ready（控制面重启后无连接）时，不能把
+            // 无连接 run 留在 ready——按事实收敛到 paused。停止意图优先：交停止推进通路。
+            if (current.status === "ready" && current.stopRequested !== true) {
+              const updated = await storage.runs.transitionStatus({
+                runId: current.runId,
+                runGeneration: current.runGeneration,
+                from: ["ready"],
+                to: "paused",
+                endReason: "provider-paused-after-restart",
+                now,
+              });
+              if (updated) {
+                summary.alive += 1;
+                cloudCoreLogger.info(
+                  undefined,
+                  "cloud ready run converged to paused after restart",
+                  {
+                    taskId: current.taskId,
+                    runId: current.runId,
+                  },
+                );
+              } else {
+                summary.unknown += 1;
+                cloudCoreLogger.warn(undefined, "cloud paused convergence cas failed", {
+                  taskId: current.taskId,
+                  runId: current.runId,
+                });
+              }
+              continue;
+            }
             // 暂停保留期（01 §4.1 修订 2026-10-09）：实例被 provider 保留，run 保持
             // paused——不按 stopped/notFound 收口、不标 disconnected；恢复由控制面
             // 自驱 resume（有 deliverable 输入时）或暂停预算终局负责。

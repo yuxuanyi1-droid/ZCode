@@ -2,8 +2,8 @@
  * M8 profile 领域纯规则单测（specs/cloud-agent 14 §9.2②③/§4.4/§4.5；W11 §13B）。
  *
  * 覆盖：`bytes` 口径精算、条目标定序、归档最小前置（gzip 前缀）、上传超限前置（含
- * commands/subagents 的 markdown 文本类）、连接期同步的纯规则（markdown 分类、base64
- * 编解码、分块、mcp 分批、subagents front-matter 映射、错误文本有界）。
+ * commands/subagents 的 markdown 文本类）、agents-md 单例约束、连接期同步的纯规则
+ * （markdown 分类、base64 编解码、分块、mcp 分批、错误文本有界）。
  * 原 bundle／分片用例随 `bootstrap.resources` 退役整体删除（14 §4.8/§9.5）。
  */
 import assert from "node:assert/strict";
@@ -13,6 +13,7 @@ import {
   compareUserProfileEntries,
   isUserProfileMarkdownCategory,
   sortUserProfileEntries,
+  userProfileAgentsMdEntryIdReason,
   userProfileArchiveGzipPrefixOk,
   userProfileContentKindOf,
   userProfileUploadOversizeReason,
@@ -25,7 +26,6 @@ import {
   planArchiveChunks,
   planCommandFileWrite,
   planMcpSyncBatches,
-  subagentConfigFromMarkdown,
   userProfileSyncErrorText,
 } from "../src/cloud/domain/userProfileSync.js";
 
@@ -176,41 +176,19 @@ test("commands：entryId 去 .md 得到既有写方法的名字；正文整份�
   });
 });
 
-test("subagents：front-matter → SubAgentConfig（name/description 回落 entryId，正文为 systemPrompt）", () => {
-  const withFrontmatter = subagentConfigFromMarkdown({
-    entryId: "helper.md",
-    content:
-      '---\nname: "helper"\ndescription: "帮助者\u003cbr\u003e第二行"\ncolor: cyan\ntools: [Read, Grep]\nmaxTurns: 5\nbackground: true\n---\n你是助手。',
-  });
-  assert.deepEqual(withFrontmatter, {
-    name: "helper",
-    description: "帮助者<br>第二行",
-    systemPrompt: "你是助手。",
-    color: "cyan",
-    tools: ["Read", "Grep"],
-    maxTurns: 5,
-    background: true,
-  });
-  // 无 front-matter：name/description 回落 entryId 裸名（既有服务仍做名称/必填校验）。
-  const plain = subagentConfigFromMarkdown({ entryId: "plain.md", content: "只要正文" });
-  assert.deepEqual(plain, { name: "plain", description: "plain", systemPrompt: "只要正文" });
-  // 非法 YAML：不猜键值，只保留正文（回落 entryId）。
-  const broken = subagentConfigFromMarkdown({
-    entryId: "broken.md",
-    content: "---\n: : :\n---\n正文",
-  });
-  assert.equal(broken.name, "broken");
-  assert.equal(broken.systemPrompt, "正文");
-  // model/thoughtLevel 经 shared 的既有解析（14 §4.5：不复制第二套解析规则）。
-  const withModel = subagentConfigFromMarkdown({
-    entryId: "m.md",
-    content: '---\nname: "m"\ndescription: "d"\nmodel: "glm/glm-4.6"\nthoughtLevel: high\n---\nx',
-  });
-  assert.deepEqual(withModel.modelSelection, {
-    providerId: "glm",
-    modelId: "glm-4.6",
-    options: { reasoningLevel: "high" },
-  });
+test("agents-md 单例：entryId 必须为 user-agents，其余类别不受影响（2026-10-17 收口）", () => {
+  assert.equal(userProfileAgentsMdEntryIdReason("agents-md", "user-agents"), null);
+  assert.equal(
+    userProfileAgentsMdEntryIdReason("agents-md", "other"),
+    "agents-md-entry-id-must-be-user-agents",
+  );
+  assert.equal(
+    userProfileAgentsMdEntryIdReason("agents-md", "other.md"),
+    "agents-md-entry-id-must-be-user-agents",
+  );
+  // 单例只约束 agents-md；commands/subagents 的文件名仍按 `.md` 形状各自提交。
+  assert.equal(userProfileAgentsMdEntryIdReason("commands", "review.md"), null);
+  assert.equal(userProfileAgentsMdEntryIdReason("subagents", "helper.md"), null);
 });
 
 test("逐条错误文本：单行、有界、不回传正文（14 §5）", () => {

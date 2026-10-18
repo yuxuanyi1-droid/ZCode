@@ -35,6 +35,7 @@ import {
   CLOUD_ATTACHMENT_SERVICE_ALLOWLIST,
   CLOUD_CONTROL_PLANE_SERVICE_ALLOWLIST,
   CLOUD_RPC_PROTOCOL_VERSION,
+  ServiceChannels,
   type CloudRpcFrame,
   type CloudRpcServiceScope,
 } from "@zcode/shared";
@@ -65,6 +66,45 @@ export function serviceAllowlistForScope(
   if (scope === "client") return CLOUD_ATTACHMENT_SERVICE_ALLOWLIST;
   if (scope === "control-plane") return CLOUD_CONTROL_PLANE_SERVICE_REACHABLE_CHANNELS;
   return null;
+}
+
+/**
+ * `client` 分面禁止直接调用的 zcode-agent 方法（spec 15 §R6、03 §7.2）。
+ *
+ * 任务输入与停止必须走控制面 durable HTTP（`/inputs`、`/stop`）：客户端 scope 直发
+ * `createSession`/`sendText`/`stop` 会绕过 outbox、停止屏障与保存终止链，控制面无法持久
+ * 记录/重启恢复。审批决定同理必须经 durable HTTP，直发 `resolveInteraction` 无法持久记录。
+ * 因此这四类命令一律拒绝（`unauthorized` + `durable-input-required`）。
+ *
+ * `sendConversationCommandV4` 仍承载云端编辑/重试/反馈/队列等既有 UI 功能，整体拦截会把
+ * 这些按钮变成 unauthorized，保持放行（其余 durable 化列为遗留项）。`control-plane` 分面
+ * （受信基础设施）不受影响。
+ */
+export const CLOUD_BROWSER_DENIED_AGENT_COMMANDS = [
+  "resolveInteraction",
+  "createSession",
+  "sendText",
+  "stop",
+] as const;
+
+const CLOUD_BROWSER_DURABLE_INPUT_REASON = "durable-input-required";
+
+/** 只过滤显式拒绝的 agent 方法：读/订阅/其它命令保持原样转发。 */
+function denyDurableInputAgentCommands(channel: IChannel): IServerChannel {
+  return {
+    call: (_context, command, arg, token) => {
+      if ((CLOUD_BROWSER_DENIED_AGENT_COMMANDS as readonly string[]).includes(command)) {
+        return Promise.reject(
+          Object.assign(new Error(`${command} requires durable cloud input (client scope)`), {
+            code: "unauthorized",
+            details: { reason: CLOUD_BROWSER_DURABLE_INPUT_REASON, method: command },
+          }),
+        );
+      }
+      return channel.call(command, arg, token);
+    },
+    listen: (_context, event, arg) => channel.listen(event, arg),
+  };
 }
 
 export type LocalChannelAccessor = (channelName: string) => IChannel | null;
@@ -224,7 +264,13 @@ export function createRpcRelay(options: RpcRelayOptions): RpcRelayPort {
     for (const channelName of allowlist) {
       const local = options.channel(channelName);
       if (!local) continue;
-      server.registerChannel(channelName, adaptLocalChannel(local));
+      // 浏览器面在唯一注册点上包一层显式方法拒绝：不新增通道、不改变其余方法；
+      // 本地/桌面/SSH 不经过 relay，行为不变（spec 15 §R6）。
+      const wrapped =
+        frame.serviceScope === "client" && channelName === ServiceChannels.ZCodeAgent
+          ? denyDurableInputAgentCommands(local)
+          : adaptLocalChannel(local);
+      server.registerChannel(channelName, wrapped);
       registered += 1;
     }
     sessions.set(frame.streamId, { streamId: frame.streamId, context, protocol, server });
@@ -279,8 +325,13 @@ export function createRpcRelay(options: RpcRelayOptions): RpcRelayPort {
     },
 
     releaseAll(reason) {
+      // 修复依据（2026-10-13 V4r 真机联调）：checkpoint 前 quiesce 会撕掉全部 relay 流，
+      // 原实现 notify=false 静默释放，控制面不知道流已死、仍按 epoch 复用流缓存，
+      // checkpoint 后所有 RPC 都打在死流上 30s 超时（手动同步全超时、append uncertain/
+      // closed）。quiesce/releaseAll 必须逐流回发 rpc.close，控制面据此作废缓存并在
+      // 下次调用重开；断连路径由 outbound holder 已解绑自然丢弃（无连接可通知）。
       for (const session of Array.from(sessions.values())) {
-        disposeSession(session, reason, false);
+        disposeSession(session, reason, true);
       }
     },
   };

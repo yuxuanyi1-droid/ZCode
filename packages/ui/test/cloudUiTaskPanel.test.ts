@@ -6,22 +6,23 @@
  * - provisioning / 无 run 的 active → 进行中提示视图；draft/archived/ready → hidden；
  * - 重开 resume 模式按持久事实自动选择：saved checkpoint → checkpoint，否则
  *   restart-from-base；可用性只认服务端 actions 投影；
- * - 归档/恢复入口可用性同样只认 actions 投影（04 §3.3：缺省 = 无动作）；
+ * - 恢复入口可用性同样只认 actions 投影（04 §3.3：缺省 = 无动作）；归档对任何非
+ *   archived 状态都可用，由服务端先停止沙箱再归档，UI 不再做归档准入预检；
  * - 巡检修订：云任务 Header 标题回落控制面投影（本地 meta 恒为空）。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildCloudRequestedConfig,
-  isCloudTaskArchiveActionAvailable,
   isCloudTaskForceStopActionAvailable,
   isCloudTaskRestoreActionAvailable,
   projectCloudTaskRunPanel,
   resolveCloudComposerSendPlan,
+  resolveCloudConnectionIndicator,
   resolveCloudReopenPlan,
   resolveCloudReopenRetryPlan,
-  resolveCloudTaskArchiveAdmission,
   resolveCloudTaskHeaderTitle,
+  resolveCloudTaskStopAvailability,
   type CloudTaskPanelDetail,
 } from "../src/cloud/cloudTaskPanel.js";
 
@@ -33,8 +34,10 @@ function detail(input: {
   checkpointState?: string;
   actions?: readonly string[];
   provider?: string;
+  attachmentReady?: boolean;
 }): CloudTaskPanelDetail {
   return {
+    ...(input.attachmentReady === undefined ? {} : { attachmentReady: input.attachmentReady }),
     task: {
       status: input.taskStatus ?? "active",
       revision: 7,
@@ -113,11 +116,10 @@ test("draft, archived and working run states stay hidden", () => {
   assert.deepEqual(projectCloudTaskRunPanel(detail({ taskStatus: "active", runStatus: "ready" })), {
     kind: "hidden",
   });
+  // 2026-10-18 修订：disconnected 不再是 hidden——断连必须可见并提示自动重连。
   assert.deepEqual(
     projectCloudTaskRunPanel(detail({ taskStatus: "active", runStatus: "disconnected" })),
-    {
-      kind: "hidden",
-    },
+    { kind: "disconnected" },
   );
   assert.deepEqual(projectCloudTaskRunPanel(null), { kind: "hidden" });
 });
@@ -137,6 +139,121 @@ test("paused run projects the paused view (2026-10-09 生命周期 v2)", () => {
     isSelectedTask: true,
   });
   assert.deepEqual(plan, { kind: "append", expectedRunGeneration: 1 });
+});
+
+test("ready run with a not-yet-reconnected attachment projects resuming (2026-10-18)", () => {
+  // resume 窗口：控制面已 CAS ready，但 bridge 尚未回连。pane 不绑定实时会话、保持
+  // 历史/草稿视图，横幅呈现「正在恢复运行环境」而不是连接错误。
+  assert.deepEqual(
+    projectCloudTaskRunPanel(detail({ runStatus: "ready", attachmentReady: false })),
+    { kind: "resuming" },
+  );
+  // attachment 已回连 / 旧服务端未知（undefined）：ready 维持 hidden 原语义。
+  assert.deepEqual(
+    projectCloudTaskRunPanel(detail({ runStatus: "ready", attachmentReady: true })),
+    { kind: "hidden" },
+  );
+  assert.deepEqual(projectCloudTaskRunPanel(detail({ runStatus: "ready" })), { kind: "hidden" });
+  // disconnected 独立呈现（2026-10-18 修订）：断连不是恢复窗口，也不是终态；
+  // attachmentReady 的取值不改变该投影。
+  assert.deepEqual(
+    projectCloudTaskRunPanel(detail({ runStatus: "disconnected", attachmentReady: false })),
+    { kind: "disconnected" },
+  );
+  assert.deepEqual(
+    projectCloudTaskRunPanel(detail({ runStatus: "disconnected", attachmentReady: true })),
+    { kind: "disconnected" },
+  );
+  // draft/archived 优先 hidden（无 run 语义）。
+  assert.deepEqual(
+    projectCloudTaskRunPanel(
+      detail({ taskStatus: "draft", runStatus: "ready", attachmentReady: false }),
+    ),
+    { kind: "hidden" },
+  );
+});
+
+// 2026-10-18 用户决议：首条消息发送期间禁止停止。provisioning / 无 run / ready 但
+// attachment 未回连都属于「首条输入尚未进入 runtime」，停止会直接终止 create/run；
+// 已运行的 ready/paused/draining 保持可停止（服务端仍独立裁决状态转移）。
+test("cloud stop is only available for a ready, paused or draining run", () => {
+  assert.equal(resolveCloudTaskStopAvailability(null), false);
+  assert.equal(resolveCloudTaskStopAvailability(detail({})), false);
+  assert.equal(resolveCloudTaskStopAvailability(detail({ runStatus: "provisioning" })), false);
+  assert.equal(
+    resolveCloudTaskStopAvailability(detail({ runStatus: "ready", attachmentReady: false })),
+    false,
+  );
+  assert.equal(
+    resolveCloudTaskStopAvailability(detail({ runStatus: "ready", attachmentReady: true })),
+    true,
+  );
+  // attachmentReady 缺省（旧服务端/未知）维持可停止。
+  assert.equal(resolveCloudTaskStopAvailability(detail({ runStatus: "ready" })), true);
+  assert.equal(resolveCloudTaskStopAvailability(detail({ runStatus: "paused" })), true);
+  assert.equal(resolveCloudTaskStopAvailability(detail({ runStatus: "draining" })), true);
+  // 断连/终态不属于可停止窗口。
+  assert.equal(resolveCloudTaskStopAvailability(detail({ runStatus: "disconnected" })), false);
+  for (const runStatus of ["failed", "stopped", "expired"]) {
+    assert.equal(resolveCloudTaskStopAvailability(detail({ runStatus })), false, runStatus);
+  }
+});
+
+// 2026-10-18 修订：Header 云图标连接状态点使用既有详情投影，draft/archived 不渲染。
+test("cloud connection indicator maps the detail projection to a tone and label", () => {
+  assert.equal(resolveCloudConnectionIndicator(null), null);
+  assert.equal(resolveCloudConnectionIndicator(detail({ taskStatus: "draft" })), null);
+  assert.equal(
+    resolveCloudConnectionIndicator(detail({ taskStatus: "archived", runStatus: "ready" })),
+    null,
+  );
+  // 无 run / 终态：灰色空心点（无活动环境）。
+  assert.deepEqual(resolveCloudConnectionIndicator(detail({})), {
+    tone: "gray",
+    pulse: false,
+    labelId: "cloud.connection.idle",
+  });
+  for (const runStatus of ["stopped", "expired"]) {
+    assert.deepEqual(resolveCloudConnectionIndicator(detail({ runStatus })), {
+      tone: "gray",
+      pulse: false,
+      labelId: "cloud.connection.idle",
+    });
+  }
+  assert.deepEqual(resolveCloudConnectionIndicator(detail({ runStatus: "provisioning" })), {
+    tone: "amber",
+    pulse: true,
+    labelId: "cloud.connection.provisioning",
+  });
+  assert.deepEqual(
+    resolveCloudConnectionIndicator(detail({ runStatus: "ready", attachmentReady: false })),
+    { tone: "amber", pulse: true, labelId: "cloud.connection.resuming" },
+  );
+  assert.deepEqual(resolveCloudConnectionIndicator(detail({ runStatus: "ready" })), {
+    tone: "green",
+    pulse: false,
+    labelId: "cloud.connection.ready",
+  });
+  assert.deepEqual(resolveCloudConnectionIndicator(detail({ runStatus: "paused" })), {
+    tone: "gray",
+    pulse: false,
+    labelId: "cloud.connection.paused",
+  });
+  assert.deepEqual(resolveCloudConnectionIndicator(detail({ runStatus: "draining" })), {
+    tone: "blue",
+    pulse: false,
+    labelId: "cloud.connection.draining",
+  });
+  assert.deepEqual(resolveCloudConnectionIndicator(detail({ runStatus: "disconnected" })), {
+    tone: "red",
+    pulse: false,
+    labelId: "cloud.connection.disconnected",
+  });
+  assert.deepEqual(resolveCloudConnectionIndicator(detail({ runStatus: "failed" })), {
+    tone: "red",
+    pulse: false,
+    labelId: "cloud.connection.failed",
+  });
 });
 
 test("draining run projects the stopping view (2026-10-08 巡检修订 P1)", () => {
@@ -216,83 +333,6 @@ test("reopen provider prefers the run fact and falls back to the saved draft con
     resolveCloudReopenPlan(detail({ runStatus: "stopped", actions: ["reopen"] })).provider,
     null,
   );
-});
-
-test("archive availability comes only from the server actions projection", () => {
-  assert.equal(isCloudTaskArchiveActionAvailable(null), false);
-  assert.equal(isCloudTaskArchiveActionAvailable({ actions: [] }), false);
-  // active + 终态 run 可归档、draft/completed/failed 可归档都由服务端投影表达，
-  // UI 侧不自行按状态开洞。
-  assert.equal(isCloudTaskArchiveActionAvailable({ actions: ["stop", "archive"] }), true);
-});
-
-// 2026-10-07 终验缺陷 E：无缓存详情的侧栏行点击归档后必被服务端 409
-// `not_ready/task-has-active-run` 拒绝。准入预检：有缓存详情按缓存裁决；
-// 无缓存详情点击时拉一次详情再裁决；详情拉不到回落服务端裁决（unknown）。
-test("archive admission judges from cached detail without an extra fetch", async () => {
-  let fetches = 0;
-  const admission = await resolveCloudTaskArchiveAdmission({
-    cachedDetail: { actions: ["stop"] },
-    loadDetail: () => {
-      fetches += 1;
-      return Promise.resolve({ actions: ["stop"] });
-    },
-  });
-  assert.deepEqual(admission, { kind: "blocked-active-run" });
-  assert.equal(fetches, 0);
-});
-
-test("archive admission fetches detail once when the row has no cache", async () => {
-  // 投影不含 archive（服务端对活动 run 的唯一非归档裁决）：拦截请求并引导先停止。
-  const blocked = await resolveCloudTaskArchiveAdmission({
-    cachedDetail: null,
-    loadDetail: () => Promise.resolve({ actions: ["stop", "force-stop"] }),
-  });
-  assert.deepEqual(blocked, { kind: "blocked-active-run" });
-  // 投影含 archive：放行归档请求。
-  const allowed = await resolveCloudTaskArchiveAdmission({
-    cachedDetail: null,
-    loadDetail: () => Promise.resolve({ actions: ["archive"] }),
-  });
-  assert.deepEqual(allowed, { kind: "allowed" });
-});
-
-test("archive admission falls back to server adjudication when detail is unavailable", async () => {
-  // 详情拉不到（网络/未接线）：unknown，调用方继续发归档请求、由服务端裁决。
-  const unknown = await resolveCloudTaskArchiveAdmission({
-    cachedDetail: null,
-    loadDetail: () => Promise.resolve(null),
-  });
-  assert.deepEqual(unknown, { kind: "unknown" });
-});
-
-// 08 §3.2/§8.2 修订 2026-10-10（archive on paused run）：归档是用户结束任务的显式意图，
-// 服务端对 paused run 投影 archive 并在执行时自动推进暂停中停止后完成归档。UI 三处入口
-// （侧栏行/Header/准入预检）都只认 actions 投影——paused run 的归档不再被预检拦截，
-// UI 不按「存在活动 run」本地猜测（与服务端裁决同表）。
-test("archive admission allows a paused run when the projection offers archive", async () => {
-  const pausedDetail = detail({ runStatus: "paused", actions: ["send-input", "stop", "archive"] });
-  assert.equal(isCloudTaskArchiveActionAvailable(pausedDetail), true);
-  const cached = await resolveCloudTaskArchiveAdmission({
-    cachedDetail: pausedDetail,
-    loadDetail: () => {
-      throw new Error("cached detail must short-circuit the fetch");
-    },
-  });
-  assert.deepEqual(cached, { kind: "allowed" });
-  // 无缓存详情的行：点击时拉一次详情，投影放行即发归档请求。
-  const fetched = await resolveCloudTaskArchiveAdmission({
-    cachedDetail: null,
-    loadDetail: () =>
-      Promise.resolve(detail({ runStatus: "paused", actions: ["send-input", "archive"] })),
-  });
-  assert.deepEqual(fetched, { kind: "allowed" });
-  // 对照：投影不含 archive 的 paused run（理论不可达，防御旧缓存）仍拦截引导。
-  const stale = await resolveCloudTaskArchiveAdmission({
-    cachedDetail: detail({ runStatus: "paused", actions: ["stop", "force-stop"] }),
-    loadDetail: () => Promise.resolve(null),
-  });
-  assert.deepEqual(stale, { kind: "blocked-active-run" });
 });
 
 test("restore availability comes only from the server actions projection", () => {

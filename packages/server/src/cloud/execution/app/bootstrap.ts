@@ -185,6 +185,60 @@ export function createBootstrap(options: BootstrapOptions): Bootstrap {
     }
   }
 
+  /**
+   * A-08（12 §6）：已 bootstrap 的节点在新连接上收到 `bootstrap.config` 时的重推路径。
+   *
+   * 修复依据（2026-10-17 review R5）：此前 `bridgeSession.bootstrapIfNeeded` 在
+   * `state.bootstrapped` 后直接返回，重连会**忽略新的 bootstrap.config**——host 刷新 token
+   * 后控制面即使下发了更高 `credentialGeneration`，执行节点也不会重装 envelope。
+   *
+   * 这里只做「代际 + policy/preferences」核对与重装，绝不重新 clone、重启 runtime 或
+   * 重新 start exporter：这些是进程级事实，网络重连不改变它们（02 §2 不变量 7）。
+   */
+  async function refresh(config: BootstrapConfigFrame): Promise<{ configVersion: string }> {
+    const appliedGeneration = await options.provisioning.appliedGeneration();
+    if (appliedGeneration !== null && appliedGeneration > config.credentialGeneration) {
+      // 与首次自举同一口径：旧代际不得覆盖本地更新的已安装内容（12 §6 A-08）。
+      throw new BootstrapFailure(
+        "protocol_incompatible",
+        "bootstrap config credentialGeneration is behind applied generation",
+      );
+    }
+    if (appliedGeneration === null || appliedGeneration < config.credentialGeneration) {
+      await options.provisioning.install(
+        config.provisioningEnvelopeJson,
+        config.credentialGeneration,
+      );
+      installedGeneration = config.credentialGeneration;
+    }
+
+    // policy/preferences 变化：先比较内容（policyVersion + preferences 实值），再核对持久
+    // 快照版本作为落盘证据；任一变化都重装。同值不重复写盘（幂等边界）。
+    const persistedPolicy = await options.policy.applied();
+    const effectiveVersion = config.preferences?.configVersion ?? config.policyVersion;
+    const policyChanged =
+      current === null ||
+      current.policyVersion !== config.policyVersion ||
+      JSON.stringify(current.preferences ?? null) !== JSON.stringify(config.preferences ?? null) ||
+      persistedPolicy === null ||
+      persistedPolicy.configVersion !== effectiveVersion;
+    if (policyChanged) {
+      const applied = await options.policy.install({
+        policyVersion: config.policyVersion,
+        ...(config.preferences ? { preferences: config.preferences } : {}),
+      });
+      installedPolicyVersion = applied.configVersion;
+      appliedConfigVersion = applied.configVersion;
+    } else if (appliedConfigVersion === null) {
+      appliedConfigVersion = persistedPolicy?.configVersion ?? effectiveVersion;
+    }
+    current = config;
+    return {
+      // 已应用配置版本（14 §6）：有偏好快照时 = 快照 configVersion，否则维持 policyVersion。
+      configVersion: appliedConfigVersion ?? persistedPolicy?.configVersion ?? effectiveVersion,
+    };
+  }
+
   const bootstrap: Bootstrap = {
     async run(config) {
       current = config;
@@ -235,6 +289,8 @@ export function createBootstrap(options: BootstrapOptions): Bootstrap {
       phaseListeners.add(listener);
       return { dispose: () => phaseListeners.delete(listener) };
     },
+
+    refresh,
 
     runtimeFacts() {
       return options.runtime.facts();

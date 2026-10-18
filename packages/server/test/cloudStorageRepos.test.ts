@@ -51,6 +51,64 @@ function startRequest(taskId: string, overrides: Record<string, unknown> = {}) {
   };
 }
 
+test("R3：Project 软删除落库持久，重启后仍不可见且重复归档幂等（15 §R3）", async () => {
+  const handle = await openTestStorage();
+  const root = handle.root;
+  const principalId = newUuid();
+  const projectId = newUuid();
+  try {
+    await handle.storage.ensurePrincipal({ principalId, now: TEST_NOW });
+    const project = await handle.storage.storage.projects.createOrGet({
+      projectId,
+      ownerPrincipalId: principalId,
+      kind: "github-repo",
+      repositoryId: 77,
+      installationId: 7,
+      repoOwner: "zcode",
+      repoName: "archive-fixture",
+      defaultBranch: "main",
+      now: TEST_NOW,
+    });
+    assert.equal(project.projectId, projectId);
+
+    // 首次归档：只写 archived_at，返回 true；读路径立即过滤。
+    assert.equal(await handle.storage.storage.projects.archive(projectId, TEST_NOW + 1), true);
+    assert.equal(await handle.storage.storage.projects.get(projectId), null);
+    assert.equal(
+      await handle.storage.storage.projects.findByRepository(principalId, 77),
+      null,
+      "按仓库查找同样过滤已归档",
+    );
+    const listed = await handle.storage.storage.projects.list(principalId, { limit: 10 });
+    assert.equal(
+      listed.items.some((item) => item.projectId === projectId),
+      false,
+    );
+    // 重复归档：不覆盖首次归档时间，返回 false（调用方据此走幂等成功）。
+    assert.equal(await handle.storage.storage.projects.archive(projectId, TEST_NOW + 2), false);
+  } finally {
+    await handle.close();
+  }
+
+  // 重启（重新打开同一数据库）：归档是持久事实，刷新后仍不可见。
+  const reopened = await openTestStorage({ root });
+  try {
+    assert.equal(await reopened.storage.storage.projects.get(projectId), null);
+    const listed = await reopened.storage.storage.projects.list(principalId, { limit: 10 });
+    assert.equal(
+      listed.items.some((item) => item.projectId === projectId),
+      false,
+    );
+    const archivedRow = await reopened.storage.storage.projects.get(projectId, {
+      includeArchived: true,
+    });
+    assert.equal(archivedRow?.projectId, projectId, "项目行未物理删除（任务历史/外键保留）");
+  } finally {
+    await reopened.close();
+    await removeTestRoot(root);
+  }
+});
+
 test("project 与 task 的唯一约束承担去重", async () => {
   await withStorage(async ({ storage }) => {
     const principalId = newUuid();
@@ -449,17 +507,24 @@ test("输入投递状态机只允许前进，acceptanceSeq 在 Task 内唯一递
     });
     assert.equal(delivering?.deliveryStatus, "delivering");
 
-    // 真正的回退边（delivering → accepted）仍被拒：状态机只允许前进（02 §6.3）。
-    assert.equal(
-      await storage.storage.inputs.markDelivery({
-        taskId: seeded.taskId,
-        commandId,
-        to: "accepted",
-        now: TEST_NOW + 3,
-      }),
-      null,
-      "已 delivering/admitted 的输入不得回退",
-    );
+    // R2（15 §3、02 §6.3）：delivering → accepted 是「先查询 runtime 且明确 unknown」
+    // 之后允许的唯一回退边——dispatcher 用同一 commandId 重投，不生成新命令；
+    // 其余终态（admitted 等）仍不得回退。
+    const requeued = await storage.storage.inputs.markDelivery({
+      taskId: seeded.taskId,
+      commandId,
+      to: "accepted",
+      lastError: "requeued-after-reconcile",
+      now: TEST_NOW + 3,
+    });
+    assert.equal(requeued?.deliveryStatus, "accepted", "对账确认 unknown 后允许退回 accepted");
+    const redelivering = await storage.storage.inputs.markDelivery({
+      taskId: seeded.taskId,
+      commandId,
+      to: "delivering",
+      now: TEST_NOW + 3,
+    });
+    assert.equal(redelivering?.deliveryStatus, "delivering", "重投后回到 delivering");
 
     const uncertain = await storage.storage.inputs.markDelivery({
       taskId: seeded.taskId,
@@ -654,6 +719,26 @@ test("checkpoint 与 artifact 的约束承担证据要求（08 §8.2、§9）", 
       (await storage.storage.tasks.get(seeded.taskId))?.lastCheckpointSha,
       fakeGitSha("remote"),
     );
+
+    // R2（15 §3）：saved 是 checkpoint 记录的终态——同一 operationId 的迟到 failed
+    // 不得把已确认保存覆盖成风险状态（证据与 SHA 都保持原值）。
+    await storage.storage.projections.recordCheckpoint({
+      operationId,
+      taskId: seeded.taskId,
+      runId,
+      runGeneration: 1,
+      state: "failed",
+      includedFiles: ["src/late.ts"],
+      riskSummary: "late failure",
+      createdAt: TEST_NOW,
+      updatedAt: TEST_NOW + 3,
+    });
+    const afterLateFailure = await storage.storage.projections.listCheckpoints(seeded.taskId);
+    assert.equal(afterLateFailure.length, 1);
+    assert.equal(afterLateFailure[0]?.state, "saved", "saved 不被迟到 failed 覆盖");
+    assert.equal(afterLateFailure[0]?.confirmedRemoteSha, fakeGitSha("remote"));
+    assert.deepEqual(afterLateFailure[0]?.includedFiles, ["src/index.ts"]);
+    assert.equal(afterLateFailure[0]?.updatedAt, TEST_NOW + 1);
 
     await assert.rejects(
       storage.storage.tasks.recordArtifact({

@@ -99,14 +99,17 @@ export {
   type CloudTaskRunWatchHandle,
 } from "./cloudTaskRunWatch.js";
 export {
-  isCloudTaskArchiveActionAvailable,
   projectCloudTaskRunPanel,
   resolveCloudComposerSendPlan,
+  resolveCloudConnectionIndicator,
   resolveCloudReopenPlan,
   resolveCloudReopenRetryPlan,
+  resolveCloudTaskStopAvailability,
   type CloudComposerReopenResume,
   type CloudComposerSendFacts,
   type CloudComposerSendPlan,
+  type CloudConnectionIndicator,
+  type CloudConnectionIndicatorTone,
   type CloudReopenPlan,
   type CloudReopenRetryPlan,
   type CloudTaskPanelDetail,

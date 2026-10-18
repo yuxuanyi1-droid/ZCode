@@ -22,6 +22,7 @@ import {
   type CloudRpcServiceScope,
 } from "@zcode/shared";
 import {
+  CLOUD_BROWSER_DENIED_AGENT_COMMANDS,
   CLOUD_CONTROL_PLANE_SERVICE_REACHABLE_CHANNELS,
   createRpcRelay,
   serviceAllowlistForScope,
@@ -242,6 +243,75 @@ test("control-plane 分面：6 个控制面通道与浏览器面 zcode-agent 都
   }
 });
 
+test("client 分面拒绝 resolveInteraction/createSession/sendText/stop；sendConversationCommandV4 与读取方法放行", async () => {
+  const harness = createHarness();
+  try {
+    const channel = harness.open("client");
+    const agent = channel(ServiceChannels.ZCodeAgent);
+
+    // 审批决定与任务输入/停止都必须经 durable HTTP；直发结构化拒绝，本地 runtime 未被调用。
+    assert.deepEqual(
+      [...CLOUD_BROWSER_DENIED_AGENT_COMMANDS],
+      ["resolveInteraction", "createSession", "sendText", "stop"],
+      "拒绝面 = 审批 + 任务输入 + 停止（03 §7.2、15 §R6）",
+    );
+    for (const command of CLOUD_BROWSER_DENIED_AGENT_COMMANDS) {
+      const error = await agent
+        .call(command, [{ envelope: { commandId: "x" } }])
+        .then(() => undefined)
+        .catch((thrown: unknown) => thrown);
+      assert.ok(error instanceof Error, `${command} 必须被拒绝`);
+      const structured = error as Error & {
+        code?: string;
+        details?: { reason?: string; method?: string };
+      };
+      assert.equal(structured.code, "unauthorized");
+      assert.equal(structured.details?.reason, "durable-input-required");
+      assert.equal(structured.details?.method, command);
+    }
+    assert.deepEqual(
+      harness.forChannel(ServiceChannels.ZCodeAgent).calls,
+      [],
+      "被拒命令不得落到本地 runtime",
+    );
+
+    // 云端既有编辑/重试/反馈/队列功能仍走 sendConversationCommandV4：必须放行。
+    assert.deepEqual(await agent.call("sendConversationCommandV4", [{ envelope: {} }]), {
+      command: "sendConversationCommandV4",
+      ok: true,
+    });
+    // 读取/订阅同样保持原样。
+    assert.deepEqual(await agent.call("queryConversationCommandsV4", []), {
+      command: "queryConversationCommandsV4",
+      ok: true,
+    });
+    assert.deepEqual(harness.forChannel(ServiceChannels.ZCodeAgent).calls, [
+      "sendConversationCommandV4",
+      "queryConversationCommandsV4",
+    ]);
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("control-plane 分面对 agent 命令全部放行（控制面命令投递仍可用）", async () => {
+  const harness = createHarness();
+  try {
+    const agent = harness.open("control-plane")(ServiceChannels.ZCodeAgent);
+    const commands = [
+      "sendConversationCommandV4",
+      "resolveInteraction",
+      "queryConversationCommandsV4",
+    ];
+    for (const command of commands) {
+      assert.deepEqual(await agent.call(command, []), { command, ok: true });
+    }
+    assert.deepEqual(harness.forChannel(ServiceChannels.ZCodeAgent).calls, commands);
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("未知通道与 denylist 通道在两侧分面都被拒（不注册/不代理）", async () => {
   const harness = createHarness();
   try {
@@ -293,6 +363,35 @@ test("未知 serviceScope 的 rpc.open 被拒：不建会话（后续 request �
       CONTEXT,
     );
     assert.deepEqual(harness.outbound.splice(0), [], "未 open 的流不得转发任何字节");
+  } finally {
+    harness.dispose();
+  }
+});
+
+// ── 02 §4：执行节点释放 relay 流必须逐流通知控制面 ──
+// 2026-10-13 V4r 真机：checkpoint quiesce 的 releaseAll 原先静默撕流，控制面流缓存仍按
+// epoch 复用死流，checkpoint 后所有 RPC 30s 超时（手动同步全超时、append uncertain/closed）。
+test("releaseAll 逐流回发 rpc.close；重复释放（连接已关闭）不抛错", () => {
+  const harness = createHarness();
+  try {
+    harness.open("client");
+    harness.open("control-plane");
+    harness.open("client");
+    // 清掉 open 期间 ChannelServer 的 Initialize 响应，只观察释放产生的帧。
+    harness.outbound.length = 0;
+    harness.relay.releaseAll("quiesce");
+    const closes = harness.outbound.filter((frame) => frame.type === "rpc.close");
+    assert.equal(closes.length, 3, "每条活跃流都必须收到 rpc.close");
+    for (const [index, frame] of closes.entries()) {
+      if (frame.type !== "rpc.close") continue;
+      assert.equal(frame.protocolVersion, 1);
+      assert.equal(frame.runId, RUN_ID);
+      assert.equal(frame.runGeneration, CONTEXT.runGeneration);
+      assert.equal(frame.connectionEpoch, CONTEXT.connectionEpoch);
+      assert.equal(frame.streamId, `stream-${index + 1}`, "close 帧必须指向对应流");
+    }
+    // 连接已关闭（流已释放）时再次 releaseAll 是幂等 no-op，不得抛错。
+    assert.doesNotThrow(() => harness.relay.releaseAll("quiesce-again"));
   } finally {
     harness.dispose();
   }

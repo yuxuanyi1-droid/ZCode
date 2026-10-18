@@ -192,6 +192,46 @@ test("控制面调用：rpc.open 带 serviceScope=control-plane，调用与响�
   assert.equal(relay.opens.length, 1, "同一 Run 复用同一流");
 });
 
+test("沙箱回发 rpc.close：作废流缓存，下一次调用重开新流（02 §4）", async () => {
+  const { channel, relay } = setup();
+  const call = () =>
+    channel.port.call({
+      runId: RUN_ID,
+      runGeneration: 1,
+      connectionEpoch: 1,
+      channel: ServiceChannels.SettingsSync,
+      method: "writeUserAgentsFile",
+      args: [{ content: "# AGENTS" }],
+    });
+
+  assert.equal((await call()).status, "ok");
+  assert.equal(relay.opens.length, 1);
+  const streamId = relay.opens[0]?.streamId ?? "";
+  // 沙箱 checkpoint quiesce 释放该流：控制面必须作废缓存，而不是继续用死流。
+  channel.handleClose({
+    protocolVersion: CLOUD_RPC_PROTOCOL_VERSION,
+    type: "rpc.close",
+    runId: RUN_ID,
+    runGeneration: 1,
+    connectionEpoch: 1,
+    streamId,
+  });
+  assert.equal((await call()).status, "ok");
+  assert.equal(relay.opens.length, 2, "沙箱释放后下一次调用必须重发 rpc.open");
+
+  // 旧代际 close 不得作废当前流（02 §2 不变量 3）。
+  channel.handleClose({
+    protocolVersion: CLOUD_RPC_PROTOCOL_VERSION,
+    type: "rpc.close",
+    runId: RUN_ID,
+    runGeneration: 1,
+    connectionEpoch: 0,
+    streamId,
+  });
+  assert.equal((await call()).status, "ok");
+  assert.equal(relay.opens.length, 2, "stale close 不得重开流");
+});
+
 test("门控：无连接 / 未 ready / 代际不符 ⇒ fail-closed，不发出帧", async () => {
   const noSession = setup({ ready: false });
   // 先移除 session 模拟"无连接"。

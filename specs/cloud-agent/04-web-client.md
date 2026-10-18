@@ -1,6 +1,6 @@
 # Spec 04 — Web 云客户端与 Desktop 模式边界
 
-状态：目标设计（2026-10-06 云端实现代码已整体回退）；端到端云功能待实现，按本 spec 组重新实施。
+状态：**已实现（2026-10-17 回写；验证状态见 [10 §10](./10-implementation-plan.md)）**。2026-10-06“云端实现代码已整体回退；端到端云功能待实现”为历史记录；当前 `feat/cloud-agent` 分支已落地本文的云客户端、交互与多端路径。
 父文档：[00-overview.md](./00-overview.md)。
 关联：[03-control-plane.md](./03-control-plane.md)、[07-connection-architecture.md](./07-connection-architecture.md)、[08-project-task-model.md](./08-project-task-model.md)、[09-github-integration.md](./09-github-integration.md)、[11-project-task-creation.md](./11-project-task-creation.md)。
 
@@ -89,7 +89,11 @@ ready 使用 Cloud task RPC facade → 当前 attachment → 沙箱原 zcode-ser
 
 原输入区的 `AttachmentRef` 在 ready attachment 内上传，持久输入冻结完整引用和 expectedRunGeneration；控制面存储、幂等 hash 与 sendText 投递不得丢弃这些字段。无沙箱草稿隐藏依赖真实运行时的附件能力，ready 后恢复原能力。
 
+**2026-10-17 实施回写（本轮附件 fail-closed）**：durable input 尚未承载附件引用（input record 与 runtime 准入不消费附件），因此**云模式本轮不提供附件入口**：`resolveCloudAttachmentGate` 恒返回 `enabled:false`、reason `durable-input-unsupported`、`uploadChannel:"none"`，composer 明确提示不可用，不出现“可上传但发送时静默丢弃”（`packages/ui/src/cloud/cloudAttachmentGate.ts:60-71`；`useComposerAttachments.ts:320-327` 在门控关闭时拒绝）。本地路径暂存在云模式同样恒不可用（浏览器无本地文件系统，且 `PromptAttachmentTransfer` 不在 attachment 白名单，见 `describeCloudLocalPathStaging`）。本段的未来指引保留：task-owned 上传、materialization 与附件引用随 durable input 下发落地后，再按本 spec 恢复入口，不在 UI 里先留“假可用”通道。
+
 原 Permission / AskUserQuestion / Plan 对话框沿用原组件，Cloud durable 决定保留 optionId/action 以及原 answer 的 freeText/content。决定使用同一 commandId 对账，202 只显示提交中；唯有 admitted 才按原对话框执行成功处理，未知结果不关闭、也不清用户回答。
+
+**2026-10-17 实施回写（审批走 durable 端口）**：云模式决定经三个 HTTP 端点（提交/取消/回执查询，[03 §6/§7.2](./03-control-plane.md)）持久化后再投递；UI 由 `useInteractionResolver` 选择 cloud port vs 本地 agent transport，`admitted` 成功、`accepted/delivering/uncertain` 提交中、失败走既有错误路径（`packages/ui/src/v4/useInteractionResolver.ts:50-84`）。服务端 `client` scope 拦截直发 `resolveInteraction`，UI 包装 `sendConversationCommandV4` 拦截 `createSession`/`sendText`；编辑/重试/反馈仍走 agent 通道（遗留 durable 化项，见 [15 §6](./15-remediation-implementation.md)）。
 
 持久输入/审批扩展保留未使用新增字段时的原幂等规范串；新字段加入比较，不能使旧记录的同键重试突然变为冲突。任务事实始终由控制面返回。
 
@@ -118,13 +122,13 @@ ready 使用 Cloud task RPC facade → 当前 attachment → 沙箱原 zcode-ser
 
 详情包含 Task 产品状态、Run 状态/provider/阶段、执行活动、input 投递结果、对话/工具/审批、代码变更/PR、停止/重开/归档。`Task.active` 不等于 attachment ready。
 
-| Task 状态   | 页面行为                    | 动作                                    |
-| ----------- | --------------------------- | --------------------------------------- |
-| `draft`     | composer，无沙箱成本        | 首输入；改 base/provider；归档          |
-| `active`    | 按 Run/活动呈现进度或工作区 | 补充 input；审批；状态门控后的停止/重开 |
-| `completed` | 结果、历史、产物            | 显式重新激活后按08重开，不隐式建run     |
-| `failed`    | 错误、已有产物、input 结果  | 显式重试/重开，控制面判断新 run         |
-| `archived`  | 只读                        | 按 08 恢复归档，不接受执行命令          |
+| Task 状态   | 页面行为                    | 动作                                                                              |
+| ----------- | --------------------------- | --------------------------------------------------------------------------------- |
+| `draft`     | composer，无沙箱成本        | 首输入；改 base/provider；归档                                                    |
+| `active`    | 按 Run/活动呈现进度或工作区 | 补充 input；审批；状态门控后的停止/重开；归档（服务端先停止运行环境，2026-10-18） |
+| `completed` | 结果、历史、产物            | 显式重新激活后按08重开，不隐式建run；归档                                         |
+| `failed`    | 错误、已有产物、input 结果  | 显式重试/重开，控制面判断新 run；归档                                             |
+| `archived`  | 只读                        | 按 08 恢复归档，不接受执行命令                                                    |
 
 | Run 状态       | 视图/能力                                                   | 门控                                                                                                |
 | -------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
@@ -147,6 +151,12 @@ stopRequested 是优先于 Run 状态的持久门控：收到受理后显示“�
 - 重开入口只对服务端 actions 投影含 `reopen` 的任务给出；resume 模式**按持久事实自动选择**（`latestCheckpoint.state === "saved"` → checkpoint，否则 restart-from-base）并向用户说明依据（08 §9 分支两侧显式声明），不提供与服务端事实冲突的二选一。
 - 归档入口统一走控制面独立端点 `POST /tasks/:id/archive`（useCloudTask → port.archiveTask）：Header「归档任务」菜单对云任务工作区分流到该端点（不得落本机 zcodeTaskService），侧栏任务行提供同路径入口；可用性按 actions 投影门控，服务端拒绝的错误信封必须以既有反馈组件（toast）呈现，不得吞掉。归档成功后任务退出侧栏活动列表（云模式无本地归档视图）。
 
+2026-10-18 修订（归档不再被活动 run 阻塞：入口可用性、禁用态与确认文案）：
+
+- **归档入口对任何非 archived 状态可用**：不再要求 actions 投影含 `archive` 才可点击，也不再点击前拉详情做准入预检。服务端对任何非 archived Task 都受理归档（有未终态 run 时先停止运行环境），因此「有活动 run → 预禁用 / 引导先停止」的旧门控整体删除——它会把服务端本可处理的请求误判成不可归档，并多一次详情请求。draft/completed/failed/active（含 ready/disconnected/draining/paused/provisioning run）一律显示入口；archived 不显示归档入口（只读 + 恢复）。
+- **确认文案必须提示丢失风险**：归档确认对话框明确「将停止运行环境，未保存的更改可能丢失」，并在同一段说明历史仍可读、恢复前不接受命令。文案不得暗示归档会先保存或等待保存——归档驱动的停止不发起 checkpoint。
+- **归档响应即归档完成**：服务端在终止未确认时也返回 archived 任务详情（run 可能仍为 draining，由 stop/compensation sweep 收口）；UI 按响应把任务移入已归档分区，run 显示为停止中/停止，并按 `activeRun.dataAtRisk` 如实呈现「可能未保存内容」风险，不宣称工作已全部保住。
+
 2026-10-08 修订（无头巡检驱动：云壳层交互缺陷）：
 
 - **drag region 桌面限定**：`[app-region:drag]` 只在桌面端（Electron 窗口）渲染；侧栏顶部占位与 WorkspaceHeader 的 drag 容器在 Web/云 Web 保留布局高度但不渲染 drag region（浏览器中它只是悬在顶栏交互区之上的实体层，命中测试会吞掉按钮点击）。云入口的顶栏「New task」按钮始终可见（窄视口侧栏会被自动收起，顶栏按钮不能沿用「侧栏可见即隐藏」的桌面互斥规则）。
@@ -154,7 +164,7 @@ stopRequested 是优先于 Run 状态的持久门控：收到受理后显示“�
 - **archived 只读呈现**：已归档任务详情在工作区主区呈现只读横幅（说明已归档 + 恢复入口），composer 按 `useCloudTaskWorkspaceStatus` 置为只读——不再出现「假可写、Send 静默无请求」。云任务 Header 标题回落控制面投影（云任务不在本机 CLI 任务索引，本地 meta 恒为空）。
 - **云入口移动端抽屉**：窄视口（<md）侧栏被 conversation 自动收起后，提供汉堡触发器 + 遮罩抽屉（复用同一份侧栏 DOM，不复制第二份组件与订阅），覆盖任务列表/新建入口；只作用于云入口，桌面与本地 Web 布局语义不变。
 - **主路由任务不存在**：`?task=<合法 UUID>` 但控制面返回 `not_found` 时，与非法 task id 一致地渲染整页错误屏（reason=`task-not-found`，恢复动作 open-home/reload），不静默回落欢迎页；错误屏同时卸载工作区树，收敛多个订阅方各自重发的 404 详情请求。判定按结构化错误码（控制器新增 `taskDetailErrorCode` 投影），不解析文案。
-- **错误文案用户可读**：任务动作（归档/恢复）失败 toast 的 reason 经 shared 错误码目录映射成 i18n 文案（`cloud.errors.*`），未映射码回落原始码展示；侧栏归档入口与 Header 菜单对齐按 actions 投影预禁用（有缓存详情而投影不含 `archive` 时禁用并说明原因）；入口错误屏文案去掉内部语义（如「链接不会退化成…」），诊断行标注「诊断信息」前缀。
+- **错误文案用户可读**：任务动作（归档/恢复）失败 toast 的 reason 经 shared 错误码目录映射成 i18n 文案（`cloud.errors.*`），未映射码回落原始码展示；侧栏归档入口与 Header 菜单对任何非 archived 任务保持一致可用（2026-10-18 修订：不再按 actions 投影或缓存详情预禁用——服务端对活动 run 也受理归档并先停止运行环境）；入口错误屏文案去掉内部语义（如「链接不会退化成…」），诊断行标注「诊断信息」前缀。
 
 2026-10-08 修订（无头复检驱动：云壳层收尾缺陷，第三批）：
 
@@ -185,6 +195,24 @@ stopRequested 是优先于 Run 状态的持久门控：收到受理后显示“�
 - **run watch 覆盖 paused append**：paused append 202 后与首发同款启动有界 run 观察，且 `paused` 从「停止条件」改为「继续条件」——自驱 resume/预算耗尽收口由服务端异步推进，客户端靠轮询把 ready（恢复绑定）或终态（reopenable 投影）翻回详情投影，60s 上限兜底。
 - **订阅错误标题归一**：`… has no ready run attachment` 这类云执行域不可用失败不是「与代理的连接已断开」——`classifySubscribeError` 新增 `cloud-unavailable` 分类，标题呈现「运行环境暂不可用，稍后会自动重试；也可以点击重连」，原始串仍收进技术细节区；真正断连场景（generic）沿用重连文案。
 
+2026-10-18 修订（用户实测缺陷：resume 窗口 run=ready 后过早绑定会话，整面连接错误）：
+
+- **resume 窗口按 attachment 连接事实延迟绑定（P1）**：paused→resume 时控制面在 `driver.resume` 确认后即把 run CAS 为 `ready`，但 supervisor bridge 往往尚未重连（实测 17s）。UI 不得只凭 `activeRun.status === "ready"` 绑定 runtime 会话，必须同时要求详情投影 `attachmentReady === true`；run 已 ready 而 attachment 未回连时 pane 不绑定会话，保持历史/草稿视图并展示「正在恢复运行环境」。
+- **禁止全屏连接错误**：该窗口内不得订阅 `sess_…`，因此不得出现 `cloud task … has no ready run attachment` 的全屏错误面板；attachment ready 后详情刷新触发自动绑定与回放，历史与草稿全程保留。
+- **字段语义**：`attachmentReady` 是瞬态连接事实（见 03 §6），不是 run 状态；UI 只读它做绑定门控，不得据此改写/本地推进 run 状态，也不得把它当持久事实缓存跨任务复用。
+
+2026-10-18 修订（云 Agent 复审修复批次 C）：
+
+- **首条消息发送期间禁止停止**：只有详情投影存在当前 run 且处于 `ready`（且 `attachmentReady !== false`）、`paused`、`draining` 时 composer 停止才可触发控制面 `POST /tasks/:id/stop`；`provisioning`、无 run、`ready + attachmentReady === false`（首条消息尚未进入 runtime / 恢复中）一律置灰。原因：首条输入窗口的停止会直接终止正在进行的 create/run。产品决议是不提供取消首条输入的入口；本地/SSH 停止路径不受影响。判定收敛为 `resolveCloudTaskStopAvailability` 纯函数并由 `useCloudTaskStop.canStop` 暴露，`SessionPane.handleStop` 云分支在不可停时记录 lifecycle info 后直接返回、不发请求。
+- **disconnected 可见并自动恢复**：详情投影 `run.status === "disconnected"` 不再 hidden，工作区主区横幅呈现「连接已断开，正在自动重连」（旋转图标、无重开入口）；有界 run 观察（2s/60s）对 disconnected 继续轮询，bridge 回连、详情翻回 ready 后自动重新绑定，pane 在断开窗口保持历史/草稿视图而不是全屏错误。
+- **顶部云图标连接状态点**：工作区 Header 的云图标旁以 `size-2` 圆点呈现 `cloudTask.detail` 的连接状态（ready 绿、provisioning/resuming 琥珀脉冲、paused 灰、draining 蓝、disconnected/failed 红、无 run/终态灰空心；draft/archived 不渲染），并同时提供 `title`/`aria-label` 文本，不只靠颜色；数据复用既有详情投影，不新增请求。
+
+2026-10-18 修订（用户实测缺陷：进入 paused 任务或输入时时间线跳到顶部）：
+
+- **跨 run 历史存在时不得按空草稿居中（P1）**：paused / 详情投影未落定的云任务不绑定实时会话，pane 按草稿态渲染，但跨 run 只读历史位于时间线 `headerSlot` 而时间线自身 `renderUnits` 为 0。此时 `centerEmptyStateWithDock` 仍为 true，若继续判定「空态居中」，`scrollToBottom` 会写 `scrollTop=0`（居中语义），表现为进入会话停在历史顶部、手动拉到底后任意输入又跳回顶部。规则：居中空态只在**真正空的时间线**成立——开启居中、`renderUnits` 为 0 且**没有 headerSlot**；有历史时按普通内容流布局，初始落点与吸底都指向滚动容器底部（composer 可见）。
+- **草稿态空行集必须稳定**：`timelineSnapshot` 为 null（paused / 未绑定）时 pane 不得每次渲染新建 `[]` 传给时间线——吸底 effect 以 `rows` 为依赖，composer 输入触发重渲染会重跑贴底并再次写入落点。空行集使用模块级常量，输入不产生任何 `scrollTop` 写入。
+- **验收**：paused 任务（有跨 run 历史）进入后位于底部且 composer 可见；在 composer 输入任意字符时间线位置不变；真正空草稿（无历史、无行）仍居中并随 composer 高度布局。
+
 2026-10-09 修订（用户实测复发：欢迎/迁移向导每次刷新必弹且关闭不持久）：首启「欢迎使用 ZCode」迁移向导（`OnboardingDialog`，挂载于 Root 的 `OccupationOnboarding` children 内）的 first-run 判定走 `settings-sync` 频道（`getFirstRunPromptState`/`markFirstRunPromptHandled`），而该频道不在 03 §7.1 云 host 暴露面（扫描/导入本机执行域配置，按 allowlist 边界不外露）。云模式下状态读取被未知频道超时拒绝时，原实现按 fail-open 弹出向导且关闭写回同样失败，形成「刷新必弹、关闭无效」死循环（server.log 实证 `Unknown channel: settings-sync`）。行为统一到 first-run 引导同一套纪律（§first-run 引导 P2 修订）：
 
 - **fail-closed**：首启提示状态读取失败（频道不存在/RPC 错误）时不得自动弹出向导——读不到的键同样写不进，fail-open 必然死循环；仅记录 warn 保持关闭，设置页与引导链的显式打开入口不受影响。firstRun 意图的 detect 失败同理不自动弹（manual 意图保留打开以呈现错误）。
@@ -200,6 +228,11 @@ stopRequested 是优先于 Run 状态的持久门控：收到受理后显示“�
 - **Git 面板取数门控认 attachment，不认 remote session（P1）**：服务路由本身无缺陷——`gitService` 已按 W8 绑定表经当前 Run attachment 通道代理（allowlist 含 Git/GitCheckpoint），缺陷在数据面开关：`useGitRepository` 沿用的 `shouldEnableWorkspaceRpc` 要求「remote 目标必须已注册 remote session」，而云任务工作区（identity = `cloud-task:<taskId>`）没有、也不会有 remote session 登记，于是面板永远停在空摘要态（`isGitAvailable=false`）、从未发起 Git 查询，ready run 也呈现 install 文案。规则：云身份的 Git 面板 RPC 开关只由 `selectCloudAttachmentForTask` 的真实结果决定（attachment ready 且归属该任务 → 取数；判定收口 `resolveCloudGitPaneScope` 纯函数，node:test 覆盖）；非云身份（本地 / SSH / 已配对远控）沿用既有判据，语义不变。
 - **paused/unavailable 呈现环境引导，不是 install 文案（P2）**：`paused`（attachment 已 detach）等无 attachment 场景下 Git 不可达是环境事实，面板空态按环境呈现——paused 复用状态横幅同款文案语义（「运行环境已暂停」+「发送消息即可恢复运行」，恢复后 Git 随 attachment 重开自动取数），其余无 attachment 场景（provisioning / 终态 / 非选中任务）呈现「运行环境当前不可用」中性引导；判定依据是 attachment 真实状态 + 详情投影 `activeRun.status`（与状态横幅同源），不得呈现「请先安装 Git」。「Git is not available / install」文案只留给环境 ready 后的真实结论（本机无 Git 等）。
 
+2026-10-17 修订（用户实测缺陷：云任务视图切换模型后选择器仍显示原模型，运行已结束的任务同样复现）：
+
+- **云工作区不进入桌面 custom provider 恢复通路（P1）**：workspace configOptions 水合失败（`configOptionsError`）时，composer 对 apiKey access 的 custom provider 选择会进入桌面本地恢复链（`restartWorkspaceProcess` + prepare），该链依赖本机 `zcode-task` 频道——云模式不存在该频道，恢复必然失败；恢复分支失败后直接 return，正常 `onSelectModel` 从未调用，用户点击被静默吞掉，选择器停留原模型。云工作区一律不提供恢复 handler（SessionPane 按应用级 `useCloudWorkspaceContext` 非 null 门控——云 Web 任务视图 pane 的 workspaceIdentity 实测可为 null，identity 判定不可靠），configOptions 错误也不得劫持模型点击，点击直接走 `onSelectModel` 草稿意图；判定收口 `shouldAttemptCustomModelRecovery` 纯函数（node:test 覆盖）。
+- **恢复失败不得吞掉显式模型选择**：任何进入恢复通路的选择，Promise 失败时在 warn 日志后按已解码值走与正常路径相同的 `onSelectModel` 派发；恢复成功路径（内部提交草稿意图）不变。
+
 ### 3.4 输入层次与多端
 
 | 层次                          | 所有者                     | 恢复/呈现                                      |
@@ -214,7 +247,7 @@ stopRequested 是优先于 Run 状态的持久门控：收到受理后显示“�
 
 控制面 `InputReceipt` 使用03的 `accepted/delivering/admitted/rejected/uncertain/cancelled`；投递错误记录在lastError，不另造 `deliveryStatus=failed`。202只代表持久接收，不伪造CLI CommandAck accepted。input以 `{taskId, commandId}`查询，不另设客户端inputId寻址。
 
-取消已提交input走服务端状态转移，不能只删除UI消息。新run不自动重放旧run的uncertain input。cloud receipt、commandId和runtime sessionId分别表达收据、幂等命令与会话。两端审批由runtime对interaction revision原子决定，另一端展示已处理结果。
+取消已提交input走服务端状态转移，不能只删除UI消息。**首条输入窗口（provisioning / attachment 未就绪）不提供取消入口：停止动作由 `useCloudTaskStop.canStop` 置灰，见 §3.3 2026-10-18 修订。** 新run不自动重放旧run的uncertain input。cloud receipt、commandId和runtime sessionId分别表达收据、幂等命令与会话。两端审批由runtime对interaction revision原子决定，另一端展示已处理结果。
 
 首input的HTTP和共享会话UI的 `sendConversationCommandV4` 后续input都调用同一durable application port；ready后共享composer不能绕控制面直发CLI。cloud facade新增receipt投影，保留runtime ACK原义。ACK不确定先 `queryConversationCommandsV4` + receipt对账，unknown才在同run重投同commandId。
 
@@ -224,7 +257,7 @@ Cloud 使用显式 task-owned scope（principal + controlPlaneOrigin + taskId）
 
 submit attempt 在 HTTP 前持久冻结完整请求/commandId、正文版本和阶段；本地写入失败阻止 Cloud 提交并解释恢复限制。刷新后先查询原 key，网络失败保持 unknown；可以继续编辑下一条正文，但不能将未知原提交当成没发。获得明确 receipt 后按版本清理旧正文。登出切主体清投影，attempt 按原主体隔离并仅在重新认证后恢复，不跨账号投递，也不把正文写入日志。
 
-首版推荐正文/模型/基础分支/provider。Cloud draft 禁 runtime 预热，文件/Git/终端及依赖 session 的附件/目录能力未实现时从 hook 和事件入口门控，包含粘贴/drop。现 `useComposerAttachments` 的 waitingSession 不能通过虚构 sessionId 解决。若首发支持附件，先新增 task-owned 控制面上传、materialization及artifact ref授权，不为此提前创建空session。未 ready 时不传伪 workspacePath 诱发 IO；原组件需按 capability 注入或抽取无 runtime 的编辑器控制边界。
+首版推荐正文/模型/基础分支/provider。Cloud draft 禁 runtime 预热，文件/Git/终端及依赖 session 的附件/目录能力未实现时从 hook 和事件入口门控，包含粘贴/drop。现 `useComposerAttachments` 的 waitingSession 不能通过虚构 sessionId 解决。**2026-10-17 本轮结论：附件入口在云模式恒关闭（fail-closed，理由 = durable input 尚不承载附件引用）；门控是唯一判定点 `resolveCloudAttachmentGate`，组件不各自判断 task-owned 上传/session/执行域。** 未来指引保留：若首发支持附件，先新增 task-owned 控制面上传、materialization 及 artifact ref 授权，并让 durable input 持久冻结附件引用，不为此提前创建空 session。未 ready 时不传伪 workspacePath 诱发 IO；原组件需按 capability 注入或抽取无 runtime 的编辑器控制边界。
 
 ### 3.5 SSH 项目（2026-10-06 决议移除）
 

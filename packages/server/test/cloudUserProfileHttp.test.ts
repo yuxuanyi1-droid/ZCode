@@ -11,11 +11,17 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { Hono } from "hono";
+import { createCredentialCipherProvider } from "@zcode/services/node";
 import { CLOUD_PROFILE_UPLOAD_BODY_MAX_BYTES } from "@zcode/shared";
 import { registerCloudHttpRoutes } from "../src/cloud/adapters/http/routes.js";
+import {
+  CLOUD_REQUEST_BODY_MAX_BYTES,
+  isCloudProfileEntryUploadPath,
+  registerCloudRoutes,
+} from "../src/cloud/adapters/http/registerCloudRoutes.js";
 import type { CloudHttpRouteDeps } from "../src/cloud/adapters/http/support.js";
 import type { CloudBridgeChannel } from "../src/cloud/adapters/ws/bridgeChannel.js";
-import { openTestStorage, removeTestRoot } from "./cloudStorageHarness.js";
+import { openTestStorage, removeTestRoot, TEST_NOW } from "./cloudStorageHarness.js";
 import type { TestStorageHandle } from "./cloudStorageHarness.js";
 import { buildTestPlane, attachReadySession } from "./cloudCoreFakes.js";
 import type { TestPlane } from "./cloudCoreFakes.js";
@@ -31,6 +37,7 @@ function appFor(context: TestPlane): Hono {
     router: context.plane.router,
     bridge: bridgeStub,
     principalId: PRINCIPAL_ID,
+    publicOrigin: "https://cloud.example.test",
     githubConfigured: true,
   };
   registerCloudHttpRoutes(app, deps);
@@ -159,18 +166,56 @@ test("形状校验：非法类别/路径正文不一致/非 gzip 归档 → 400 
   });
 });
 
+test("agents-md 单例：user-agents 成功、其它 entryId → 400 invalid_entry（2026-10-17 收口）", async () => {
+  await withStorage(async (handle) => {
+    const app = appFor(buildTestPlane({ userProfile: handle.storage.userProfile }));
+
+    const allowed = await putEntry(app, "agents-md", "user-agents", {
+      category: "agents-md",
+      content: "# 指令",
+    });
+    assert.equal(allowed.status, 200);
+    assert.equal((await jsonOf<{ profileVersion: number }>(allowed)).profileVersion, 2);
+
+    // 第二条 agents-md 会与第一条争抢 `~/.zcode/AGENTS.md`：必须在入口 400，不推迟到同步期。
+    const denied = await putEntry(app, "agents-md", "other.md", {
+      category: "agents-md",
+      content: "# 第二条",
+    });
+    assert.equal(denied.status, 400);
+    const deniedBody = await jsonOf<{
+      code: string;
+      message: string;
+      details?: Record<string, string>;
+    }>(denied);
+    assert.equal(deniedBody.code, "invalid_entry");
+    assert.equal(deniedBody.message, "agents-md-entry-id-must-be-user-agents");
+    assert.equal(deniedBody.details?.category, "agents-md");
+    assert.equal(deniedBody.details?.entryId, "other.md");
+
+    // 非法条目未入库：快照仍只有合法单例一条。
+    const snapshot = await jsonOf<{ entries: { entryId: string }[] }>(
+      await app.request("/api/cloud/user-profile"),
+    );
+    assert.deepEqual(
+      snapshot.entries.map((entry) => entry.entryId),
+      ["user-agents"],
+    );
+  });
+});
+
 test("超限：单条超类别上限 → 413；总量/条目数 → 409（14 §9.2①）", async () => {
   await withStorage(async (handle) => {
     const app = appFor(buildTestPlane({ userProfile: handle.storage.userProfile }));
 
-    const oversize = await putEntry(app, "agents-md", "big", {
+    const oversize = await putEntry(app, "agents-md", "user-agents", {
       category: "agents-md",
       content: "x".repeat(256 * 1024 + 1),
     });
     assert.equal(oversize.status, 413, "单条超限即 413（不截断）");
     const oversizeBody = await jsonOf<{ code: string; details?: Record<string, string> }>(oversize);
     assert.equal(oversizeBody.code, "payload_too_large");
-    assert.equal(oversizeBody.details?.entryId, "big");
+    assert.equal(oversizeBody.details?.entryId, "user-agents");
   });
 });
 
@@ -265,7 +310,10 @@ test("PATCH 条目开关：值变化递增版本、重复提交不递增、404 �
     );
     const version3Entries = await store.readVersionEntries(3);
     assert.equal(version3Entries?.[0]?.enabled, false);
-    assert.equal(version3Entries?.[0]?.content, JSON.stringify(config), "开关不动正文行");
+    const storedMcp = version3Entries?.[0]?.content ?? "";
+    // R4（14 §5）：mcp 行是 `enc:v1:` 密文；开关只动 manifest，不搬/不改写正文行。
+    assert.match(storedMcp, /^enc:v1:/u, "mcp 正文以密文落库");
+    assert.ok(!storedMcp.includes("secret-token"), "落库正文不含 token 明文");
 
     // 开与关都递增；键不存在 → 404（PATCH 不是幂等无操作，没有可翻的开关）。
     const on = await jsonOf<{ profileVersion: number }>(
@@ -390,6 +438,118 @@ test("GET 单条目回显：返回元数据 + 正文，键不存在 404（14 §9
     const unwired = appFor(buildTestPlane({ userProfile: null }));
     const unwiredRead = await unwired.request("/api/cloud/user-profile/entries/mcp/primary");
     assert.equal(unwiredRead.status, 503);
+  });
+});
+
+test("R4 mcp 凭据加密：落库密文、回显解密、重复 PUT 幂等、损坏密文与旧明文语义（14 §5）", async () => {
+  await withStorage(async (handle) => {
+    const cipher = createCredentialCipherProvider({
+      env: { ZCODE_CREDENTIAL_SECRET: "profile-r4-test-secret" },
+    });
+    const store = handle.storage.userProfile;
+    const app = appFor(buildTestPlane({ userProfile: store, credentialCipher: cipher }));
+    const config = {
+      command: "npx",
+      args: ["-y", "server"],
+      env: { TOKEN: "secret-token" },
+      headers: { Authorization: "Bearer secret-token" },
+    };
+    const jsonText = JSON.stringify(config);
+
+    // 写入：响应元数据仍按**明文**派生 sha256/bytes。
+    const put = await jsonOf<{ profileVersion: number; entry: { sha256: string; bytes: number } }>(
+      await putEntry(app, "mcp", "primary", { category: "mcp", config }),
+    );
+    assert.equal(put.profileVersion, 2);
+    assert.equal(put.entry.sha256, createHash("sha256").update(jsonText).digest("hex"));
+    assert.equal(put.entry.bytes, jsonText.length);
+
+    // 落库行：`enc:v1:` 密文，且不含 token/headers 明文。
+    const { openStorageDatabase, closeStorageDatabase } =
+      await import("../src/cloud/adapters/storage/sqlite/database.js");
+    const context = openStorageDatabase({ path: handle.databasePath });
+    let storedContent = "";
+    try {
+      const row = context.db
+        .prepare(
+          "SELECT content FROM profile_entries WHERE category = 'mcp' AND entry_id = 'primary'",
+        )
+        .get() as { content?: unknown } | undefined;
+      storedContent = String(row?.content ?? "");
+    } finally {
+      closeStorageDatabase(context);
+    }
+    assert.match(storedContent, /^enc:v1:/u, "mcp 正文必须加密落库（14 §5）");
+    assert.ok(!storedContent.includes("secret-token"), "落库正文不得含 token 明文");
+    assert.ok(!storedContent.includes("Authorization"), "落库正文不得含 headers 明文");
+
+    // 同一明文重复 PUT：sha/版本不变，密文行不被重写（随机 IV 不参与幂等判定）。
+    const repeated = await jsonOf<{ profileVersion: number; entry: { sha256: string } }>(
+      await putEntry(app, "mcp", "primary", { category: "mcp", config }),
+    );
+    assert.equal(repeated.profileVersion, 2, "同一明文不产生新版本（sha 按明文派生）");
+    assert.equal(repeated.entry.sha256, put.entry.sha256);
+    assert.equal(
+      (await store.readVersionEntries(2))?.[0]?.content,
+      storedContent,
+      "幂等提交不重写密文行",
+    );
+
+    // GET 回显：解密后与上传正文逐字段一致。
+    const read = await jsonOf<{ payload: { config: unknown } }>(
+      await app.request("/api/cloud/user-profile/entries/mcp/primary"),
+    );
+    assert.deepEqual(read.payload.config, config, "回显正文是明文（14 §9.4①）");
+
+    // 旧明文行（R4 之前写入）：decrypt 无前缀原样返回，兼容读。
+    const legacyText = JSON.stringify({ command: "legacy" });
+    const legacy = await store.upsertEntry({
+      category: "mcp",
+      entryId: "legacy",
+      enabled: true,
+      contentKind: "mcp-config",
+      content: legacyText,
+      now: TEST_NOW,
+    });
+    assert.equal(legacy.status, "ok");
+    if (legacy.status === "ok") {
+      assert.equal(legacy.entry.sha256, createHash("sha256").update(legacyText).digest("hex"));
+    }
+    const legacyRead = await jsonOf<{ payload: { config: unknown } }>(
+      await app.request("/api/cloud/user-profile/entries/mcp/legacy"),
+    );
+    assert.deepEqual(legacyRead.payload.config, { command: "legacy" });
+
+    // 损坏密文 / 密钥不匹配：fail-closed（400 invalid_entry），响应不回半份或密文。
+    const otherCipher = createCredentialCipherProvider({
+      env: { ZCODE_CREDENTIAL_SECRET: "profile-r4-wrong-secret" },
+    });
+    const corruptIndex = "enc:v1:".length + 4;
+    const corruptSource = cipher.encrypt(JSON.stringify({ command: "broken" }));
+    const corrupted = `${corruptSource.slice(0, corruptIndex)}${
+      corruptSource[corruptIndex] === "A" ? "B" : "A"
+    }${corruptSource.slice(corruptIndex + 1)}`;
+    const brokenPayloads: [string, string][] = [
+      ["corrupt", corrupted],
+      ["mismatch", otherCipher.encrypt(JSON.stringify({ command: "mismatch" }))],
+    ];
+    for (const [entryId, content] of brokenPayloads) {
+      const upserted = await store.upsertEntry({
+        category: "mcp",
+        entryId,
+        enabled: true,
+        contentKind: "mcp-config",
+        content,
+        contentFacts: { sha256: "a".repeat(64), bytes: 1 },
+        now: TEST_NOW,
+      });
+      assert.equal(upserted.status, "ok");
+      const broken = await app.request(`/api/cloud/user-profile/entries/mcp/${entryId}`);
+      assert.equal(broken.status, 400, `${entryId}: 密文不可解必须结构化失败`);
+      const brokenText = await broken.text();
+      assert.ok(brokenText.includes("profile-entry-unreadable"));
+      assert.ok(!brokenText.includes(content), `${entryId}: 错误响应不得回显密文`);
+    }
   });
 });
 
@@ -570,4 +730,59 @@ test("手动同步端点：连接态/终态/stop 前置 409 not_ready，连接�
     );
     assert.equal(missing.status, 404);
   });
+});
+
+test("云请求体 2MiB 上限：超限 413 payload_too_large，profile 条目 PUT 走 80MiB 例外", async () => {
+  // 例外路径的纯判定：只有 PUT + 恰好两段条目标识符才跳过全局中间件。
+  assert.equal(
+    isCloudProfileEntryUploadPath("PUT", "/api/cloud/user-profile/entries/mcp/primary"),
+    true,
+  );
+  assert.equal(
+    isCloudProfileEntryUploadPath("PUT", "/api/cloud/user-profile/entries/skills/foo"),
+    true,
+  );
+  assert.equal(
+    isCloudProfileEntryUploadPath("POST", "/api/cloud/user-profile/entries/mcp/primary"),
+    false,
+  );
+  assert.equal(isCloudProfileEntryUploadPath("PUT", "/api/cloud/user-profile/entries/mcp"), false);
+  assert.equal(
+    isCloudProfileEntryUploadPath("PUT", "/api/cloud/user-profile/entries/mcp/a/b"),
+    false,
+  );
+  assert.equal(isCloudProfileEntryUploadPath("PUT", "/api/cloud/tasks/x"), false);
+
+  // 真实中间件：Hono 直调，超大 JSON body 在进入路由前被拒，返回既有错误信封。
+  const context = buildTestPlane();
+  const app = new Hono();
+  registerCloudRoutes(app, {
+    plane: context.plane,
+    router: context.plane.router,
+    bridge: bridgeStub,
+    principalId: PRINCIPAL_ID,
+    publicOrigin: "https://cloud.example.test",
+    githubConfigured: true,
+  });
+  const oversized = JSON.stringify({ prompt: "x".repeat(CLOUD_REQUEST_BODY_MAX_BYTES) });
+  const rejected = await app.request("/api/cloud/tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: oversized,
+  });
+  assert.equal(rejected.status, 413);
+  const envelope = await jsonOf<{
+    code: string;
+    message: string;
+    retryable: boolean;
+    traceId: string;
+  }>(rejected);
+  assert.equal(envelope.code, "payload_too_large");
+  assert.equal(envelope.message, "cloud-request-body-too-large");
+  assert.equal(envelope.retryable, false);
+  assert.match(envelope.traceId, /^cloud-/);
+
+  // 未超限的正常请求不受影响（空体动作端点照常进入路由；此处仅证明中间件放行）。
+  const allowed = await app.request("/api/cloud/capabilities");
+  assert.equal(allowed.status, 200);
 });

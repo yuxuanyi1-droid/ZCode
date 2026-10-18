@@ -201,6 +201,42 @@ function canReleasePendingScrollMemoryRestore(
   return rowCount > 0 && !hasOlderRows && pendingRestore.rowWindowKey !== rowWindowKey;
 }
 
+/**
+ * 「空态与 composer 整体居中」是否成立。
+ *
+ * 只允许真正空的时间线：宿主开启居中（草稿态）、没有渲染单元，且没有 headerSlot。
+ * 云任务未绑定会话时 pane 仍按草稿态渲染居中的问候语，但跨 run 历史在 headerSlot 里；
+ * 若把「有 header 但无行」也当作空态，scrollToBottom 会写 scrollTop=0（居中语义），
+ * 用户看到的就是进会话在顶部、输入又跳回顶部。
+ */
+export function shouldCenterEmptyStateWithDock(input: {
+  centerEmptyStateWithDock: boolean;
+  renderUnitCount: number;
+  hasHeaderSlot: boolean;
+}): boolean {
+  return input.centerEmptyStateWithDock && input.renderUnitCount === 0 && !input.hasHeaderSlot;
+}
+
+/**
+ * sessionKey 切换后，目标会话的首批行到达时是否应主动贴底。
+ *
+ * sessionKey effect 在 rows 尚未到达时会先跑一次 scrollToBottom；若此时模板判定为空布局
+ * （responsiveCenteredEmptyLayout），写入的是 scrollTop=0，且下一帧的校正 rAF 仍闭包着
+ * 空布局的 scrollToBottom，可能在内容已渲染后再次写 0。因此需要记住“切换后的首批行”
+ * 这一时刻显式收口：只有滚动权仍属于 follow（用户未上滚、scroll memory 也未恢复离底
+ * 位置）时才贴底；离底恢复的 following=false 必须保留用户的阅读位置。
+ */
+export function shouldStickToBottomOnSessionRowsArrived(input: {
+  previousSessionKey: string;
+  currentSessionKey: string;
+  rowCount: number;
+  following: boolean;
+}): boolean {
+  return (
+    input.previousSessionKey !== input.currentSessionKey && input.rowCount > 0 && input.following
+  );
+}
+
 interface ConversationScrollMemoryScopeCaptureProps {
   scopeKey: string | null;
   capture: (previousKey: string | null) => ConversationScrollMemoryScopeSnapshot | null;
@@ -438,7 +474,17 @@ function ConversationTimelineImpl({
   );
   const turnNavigatorQueryRowIdsRef = useRef(turnNavigatorQueryRowIds);
   turnNavigatorQueryRowIdsRef.current = turnNavigatorQueryRowIds;
-  const centeredEmptyLayout = centerEmptyStateWithDock && renderUnits.length === 0;
+  // 修复依据（2026-10-18，云任务滚动复位实测）：居中空态只属于「时间线真的空」。
+  // 云任务未绑定会话（paused / 详情投影未落定）时 pane 仍传 centerEmptyStateWithDock，
+  // 但跨 run 历史放在 headerSlot 里——此时 renderUnits 为 0、内容却非空。若继续按空态
+  // 处理，scrollToBottom 会写 scrollTop=0（本意是让空态居中），表现为「一进会话就在
+  // 顶部、输入任何字符又跳回顶部」。headerSlot 有内容时按普通内容流布局，滚动语义与
+  // 真实会话一致（吸底，不会把历史块当成空草稿）。
+  const centeredEmptyLayout = shouldCenterEmptyStateWithDock({
+    centerEmptyStateWithDock,
+    renderUnitCount: renderUnits.length,
+    hasHeaderSlot,
+  });
   const responsiveCenteredEmptyLayout = centeredEmptyLayout && !compactEmptyStateWithDock;
   // 高频值经 ref 供稳定回调读取（不进依赖数组）。
   const rowsRef = useRef(rows);
@@ -482,6 +528,11 @@ function ConversationTimelineImpl({
     state: ChatSessionScrollMemoryState;
   } | null>(null);
   const pendingDetachedScrollRestoreRef = useRef<PendingScrollMemoryRestore | null>(null);
+  // 上一次 commit 的 sessionKey。切换后 rows 往往晚于 sessionKey 到达，
+  // 这里保留跨 commit 的待收口信号，等目标会话首批行出现再决定是否贴底。
+  const previousSessionKeyRef = useRef(sessionKey);
+  const pendingSessionRowsStickRef = useRef<{ previousSessionKey: string } | null>(null);
+  const sessionRowsStickFrameRef = useRef<number | null>(null);
   // 组件「已账目」的 scrollTop——scroll 事件读取值或组件自身
   // 程序化写入（贴底/prepend 平移）后的回读值。贴底 effect 拿它对账未观察滚动
   // （滚动已发生、scroll 事件未派发），防止过期 following=true 把用户/测试的上滚拽回底部。
@@ -1660,6 +1711,59 @@ function ConversationTimelineImpl({
       syncTurnNavigatorViewport(scrollRef.current);
     }
   }, [pendingGuideKey, rowCount, syncTurnNavigatorViewport, totalSize]);
+
+  // 新 session 首批行收取口：sessionKey 切换时 rows 往往尚未到达，session effect 的空布局
+  // scrollToBottom 会写入 scrollTop=0，其下一帧校正 rAF 也可能在内容渲染后再次写 0。
+  // 这里等目标 session 的首批行出现，只要滚动权仍在 follow（用户未上滚、scroll memory
+  // 未恢复离底位置）就显式贴底，并在下一帧补一次以覆盖虚拟列表首帧测高；following=false
+  // （离底恢复）直接放弃本次收口，绝不抢回阅读位置。
+  useLayoutEffect(() => {
+    const previousSessionKey = previousSessionKeyRef.current;
+    if (previousSessionKey !== sessionKey) {
+      previousSessionKeyRef.current = sessionKey;
+      // 目标会话的 rows 可能晚于 sessionKey 到达：保留切换事实，等 rowCount>0 再消费。
+      pendingSessionRowsStickRef.current = { previousSessionKey };
+      if (sessionRowsStickFrameRef.current !== null) {
+        window.cancelAnimationFrame(sessionRowsStickFrameRef.current);
+        sessionRowsStickFrameRef.current = null;
+      }
+    }
+
+    const pending = pendingSessionRowsStickRef.current;
+    if (!pending || rowCount === 0) return;
+
+    // 首批行已到达，本次切换只收口一次；即便不贴底也不能在后续 commit 再抢滚动权。
+    pendingSessionRowsStickRef.current = null;
+    if (
+      !shouldStickToBottomOnSessionRowsArrived({
+        previousSessionKey: pending.previousSessionKey,
+        currentSessionKey: sessionKey,
+        rowCount,
+        following: followingRef.current,
+      })
+    ) {
+      return;
+    }
+
+    scrollToBottom();
+    sessionRowsStickFrameRef.current = window.requestAnimationFrame(() => {
+      sessionRowsStickFrameRef.current = null;
+      // 帧间用户可能已上滚或切走了 session；只在容器仍在且仍跟随时补第二次。
+      if (!scrollRef.current || !followingRef.current) return;
+      scrollToBottom();
+    });
+  }, [rowCount, scrollToBottom, sessionKey]);
+
+  // 卸载后 rAF 不得再触碰 DOM；切会话时上面的分支会主动取消待执行的补帧。
+  useEffect(
+    () => () => {
+      if (sessionRowsStickFrameRef.current !== null) {
+        window.cancelAnimationFrame(sessionRowsStickFrameRef.current);
+        sessionRowsStickFrameRef.current = null;
+      }
+    },
+    [],
+  );
 
   // 行清空（如 editUserQuery 大范围 rewind）：重置为跟随并收起按钮，
   // 后续重新出现的行走上面的锚定 effect 贴底。

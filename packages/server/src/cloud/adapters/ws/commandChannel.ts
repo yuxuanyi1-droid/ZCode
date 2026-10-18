@@ -28,6 +28,11 @@ export interface ControlPlaneCommandChannel {
   /** 把沙箱回投的 `rpc.response` 交回传输的 ChannelClient。 */
   handleResponse(frame: CloudRpcFrame): void;
   /**
+   * 沙箱主动释放命令流（quiesce/releaseAll 回发的 `rpc.close`）：交给传输清流缓存，
+   * 下一次投递重发 rpc.open（02 §4）。
+   */
+  handleClose(frame: CloudRpcFrame): void;
+  /**
    * bridge 连接释放：丢弃在途 RPC（命令事实留待对账，不重放）。
    * `releasedContext` = 关闭的那条连接（run/代际/epoch）；释放只作用于它，不毒化其它 run
    * 或后续新连接（单例 transport，见 commandTransport 的修复说明）。
@@ -101,6 +106,9 @@ export function createControlPlaneCommandChannel(input: {
     transport,
     handleResponse(frame) {
       transport.handleResponse(frame);
+    },
+    handleClose(frame) {
+      transport.handleClose(frame);
     },
     release(reason, releasedContext) {
       transport.release(reason, releasedContext);

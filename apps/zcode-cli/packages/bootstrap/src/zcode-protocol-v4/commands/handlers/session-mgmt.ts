@@ -49,6 +49,8 @@ async function createSession(
   }
   const { sessionId } = await host.createSessionRecord({
     workspaceId: payload.workspaceId,
+    // 可信路径只从 payload 透传（控制面已按 attachment 事实填写），不在这里猜。
+    ...(payload.workspacePath ? { workspacePath: payload.workspacePath } : {}),
     mcpServers: payload.mcpServers,
     offPeakToolEnabled: payload.offPeakToolEnabled,
     dynamicWorkflowEnabled: payload.dynamicWorkflowEnabled,

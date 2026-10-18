@@ -200,6 +200,49 @@ test("投影 ingest：旧 attachment epoch 的批次整批拒绝，不落库不�
   assert.equal(context.storage.projectionRecords.length, 0);
 });
 
+test("投影 ingest：批次内任一条跨 run / 跨 task / 旧 generation 即整批拒绝，无 ACK（R2，15 §3）", async () => {
+  const context = buildTestPlane();
+  const session = await seedTaskWithReadyRun(context);
+  const good = (sourceSeq: number, overrides: Partial<CloudProjectionRecord> = {}) =>
+    record({
+      runId: session.runId,
+      taskId: session.taskId,
+      runGeneration: session.runGeneration,
+      sourceSeq,
+      ...overrides,
+    });
+  const reject = async (foreign: CloudProjectionRecord, label: string) => {
+    const result = await context.plane.projections.ingest.ingestProjectionBatch(
+      batch([good(0), foreign], session.epoch),
+    );
+    assert.equal(result.accepted, 0, `${label}：整批不落库`);
+    assert.deepEqual(result.cursors, [], `${label}：不回 projection.ack`);
+    assert.equal(context.storage.projectionRecords.length, 0, `${label}：既有记录也不受影响`);
+  };
+
+  // 首条记录合法也不代表整批合法：跨 run / 跨 task / 旧代际的夹带记录必须整批拒绝。
+  await reject(good(1, { runId: "00000000-0000-4000-8000-0000000000e1" }), "跨 run 记录");
+  await reject(good(1, { taskId: "00000000-0000-4000-8000-0000000000e2" }), "跨 task 记录");
+
+  // 模拟 run 已进入新代际（reopen/接管）后，旧 generation 的批次仍会到达。
+  const current = await context.storage.runs.get(session.runId);
+  assert.ok(current);
+  context.storage.runsById.set(session.runId, {
+    ...current,
+    runGeneration: current.runGeneration + 1,
+  });
+  await reject(good(0), "旧 generation 记录");
+
+  // 同 run + 当前 generation 的正常批次不受上述拒绝影响（幂等语义保持）。
+  const accepted = await context.plane.projections.ingest.ingestProjectionBatch(
+    batch([good(0, { runGeneration: current.runGeneration + 1 })], session.epoch),
+  );
+  assert.equal(accepted.accepted, 1);
+  assert.deepEqual(accepted.cursors, [
+    { topic: CANONICAL_TOPIC, logEpoch: "epoch-1", sourceSeq: 0 },
+  ]);
+});
+
 test("runtime ACK 经 ingest 端口落地（02 §6.2、W1 §4 端口对）", async () => {
   const context = buildTestPlane();
   const session = await seedTaskWithReadyRun(context);
@@ -368,6 +411,118 @@ test("历史读取只依赖控制面副本，跨主体 not_found（03 §6/§9）
   assert.equal(snapshot.ok && snapshot.value.logEpoch, "epoch-1");
 });
 
+/**
+ * 2026-10-18 复审修复：ingest `kind=snapshot` 时同步落一份权威快照（projection_snapshots），
+ * 让 `GET /snapshot` 可用、resync 有快照可回；快照覆盖范围单调，旧快照不覆盖新快照。
+ */
+test("投影 ingest：kind=snapshot 落权威快照，覆盖范围单调且 GET /snapshot 可用", async () => {
+  const context = buildTestPlane();
+  const session = await seedTaskWithReadyRun(context);
+  const frame = (fromSeq: number, toSeq: number, text: string) => ({
+    topic: CANONICAL_TOPIC,
+    fromSeq,
+    toSeq,
+    sentAt: 0,
+    payload: { kind: "snapshot", snapshot: { messages: [{ text }] } },
+  });
+  const snapshotRecord = (sourceSeq: number, payload: unknown, contentHash: string) =>
+    record({
+      runId: session.runId,
+      taskId: session.taskId,
+      sourceSeq,
+      kind: "snapshot",
+      payload,
+      contentHash,
+    });
+
+  const ingestedAt = context.clock.now();
+  const first = await context.plane.projections.ingest.ingestProjectionBatch(
+    batch([snapshotRecord(5, frame(0, 5, "first"), "a".repeat(64))], session.epoch),
+  );
+  assert.equal(first.accepted, 1);
+
+  const stored = await context.storage.projections.readSnapshot({
+    taskId: session.taskId,
+    topic: CANONICAL_TOPIC,
+  });
+  assert.ok(stored, "ingest snapshot 后必须落权威快照（GET /snapshot 不再必然 404）");
+  assert.equal(stored.coveredSourceSeq, 5);
+  assert.equal(stored.logEpoch, "epoch-1");
+  assert.deepEqual(stored.snapshot, frame(0, 5, "first"), "快照载荷即完整 V4 快照帧载荷");
+  assert.equal(stored.createdAt, ingestedAt, "快照 createdAt 取持久时间");
+
+  // 更高 sourceSeq 的快照覆盖旧值（coveredSourceSeq 单调）。
+  context.clock.advance(1_000);
+  await context.plane.projections.ingest.ingestProjectionBatch(
+    batch([snapshotRecord(9, frame(6, 9, "second"), "b".repeat(64))], session.epoch),
+  );
+  const advanced = await context.storage.projections.readSnapshot({
+    taskId: session.taskId,
+    topic: CANONICAL_TOPIC,
+  });
+  assert.equal(advanced?.coveredSourceSeq, 9);
+  assert.deepEqual(advanced?.snapshot, frame(6, 9, "second"));
+
+  // 服务层（GET /snapshot 的同一入口）：返回持久 createdAt，重复读取不漂移。
+  const response = await context.plane.projections.history.readSnapshot({
+    principalId: PRINCIPAL,
+    taskId: session.taskId,
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.ok && response.value.coveredSourceSeq, 9);
+  assert.equal(response.ok && response.value.createdAt, stored.createdAt);
+
+  // 冲突批次不覆盖既有权威快照（同名 seq 不同 hash 是一致性 fault）。
+  const conflict = await context.plane.projections.ingest.ingestProjectionBatch(
+    batch([snapshotRecord(9, frame(0, 9, "tampered"), "c".repeat(64))], session.epoch),
+  );
+  assert.equal(conflict.conflicts.length, 1);
+  const afterConflict = await context.storage.projections.readSnapshot({
+    taskId: session.taskId,
+    topic: CANONICAL_TOPIC,
+  });
+  assert.deepEqual(afterConflict?.snapshot, frame(6, 9, "second"), "冲突 payload 不写快照");
+});
+
+test("投影 ingest：快照写失败不阻断事件 ACK（历史仍可读）", async () => {
+  const context = buildTestPlane();
+  const session = await seedTaskWithReadyRun(context);
+  const writeSnapshot = context.storage.projections.writeSnapshot.bind(context.storage.projections);
+  context.storage.projections.writeSnapshot = async () => {
+    throw new Error("disk full");
+  };
+
+  const result = await context.plane.projections.ingest.ingestProjectionBatch(
+    batch(
+      [
+        record({
+          runId: session.runId,
+          taskId: session.taskId,
+          sourceSeq: 0,
+          kind: "snapshot",
+          payload: {
+            topic: CANONICAL_TOPIC,
+            fromSeq: 0,
+            toSeq: 0,
+            sentAt: 0,
+            payload: { kind: "snapshot", snapshot: { messages: [] } },
+          },
+        }),
+      ],
+      session.epoch,
+    ),
+  );
+  assert.equal(result.accepted, 1, "事件已 durable，快照失败不回滚 ACK");
+  assert.deepEqual(result.cursors, [{ topic: CANONICAL_TOPIC, logEpoch: "epoch-1", sourceSeq: 0 }]);
+  const history = await context.plane.projections.history.readHistory({
+    principalId: PRINCIPAL,
+    taskId: session.taskId,
+  });
+  assert.equal(history.ok && history.value.items.length, 1, "历史仍可读（快照只是加速副本）");
+
+  context.storage.projections.writeSnapshot = writeSnapshot;
+});
+
 test("恢复判定：epoch+水位匹配才 resume，否则快照，越界 resync（02 §7.3）", () => {
   const cursors = [{ topic: CANONICAL_TOPIC, logEpoch: "epoch-1", sourceSeq: 10 }];
   assert.deepEqual(
@@ -402,4 +557,37 @@ test("恢复判定：epoch+水位匹配才 resume，否则快照，越界 resync
     }),
     { kind: "resync", reason: "retention-exceeded" },
   );
+});
+
+/**
+ * 2026-10-18 复审修复：快照实际落在 `conversation/<sessionId>`，HTTP 缺省 topic 是族名
+ * `conversation`。族名查询必须命中该前缀下的快照，响应回实际话题（不能回查询族名）。
+ */
+test("GET /snapshot 缺省族名命中会话话题快照，响应回实际 topic", async () => {
+  const context = buildTestPlane();
+  const session = await seedTaskWithReadyRun(context);
+  const topic = "conversation/sess-snapshot-family";
+  await context.storage.projections.writeSnapshot({
+    taskId: session.taskId,
+    runId: session.runId,
+    topic,
+    logEpoch: "epoch-family",
+    coveredSourceSeq: 12,
+    snapshot: { messages: [{ text: "family" }] },
+    now: context.clock.now(),
+  });
+  const family = await context.plane.projections.history.readSnapshot({
+    principalId: PRINCIPAL,
+    taskId: session.taskId,
+  });
+  assert.equal(family.ok, true);
+  assert.equal(family.ok && family.value.topic, topic, "响应必须回实际快照话题");
+  assert.equal(family.ok && family.value.coveredSourceSeq, 12);
+  const exact = await context.plane.projections.history.readSnapshot({
+    principalId: PRINCIPAL,
+    taskId: session.taskId,
+    topic,
+  });
+  assert.equal(exact.ok, true);
+  assert.equal(exact.ok && exact.value.topic, topic);
 });

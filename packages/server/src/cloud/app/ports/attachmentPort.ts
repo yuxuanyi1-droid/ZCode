@@ -95,6 +95,23 @@ export interface AttachmentPort {
   requestDrain(request: AttachmentDrainRequest): Promise<AttachmentSendResult>;
   /** 当前有效 attachment 地址；无有效 attachment 返回 null，不回落 host 执行域（03 §2）。 */
   currentAddress(runId: string): Promise<CloudAttachmentAddress | null>;
+  /**
+   * 当前 run 是否有 ready attachment。
+   *
+   * 这是瞬态**连接事实**（内存注册表），不是持久 run 状态：pause/重连窗口内 run 可能
+   * 已是 ready 而 attachment 尚未回连。调用方不得据此改写 run 状态，只用于呈现/门控
+   * 客户端是否绑定实时会话。
+   */
+  isReady(runId: string): Promise<boolean>;
+  /**
+   * 主动关闭当前 bridge 连接（受控暂停用）。
+   *
+   * 修复依据（2026-10-18 恢复慢）：provider pause 只冻结沙箱，控制面 detach 注册表但
+   * 不关 socket；执行节点侧可能把半开连接当网络故障，按 1s→2s→…→60s 指数退避重连。
+   * 暂停后主动关闭连接，执行节点在恢复时直接从退避起点重连，避免恢复后还要等一次
+   * 最长 60s 的退避。无连接时是 no-op；不得据此改写 run 状态。
+   */
+  closeConnection(runId: string, reason: string): Promise<void>;
 }
 
 /** 投影 ingest 结论：只有事务提交成功才算 durable ingest（02 §7.2 第 3 步）。 */

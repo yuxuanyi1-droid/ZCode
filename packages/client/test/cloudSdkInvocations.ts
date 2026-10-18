@@ -5,7 +5,15 @@
  */
 import type { CloudControlPlaneClient } from "../src/cloud/cloudControlPlaneClient.js";
 import type { CloudSdkEndpointId } from "../src/cloud/cloudWireSchemas.js";
-import { COMMAND_ID, COMMAND_ID_2, OPERATION_ID, PROJECT_ID, TASK_ID } from "./cloudFixtures.js";
+import {
+  COMMAND_ID,
+  COMMAND_ID_2,
+  INTERACTION_ID,
+  OPERATION_ID,
+  PROJECT_ID,
+  RUN_ID,
+  TASK_ID,
+} from "./cloudFixtures.js";
 
 // ── 端点调用表（覆盖 SDK 全部实现端点）──
 
@@ -61,6 +69,29 @@ export const CLOUD_SDK_INVOCATIONS: readonly CloudSdkInvocation[] = [
   { endpointId: "listInputs", invoke: (client) => client.listInputs(TASK_ID) },
   { endpointId: "getInput", invoke: (client) => client.getInput(TASK_ID, COMMAND_ID) },
   { endpointId: "cancelInput", invoke: (client) => client.cancelInput(TASK_ID, COMMAND_ID) },
+  {
+    endpointId: "submitInteractionDecision",
+    invoke: (client) =>
+      client.submitCloudInteractionDecision(TASK_ID, INTERACTION_ID, {
+        commandId: COMMAND_ID,
+        runId: RUN_ID,
+        runGeneration: 1,
+        kind: "permission",
+        answer: { optionId: "allow" },
+      }),
+  },
+  {
+    endpointId: "cancelInteractionDecision",
+    invoke: (client) =>
+      client.cancelCloudInteractionDecision(TASK_ID, INTERACTION_ID, {
+        commandId: COMMAND_ID,
+        cancelCommandId: COMMAND_ID_2,
+      }),
+  },
+  {
+    endpointId: "getInteractionDecision",
+    invoke: (client) => client.getCloudInteractionDecision(TASK_ID, INTERACTION_ID),
+  },
   {
     endpointId: "reopenTask",
     invoke: (client) =>

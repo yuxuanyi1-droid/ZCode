@@ -152,6 +152,15 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
           payloadChars: rpc.data.payload?.length ?? 0,
         });
       }
+      // 沙箱主动释放流（checkpoint quiesce/releaseAll 逐流回发 rpc.close，02 §4）：
+      // 三条通道各自按 streamId/代际作废流缓存，下次调用重开；不能当 response 丢掉。
+      if (rpc.data.type === "rpc.close") {
+        commandChannel.handleClose(rpc.data);
+        controlPlaneRpc.handleClose(rpc.data);
+        // 浏览器流由多路复用器既有 rpc.close 分支释放（onClosed → 关闭浏览器 socket）。
+        browserRpc.handleInbound(rpc.data);
+        return;
+      }
       // 命令传输（控制面自发的命令）与浏览器流各自按 streamId 取用同一帧；
       // 控制面同步会话（control-plane scope）同理按自己的 streamId 取用。
       commandChannel.handleResponse(rpc.data);
@@ -225,6 +234,9 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
         // 绑定与副作用都发生在 hello 认证之后（02 §5.1）；accept 只记连接事实。
         authenticated: false,
       };
+      // 单连接入站串行队列（02 §4 帧顺序）：关闭后置位并丢弃后续排队帧。
+      let inboundChain: Promise<void> = Promise.resolve();
+      let inboundClosed = false;
       // 连接建立：只记路由/代际事实与 provider 标识，不记凭据/帧正文（02 §9）。
       logger.info(undefined, "bridge attachment opened", {
         taskId: run.taskId,
@@ -235,7 +247,12 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
         providerHandle: run.providerHandle ?? "unknown",
       });
       socket.onMessage((data) => {
-        void (async () => {
+        // 修复依据（2026-10-17 review R5 P2）：此前每条消息独立启动 async 任务，慢帧
+        // （projection.batch ingest / checkpoint.result / hello 的凭据 CAS）会让后到帧先
+        // 处理——hello 与 ready 的鉴权顺序、投影批次顺序都依赖单连接内串行（02 §4/§5.1）。
+        // 每条连接一条 promise 链：上一帧 handleInbound 完成后才处理下一帧；关闭后清空。
+        inboundChain = inboundChain.then(async () => {
+          if (inboundClosed) return;
           try {
             await handleInbound(connection, data);
           } catch (error) {
@@ -245,9 +262,12 @@ export function createCloudBridgeChannel(context: CloudBridgeContext): CloudBrid
               error: error instanceof Error ? error.message : "unknown",
             });
           }
-        })();
+        });
       });
       socket.onClose((closeInfo) => {
+        // 先停入站队列：在途帧处理完后，排队帧看到 closed 直接丢弃（连接已不可写）。
+        inboundClosed = true;
+        inboundChain = Promise.resolve();
         // 关闭原因区分：正常断开 / 1008 具体 reason / socket error（不记帧正文）。
         logger.info(undefined, "bridge attachment closed", {
           taskId: connection.taskId,

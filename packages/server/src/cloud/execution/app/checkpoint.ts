@@ -39,6 +39,13 @@ export interface CheckpointOptions {
 export function createCheckpoint(options: CheckpointOptions): CheckpointPort {
   /** operationId → 结果；重放直接复用，不重做 commit、不伪造 saved（01 §8）。 */
   const results = new Map<string, Awaited<ReturnType<CheckpointPort["run"]>>>();
+  /**
+   * operationId → 进行中的执行。修复依据（2026-10-18 停止无响应实测）：控制面 stop 会
+   * 先发 `bridge.drain` 再发同 operationId 的 `checkpoint.request`，两个入站处理器并发
+   * 执行；旧实现只缓存**已完成**结果，两个并发调用会同时 git add/commit/push，产生
+   * 重复提交或互相覆盖的保存事实。同 op 的并发执行必须共享同一个 promise。
+   */
+  const inFlight = new Map<string, Promise<Awaited<ReturnType<CheckpointPort["run"]>>>>();
 
   async function execute(request: CheckpointRequestFrame) {
     const target = options.checkout();
@@ -122,14 +129,28 @@ export function createCheckpoint(options: CheckpointOptions): CheckpointPort {
         });
         return cached;
       }
-      const result = await execute(request);
-      results.set(request.operationId, result);
-      // 结果表有界：checkpoint 在一个 Run 内条数很少，但仍避免无限增长。
-      if (results.size > 64) {
-        const oldest = results.keys().next().value;
-        if (oldest !== undefined) results.delete(oldest);
+      const running = inFlight.get(request.operationId);
+      if (running) {
+        options.logger.info(undefined, "checkpoint in flight: awaiting same execution", {
+          operationId: request.operationId,
+        });
+        return running;
       }
-      return result;
+      const execution = execute(request)
+        .then((result) => {
+          results.set(request.operationId, result);
+          // 结果表有界：checkpoint 在一个 Run 内条数很少，但仍避免无限增长。
+          if (results.size > 64) {
+            const oldest = results.keys().next().value;
+            if (oldest !== undefined) results.delete(oldest);
+          }
+          return result;
+        })
+        .finally(() => {
+          inFlight.delete(request.operationId);
+        });
+      inFlight.set(request.operationId, execution);
+      return execution;
     },
   };
 }

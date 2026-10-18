@@ -24,11 +24,7 @@ import {
 } from "../../rpcChannelServer.js";
 import type { SandboxDriverRegistryPort } from "../app/ports/sandboxDriverRegistryPort.js";
 import type { SandboxTemplateResolverPort } from "../app/ports/sandboxDriverPort.js";
-import {
-  createCloudGitGrantRoute,
-  createCloudGitHubTokenService,
-  type CloudGitGrantStorage,
-} from "./entry-cloud-git-grant.js";
+import { createCloudGitGrantRoute, type CloudGitGrantStorage } from "./entry-cloud-git-grant.js";
 import type { GitHubTokenService } from "./github/tokens.js";
 import type { LoopSchedulerPort } from "../app/ports/loopSchedulerPort.js";
 import type { CloudEntryConfig } from "./entry-cloud-config.js";

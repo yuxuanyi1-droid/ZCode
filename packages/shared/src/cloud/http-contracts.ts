@@ -134,6 +134,55 @@ export type SubmitTaskInput = z.infer<typeof submitTaskInputSchema>;
  */
 export type CancelCloudTaskInputRequest = z.infer<typeof cloudEmptyBodySchema>;
 
+// ── 交互决定（03 §7.2、04 §3.0.2；R6 durable HTTP 通路）──
+
+/**
+ * 交互答案：与 V4 `resolveInteraction` 的 answer 同语义（permission 的 optionId /
+ * elicitation 的 action + content / 兼容 freeText），本层只冻结形状，不解释选项含义。
+ * `content` 由 elicitation 投影承载多题答案，仍是有界 JSON（服务端另有 16 KiB 载荷上限）。
+ */
+export const cloudInteractionAnswerSchema = z
+  .object({
+    optionId: nonEmptyString.max(256).optional(),
+    freeText: z.string().max(CLOUD_INPUT_LIMITS.promptMaxChars).optional(),
+    action: z.enum(["accept", "decline", "cancel"]).optional(),
+    content: z.record(z.string(), z.json()).optional(),
+  })
+  .strict();
+export type CloudInteractionAnswer = z.infer<typeof cloudInteractionAnswerSchema>;
+
+/**
+ * 提交交互决定（03 §7.2）。`interactionId` 在路径中，`taskId` 由路径与服务端资源归属
+ * 决定；body 不接受 principal/workspace 等权威事实。runId/runGeneration 用于 stale 围栏，
+ * commandId 是客户端生成、重试不变的投递键（03 §6.1 同语义）。
+ */
+export const submitCloudInteractionDecisionRequestSchema = z
+  .object({
+    commandId: commandIdSchema,
+    runId: cloudUuidSchema,
+    runGeneration: positiveGeneration,
+    kind: z.enum(["permission", "elicitation"]),
+    answer: cloudInteractionAnswerSchema,
+  })
+  .strict();
+export type SubmitCloudInteractionDecisionRequest = z.infer<
+  typeof submitCloudInteractionDecisionRequestSchema
+>;
+
+/**
+ * 取消已提交的决定（02 §6.3）：`commandId` 是原决定投递键，`cancelCommandId` 是独立
+ * 取消命令键——不删除 runtime 已接受的事实，也不覆盖原决定记录。
+ */
+export const cancelCloudInteractionDecisionRequestSchema = z
+  .object({
+    commandId: commandIdSchema,
+    cancelCommandId: cloudUuidSchema,
+  })
+  .strict();
+export type CancelCloudInteractionDecisionRequest = z.infer<
+  typeof cancelCloudInteractionDecisionRequestSchema
+>;
+
 /**
  * 恢复选择（08 §9）：有 checkpoint 时新 Run 固定 resumeSha=最后确认 checkpoint SHA；
  * 没有 checkpoint 的任务只能显式选择从冻结 baseSha 重新开始。分支两侧都必须在

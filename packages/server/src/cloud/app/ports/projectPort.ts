@@ -18,7 +18,14 @@ export interface CreateProjectRequest {
 }
 
 export interface ProjectRepo {
-  get(projectId: string): Promise<CloudProjectRecord | null>;
+  /**
+   * 读取未归档 Project。`includeArchived` 只给 deleteProject 的幂等探测使用：
+   * 普通读路径保持「已归档 = 不可见」（15 §R3、03 §6）。
+   */
+  get(
+    projectId: string,
+    options?: { includeArchived?: boolean },
+  ): Promise<CloudProjectRecord | null>;
   /** 同 principal 同 repositoryId 重复添加返回既有 Project（11 §4.4 唯一约束）。 */
   findByRepository(principalId: string, repositoryId: number): Promise<CloudProjectRecord | null>;
   createOrGet(request: CreateProjectRequest): Promise<CloudProjectRecord>;
@@ -33,4 +40,11 @@ export interface ProjectRepo {
     displayName?: string;
     now: number;
   }): Promise<CloudProjectRecord | null>;
+  /**
+   * 软删除（15 §R3、03 §6 deleteProject「明确归档，不静默销毁」）：
+   * `UPDATE ... SET archived_at=?, updated_at=? WHERE project_id=? AND archived_at IS NULL`。
+   * 首次归档返回 true；已归档时不做第二次写入（保留首次归档时间），返回 false。
+   * 任务历史与外键保持完整，不级联删除。
+   */
+  archive(projectId: string, now: number): Promise<boolean>;
 }

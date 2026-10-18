@@ -168,6 +168,8 @@ export interface RecordedHello {
  */
 export class FakeControlPlane {
   readonly hellos: RecordedHello[] = [];
+  /** 所有收到的合法控制帧（ready/heartbeat/phase 等断言用）。 */
+  readonly frames: unknown[] = [];
   readonly attachments: { epoch: number; attemptId: string; rotationId: string; socket: number }[] =
     [];
   readonly rejectedFrames: { frame: unknown; reason: string }[] = [];
@@ -179,10 +181,17 @@ export class FakeControlPlane {
   private epoch = 0;
   private socketCounter = 0;
   private helloTimes = 0;
-  private bootstrapped = false;
+  /**
+   * A-08 用例在重连前更新这些字段：控制面每次 attach 都重推最新 `bootstrap.config`
+   * （与 handshake.ts 的真实行为一致，不再假设"只发一次"）。
+   */
+  credentialGeneration = 1;
+  policyVersion = "policy-1";
+  preferences: CloudBootstrapPreferences | undefined;
 
   constructor(private readonly options: FakeControlPlaneOptions) {
     this.currentHash = sha256(options.initialToken);
+    this.preferences = options.preferences;
   }
 
   /** 应当被当前有效凭据接受的 hash（断言用）。 */
@@ -205,6 +214,7 @@ export class FakeControlPlane {
   ): void {
     const parsed = cloudBridgeControlFrameSchema.safeParse(frame);
     if (parsed.success) {
+      this.frames.push(parsed.data);
       if (parsed.data.type === "bridge.hello") {
         this.handleHello(parsed.data as unknown as Record<string, unknown>, control, socket);
         return;
@@ -362,12 +372,10 @@ export class FakeControlPlane {
       rotationId,
       capabilities: ["stdio-rpc", "projection-wal"],
       ingestCursors: [],
-      policyVersion: "policy-1",
+      policyVersion: this.policyVersion,
     });
-    if (!this.bootstrapped) {
-      this.bootstrapped = true;
-      control.send(this.bootstrapConfig());
-    }
+    // 每次新连接都下发 bootstrap.config（A-08：重连可能携带更高代际/新的 policy）。
+    control.send(this.bootstrapConfig());
     // 2026-10-11 简化改造：`bootstrap.resources` 帧已退役（14 §4.8），自举期不再下发资源；
     // 用户资源同步改在连接期由控制面经 bridge relay 调沙箱既有 sync 服务（14 §4）。
   }
@@ -385,9 +393,9 @@ export class FakeControlPlane {
         taskBranch: this.options.taskBranch ?? "zcode/task-1",
       },
       provisioningEnvelopeJson: JSON.stringify({ version: 1, providers: [] }),
-      credentialGeneration: 1,
-      policyVersion: "policy-1",
-      ...(this.options.preferences ? { preferences: this.options.preferences } : {}),
+      credentialGeneration: this.credentialGeneration,
+      policyVersion: this.policyVersion,
+      ...(this.preferences ? { preferences: this.preferences } : {}),
     };
   }
 

@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- 横幅集中承载 waiting/provisioning/resuming/disconnected/paused/draining/ended 七态与 force-stop/reopen 表单；状态矩阵需单文件对照，拆分反而增加漂移风险。 */
 /**
  * 云任务运行状态横幅（specs/cloud-agent/04 §3.3 状态矩阵、08 §8.2 停止/§9 重开）。
  *
@@ -5,6 +6,9 @@
  * 失败呈现，用户只觉得「没反应」。该横幅放在工作区主区（header 之下、聊天区之上），
  * 只按**详情投影**呈现：
  * - `waiting-for-run` / `provisioning`：进行中提示（04 §3.2.4「202 后等待环境」）；
+ * - `resuming`（2026-10-18 resume 窗口修订）：run 已被控制面 CAS 置为 ready、bridge 尚未
+ *   回连（`attachmentReady === false`）。pane 保持历史/草稿视图，这里呈现「正在恢复运行
+ *   环境」，明确不是连接失败；attachment 回连后的详情刷新自动绑定并撤下横幅；
  * - `reopenable`（2026-10-08 终态 run 发送行为修订）：终态 run 已被服务端收回、
  *   详情投影不再携带 run 事实（服务端只投影非终态 run），以 actions 投影的
  *   `reopen` 能力呈现「上一次运行已结束」+ 重开入口，优先于 waiting——
@@ -12,6 +16,7 @@
  * - `draining`（2026-10-08 巡检修订 P1）：stop 端点受理后的受控停止窗口，呈现
  *   「正在停止」而不是永远 Working；提供 force-stop 入口（丢失确认对话框，
  *   `lossAcknowledgement:true + expectedRevision + operationId`，08 §8.2）；
+ * - `disconnected`（2026-10-18 修订）：呈现「连接已断开，正在自动重连」，不提供重开入口；
  * - `failed` / `stopped` / `expired`：失败/终止原因（run.lastError/endReason，shared
  *   契约为驼峰字段）+ 显式重开入口（`useReopenCloudTask`，独立命令不借 append）。
  *
@@ -46,6 +51,20 @@ export interface CloudTaskRunStatusBannerProps {
   readonly workspaceIdentity?: string | null;
   readonly className?: string;
 }
+
+type CloudRunProgressViewKind = "waiting-for-run" | "provisioning" | "resuming" | "disconnected";
+
+/** 进行中横幅的文案：恢复/断连窗口额外带一行说明（2026-10-18 修订）。 */
+const CLOUD_RUN_PROGRESS: Record<CloudRunProgressViewKind, { messageId: string; hintId?: string }> =
+  {
+    "waiting-for-run": { messageId: "cloud.run.statusWaitingForRun" },
+    provisioning: { messageId: "cloud.run.statusProvisioning" },
+    resuming: { messageId: "cloud.run.statusResuming", hintId: "cloud.run.statusResumingHint" },
+    disconnected: {
+      messageId: "cloud.run.statusDisconnected",
+      hintId: "cloud.run.statusDisconnectedHint",
+    },
+  };
 
 export function CloudTaskRunStatusBanner({
   workspaceIdentity,
@@ -155,8 +174,15 @@ export function CloudTaskRunStatusBanner({
   if (taskId === null || view.kind === "hidden") {
     return null;
   }
-
-  if (view.kind === "waiting-for-run" || view.kind === "provisioning") {
+  // 进行中横幅（waiting/provisioning/resuming/disconnected 四态共用）；断连窗口
+  // （2026-10-18 修订）只提示自动重连，不提供重开入口——旧 run 仍是当前执行载体。
+  if (
+    view.kind === "waiting-for-run" ||
+    view.kind === "provisioning" ||
+    view.kind === "resuming" ||
+    view.kind === "disconnected"
+  ) {
+    const progress = CLOUD_RUN_PROGRESS[view.kind];
     return (
       <div
         role="status"
@@ -169,12 +195,8 @@ export function CloudTaskRunStatusBanner({
       >
         <Loader2 aria-hidden="true" className="size-4 shrink-0 animate-spin" />
         <span className="min-w-0 truncate">
-          {intl.formatMessage({
-            id:
-              view.kind === "provisioning"
-                ? "cloud.run.statusProvisioning"
-                : "cloud.run.statusWaitingForRun",
-          })}
+          {intl.formatMessage({ id: progress.messageId })}
+          {progress.hintId ? ` · ${intl.formatMessage({ id: progress.hintId })}` : null}
         </span>
       </div>
     );

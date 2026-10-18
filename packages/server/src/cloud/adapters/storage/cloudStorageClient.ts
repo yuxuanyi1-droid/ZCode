@@ -132,12 +132,19 @@ export async function createCloudStorage(options: CloudStorageOptions): Promise<
 
   // 端口方法按原签名转成一条消息：位置参数在这里收进对象，其余层级只看到异步端口。
   const projects: ProjectRepo = {
-    get: (projectId) => request("projects.get", { projectId }),
+    get: (projectId, options) =>
+      request("projects.get", {
+        projectId,
+        ...(options?.includeArchived === undefined
+          ? {}
+          : { includeArchived: options.includeArchived }),
+      }),
     findByRepository: (principalId, repositoryId) =>
       request("projects.findByRepository", { principalId, repositoryId }),
     createOrGet: (createRequest) => request("projects.createOrGet", createRequest),
     list: (principalId, page) => request("projects.list", { principalId, page }),
     patchMetadata: (patchRequest) => request("projects.patchMetadata", patchRequest),
+    archive: (projectId, now) => request("projects.archive", { projectId, now }),
   };
   const tasks: TaskRepo = {
     get: (taskId) => request("tasks.get", { taskId }),
@@ -188,6 +195,8 @@ export async function createCloudStorage(options: CloudStorageOptions): Promise<
     ingestCursors: (cursorRequest) => request("projections.ingestCursors", cursorRequest),
     listCheckpoints: (taskId) => request("projections.listCheckpoints", { taskId }),
     recordCheckpoint: (checkpoint) => request("projections.recordCheckpoint", { checkpoint }),
+    readLatestPendingInteractionCount: (runId) =>
+      request("projections.readLatestPendingInteractionCount", { runId }),
   };
   const credentials: RunCredentialRepo = {
     saveInitial: (initialRequest) => request("credentials.saveInitial", initialRequest),

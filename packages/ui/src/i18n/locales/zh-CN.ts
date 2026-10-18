@@ -1985,6 +1985,7 @@ const zhCN: Record<string, string> = {
   "settings.memory.workspaceMemory": "工作区记忆",
   "settings.memoryDescription":
     "在工作区中保存并复用长期上下文，新会话生效。开启后可能增加模型调用和 Token 成本。",
+  "settings.memory.viewer.disabled": "启用工作区记忆后才能查看已保存的记忆。",
   "settings.memory.viewer.localOnly":
     "记忆详情仅支持在本地桌面端查看，请前往本地桌面端的“记忆”设置。",
   "settings.memory.viewer.title": "已保存的工作区记忆",
@@ -6618,9 +6619,8 @@ const zhCN: Record<string, string> = {
   "cloud.tasks.archive": "归档任务",
   "cloud.tasks.archiveConfirmTitle": "归档这个任务？",
   "cloud.tasks.archiveConfirmDescription":
-    "「{taskTitle}」将被归档。历史仍可读取，但在恢复之前该任务不再接受命令。",
+    "「{taskTitle}」将被归档，运行环境会被停止，未保存的更改可能丢失。历史仍可读取，但在恢复之前该任务不再接受命令。",
   "cloud.tasks.archiveFailed": "归档任务失败：{reason}",
-  "cloud.tasks.archiveUnavailable": "控制面当前不允许归档该任务",
   "cloud.tasks.archivedSection": "已归档（{count}）",
   "cloud.tasks.restore": "恢复任务",
   "cloud.tasks.restoreFailed": "恢复任务失败：{reason}",
@@ -6652,6 +6652,18 @@ const zhCN: Record<string, string> = {
   "cloud.run.statusPaused": "运行环境已暂停",
   "cloud.run.statusPausedHint": "发送消息即可恢复运行（同一运行，不会重新开始）",
   "cloud.run.statusProvisioning": "正在准备云环境（创建沙箱、克隆仓库、预热）…",
+  "cloud.run.statusResuming": "正在恢复运行环境",
+  "cloud.run.statusResumingHint": "消息将在环境就绪后自动发送",
+  "cloud.run.statusDisconnected": "连接已断开，正在自动重连",
+  "cloud.run.statusDisconnectedHint": "消息将在连接恢复后自动发送",
+  "cloud.connection.ready": "云运行环境已连接",
+  "cloud.connection.provisioning": "云运行环境正在准备",
+  "cloud.connection.resuming": "云运行环境正在恢复连接",
+  "cloud.connection.paused": "云运行环境已暂停",
+  "cloud.connection.draining": "云运行环境正在停止",
+  "cloud.connection.disconnected": "云运行环境连接已断开，正在自动重连",
+  "cloud.connection.failed": "云运行环境连接失败",
+  "cloud.connection.idle": "当前没有活动的云运行环境",
   "cloud.run.statusFailedTitle": "任务运行失败",
   "cloud.run.statusStoppedTitle": "任务运行已停止",
   "cloud.run.statusExpiredTitle": "任务运行已到期",
@@ -6701,6 +6713,8 @@ const zhCN: Record<string, string> = {
     "与当前任务运行环境的连接已断开，附件会在重连后恢复，不会上传到其他环境。",
   "chat.attachments.cloud.waitingEnvironment":
     "运行环境尚未就绪，暂不能上传附件；准备好后会自动恢复。",
+  "chat.attachments.cloud.durableInputUnsupported":
+    "云任务暂不支持附件：durable input 尚未携带附件引用，附件不会被发送。请移除附件后再发送。",
 };
 
 export default zhCN;

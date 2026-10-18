@@ -51,6 +51,38 @@ export function createProjectionIngestService(
         return empty;
       }
 
+      // 修复依据（2026-10-17 R2，spec 15 §3「信任边界」、02 §7.1）：旧实现只用首条记录
+      // 定位 registry，appendBatch 也只校验 taskId——批次中夹带其它 run/task 或旧代际
+      // 记录时会顶着本 attachment 的 epoch 落库。归属是逐条不变量，不能用首条代表整批：
+      // 任一记录不符即整批拒绝（不落库、不回 projection.ack，记录留在执行节点 WAL 等
+      // 有效批次重投；同键同 hash 幂等/同键不同 hash conflict 语义保持不变）。
+      const run = await storage.runs.get(session.runId);
+      if (!run) {
+        cloudCoreLogger.warn(undefined, "projection batch rejected: run not found", {
+          runId: session.runId,
+          records: frame.records.length,
+        });
+        return empty;
+      }
+      for (const [index, record] of frame.records.entries()) {
+        if (
+          record.runId !== run.runId ||
+          record.taskId !== run.taskId ||
+          record.runGeneration !== run.runGeneration
+        ) {
+          cloudCoreLogger.warn(undefined, "projection batch ownership rejected", {
+            runId: run.runId,
+            expectedRunGeneration: run.runGeneration,
+            batchRecords: frame.records.length,
+            offendingIndex: index,
+            recordRunId: record.runId,
+            recordTaskId: record.taskId,
+            recordRunGeneration: record.runGeneration,
+          });
+          return empty;
+        }
+      }
+
       const appended = await storage.projections.appendBatch(frame.records);
       if (appended.conflicts.length > 0) {
         // 同键不同 contentHash 是一致性 fault：告警而不是覆盖（02 §7.1）。
@@ -58,6 +90,37 @@ export function createProjectionIngestService(
           runId: first.runId,
           conflicts: appended.conflicts.length,
         });
+      } else {
+        // 快照是 ingest 派生事实，不是 runtime 第二事实源：durable 事件（projection_events）
+        // 才是唯一事实源，`projection_snapshots` 只是供 GET /snapshot 与 resync 使用的加速
+        // 副本。因此快照写入失败只告警，不阻断事件 ACK（事件已 durable，历史仍可读）；
+        // 本批存在一致性冲突时不写快照，避免用冲突 payload 覆盖已有权威快照。
+        // 同批多条 snapshot 按记录顺序写，store 的 coveredSourceSeq 单调守卫保留最新；
+        // 重复批次重写同一 seq 由 store 唯一键 + 单调 WHERE 保证幂等。
+        for (const record of frame.records) {
+          if (record.kind !== "snapshot") continue;
+          try {
+            await storage.projections.writeSnapshot({
+              taskId: record.taskId,
+              runId: record.runId,
+              topic: record.topic,
+              logEpoch: record.logEpoch,
+              coveredSourceSeq: record.sourceSeq,
+              // 完整 V4 快照帧载荷；shared 的 CloudProjectionSnapshot.snapshot 是 z.json，
+              // 由客户端按 topic 契约自行解析（此处不二次加工）。
+              snapshot: record.payload,
+              now: clock.now(),
+            });
+          } catch (error) {
+            cloudCoreLogger.warn(undefined, "projection snapshot write failed", {
+              taskId: record.taskId,
+              runId: record.runId,
+              topic: record.topic,
+              coveredSourceSeq: record.sourceSeq,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
       }
 
       // 修复依据（2026-10-09 终验缺陷 B，08 §7 业务活动事实源收窄）：此前对每个批次的

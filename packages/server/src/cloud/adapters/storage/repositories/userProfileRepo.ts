@@ -13,6 +13,10 @@
  * - `mcp-config`：JSON 文本 UTF-8 字节的 sha256，`bytes` 取 JSON 字符数（§9.1④ 口径）；
  * - `markdown` / `agents-md`：正文 UTF-8 字节的 sha256/字节数（14 §4.5 同一口径）。
  *
+ * 例外（R4；14 §5）：mcp 正文以 `enc:v1:` 密文落库，store 无法从密文派生明文事实，
+ * 因此允许请求携带 `contentFacts`（明文的 sha256/bytes）**且仅限 mcp**；其他类别携带
+ * 一律拒绝，派生规则仍只有 store 一份。
+ *
  * 元数据权威（14 §9.2①）：**manifest 是版本的条目元数据**（`enabled`/`displayName`/`bytes`/`sha256`），
  * 内容寻址行只提供正文与 `content_kind`；读路径统一经 `recordOfManifestEntry` 组装，
  * 行上的元数据列只是当前版本的冗余投影，不参与决策。
@@ -68,7 +72,22 @@ function upsertEntryInTransaction(
   if (contentKind !== request.contentKind) {
     return { status: "rejected", code: "invalid_entry", reason: "content-kind-mismatch" };
   }
-  const facts = deriveContentFacts(contentKind, request.content);
+  // R4（14 §5）：mcp 正文以密文落库，明文 sha256/bytes 由写入方随请求给出（仅限 mcp）。
+  // 其他类别继续在 store 内从正文派生——客户端不能自报派生值，派生规则只有一份。
+  let facts: { sha256: string; bytes: number };
+  if (request.contentFacts === undefined) {
+    facts = deriveContentFacts(contentKind, request.content);
+  } else if (category.data !== "mcp") {
+    return { status: "rejected", code: "invalid_entry", reason: "content-facts-not-allowed" };
+  } else if (
+    !/^[0-9a-f]{64}$/u.test(request.contentFacts.sha256) ||
+    !Number.isInteger(request.contentFacts.bytes) ||
+    request.contentFacts.bytes < 0
+  ) {
+    return { status: "rejected", code: "invalid_entry", reason: "invalid-content-facts" };
+  } else {
+    facts = request.contentFacts;
+  }
   if (userProfileEntryBytesExceedLimit(category.data, facts.bytes)) {
     // 写事务内以真实值判定（14 §9.2①）：单条超类别上限 → 413 口径。
     return {

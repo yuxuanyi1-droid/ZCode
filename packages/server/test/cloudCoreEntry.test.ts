@@ -139,6 +139,88 @@ test("入口装配：readiness 门槛 + 路由注册 + 循环句柄 + 关闭顺�
   );
 });
 
+test("入口装配：存储客户端的 interactions 接到控制面，交互决定端点不再 501（R6）", async () => {
+  const planeContext = buildTestPlane();
+  const harness = manualScheduler();
+  const controlPlane = await assembleCloudEntryControlPlane(
+    entryContext(planeContext, harness.scheduler, {
+      // 生产 W2 存储客户端把 InteractionDecisionRepo 与 storage/operations 挂在同一对象上；
+      // 入口装配必须把它接到 `interactionDecisions`，否则 POST 永远 501。
+      storage: {
+        readiness: () => planeContext.storage.readiness(),
+        storage: planeContext.storage,
+        operations: planeContext.outbox,
+        userProfile: planeContext.userProfile,
+        interactions: planeContext.interactionDecisions,
+      },
+    }),
+  );
+  const app = new Hono();
+  controlPlane.registerRoutes(app);
+
+  // 与入口控制面共享同一 fake storage：准备 Task/Run（runGeneration 用于 stale 围栏）。
+  const project = await planeContext.plane.tasks.createProject({
+    principalId: PRINCIPAL,
+    repositoryId: 101,
+  });
+  assert.ok(project.ok);
+  const task = await planeContext.plane.tasks.createTask({
+    principalId: PRINCIPAL,
+    projectId: project.value.projectId,
+    title: "Interaction",
+    creationKey: "ck-interaction-entry",
+    draftStartConfig: { baseBranch: "main", provider: "e2b", templateRef: "zcode-node24" },
+  });
+  assert.ok(task.ok);
+  const submit = await planeContext.plane.inputs.submit({
+    principalId: PRINCIPAL,
+    taskId: task.value.taskId,
+    source: "http",
+    request: {
+      intent: "start",
+      commandId: "00000000-0000-4000-8000-0000000000e1",
+      prompt: "go",
+      expectedTaskRevision: task.value.revision,
+      start: { baseBranch: "main", provider: "e2b", templateRef: "zcode-node24" },
+    },
+  });
+  assert.ok(submit.ok);
+  const runId = submit.value.runId ?? "";
+  assert.ok(runId);
+  const run = await planeContext.storage.runs.get(runId);
+  assert.ok(run);
+
+  // 无 attachment 时决定仍持久接纳（202 = 控制面持久接纳，不是 runtime 裁决）。
+  const response = await app.request(
+    `/api/cloud/tasks/${task.value.taskId}/interactions/interaction-entry-1`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: "00000000-0000-4000-8000-0000000000e2",
+        runId,
+        runGeneration: run.runGeneration,
+        kind: "permission",
+        answer: { optionId: "allow" },
+      }),
+    },
+  );
+  assert.equal(
+    response.status,
+    202,
+    "交互决定端点不得再返回 interaction-decision-persistence-missing",
+  );
+  const body = (await response.json()) as { deliveryStatus?: string; reason?: string };
+  assert.equal(body.deliveryStatus, "accepted", JSON.stringify(body));
+  // 决定写入的正是注入的同一实例（不新建第二份 repo）。
+  const record = await planeContext.interactionDecisions.getDecision(
+    task.value.taskId,
+    "interaction-entry-1",
+  );
+  assert.equal(record?.deliveryStatus, "accepted");
+  await controlPlane.close();
+});
+
 test("入口装配把分支枚举缝接到路由（W4 listBranches 注入后端点从 501 变为可用）", async () => {
   const planeContext = buildTestPlane();
   const harness = manualScheduler();

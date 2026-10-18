@@ -65,7 +65,10 @@ test("cloud attachment-unavailable rejections are classified as cloud-unavailabl
   const withTaskId = "cloud task 1a03688c-d2f9-4abd-b682-37532f69e8ec has no ready run attachment";
   const presentation = classifySubscribeError(withTaskId);
   assert.equal(presentation.kind, "cloud-unavailable");
-  assert.deepEqual(presentation.kind === "cloud-unavailable" ? presentation.detail : null, withTaskId);
+  assert.deepEqual(
+    presentation.kind === "cloud-unavailable" ? presentation.detail : null,
+    withTaskId,
+  );
 
   const defaultReason = "cloud task has no ready run attachment";
   assert.equal(classifySubscribeError(defaultReason).kind, "cloud-unavailable");

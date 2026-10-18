@@ -99,9 +99,14 @@ export function canTransitionTask(from: CloudTaskStatus, to: CloudTaskStatus): b
   return TASK_STATUS_TRANSITIONS[from].includes(to);
 }
 
-/** 归档前置（03 §6 archive 行）：无活动写 run。 */
-export function canArchiveTask(task: CloudTaskRecord, activeRun: CloudRunRecord | null): boolean {
-  return task.status !== "archived" && !hasActiveWriteRun(activeRun);
+/**
+ * 归档前置（03 §6 archive 行，2026-10-18 用户决议）：只要求 Task 未归档。
+ * 归档不再要求「无活动写 run」——存在未终态 run 时由 archiveTask 先终止运行环境
+ * （不等待 checkpoint）再归档，终止未确认也不阻塞（run 留 draining 由 sweep 收口）。
+ * `hasActiveWriteRun` 仍保留给 reopen/reactivate 等其它前置使用。
+ */
+export function canArchiveTask(task: CloudTaskRecord, _activeRun: CloudRunRecord | null): boolean {
+  return task.status !== "archived";
 }
 
 /** 活动写 run = 未终态 run；每 Task 至多一个（08 §4.2）。 */

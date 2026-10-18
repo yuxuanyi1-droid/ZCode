@@ -37,6 +37,7 @@ import {
   createFakeTemplateResolver,
 } from "./cloudCoreAdapterFakes.js";
 import {
+  attachReadySession,
   buildTestPlane,
   createFakeOutbox,
   FakeClock,
@@ -376,4 +377,108 @@ test("P0 parity：同一生命周期命令序列在真实 SQLite 与端口 fake 
     await handle.close();
     await removeTestRoot(root);
   }
+});
+
+test("R3：reopen 在接纳事务内复核 expectedTaskRevision（预检后 revision 变化 → stale）", async () => {
+  const context = buildTestPlane();
+  const project = await context.plane.tasks.createProject({
+    principalId: PRINCIPAL,
+    repositoryId: 101,
+  });
+  assert.equal(project.ok, true);
+  if (!project.ok) return;
+  const created = await context.plane.tasks.createTask({
+    principalId: PRINCIPAL,
+    projectId: project.value.projectId,
+    title: "reopen revision guard",
+    creationKey: "ck-reopen-revision-guard",
+    draftStartConfig: { baseBranch: "main", provider: "e2b", templateRef: "zcode-node24" },
+  });
+  assert.equal(created.ok, true, created.ok ? "" : `${created.code}/${created.reason}`);
+  if (!created.ok) return;
+  const submit = await context.plane.inputs.submit({
+    principalId: PRINCIPAL,
+    taskId: created.value.taskId,
+    source: "http",
+    request: {
+      intent: "start",
+      commandId: "00000000-0000-4000-8000-0000000000f0",
+      prompt: "first",
+      expectedTaskRevision: created.value.revision,
+      start: { baseBranch: "main", provider: "e2b", templateRef: "zcode-node24" },
+    },
+  });
+  assert.equal(submit.ok, true, submit.ok ? "" : `${submit.code}/${submit.reason}`);
+  const runId = submit.ok ? (submit.value.runId ?? "") : "";
+  assert.ok(runId);
+  await context.plane.provisioning.create.runCreateOnce();
+  await context.plane.provisioning.readiness.sweep();
+  const run = await context.storage.runs.get(runId);
+  assert.ok(run);
+  await attachReadySession(context, {
+    taskId: created.value.taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+  });
+  const ready = await context.plane.runs.markReady({
+    taskId: created.value.taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+  assert.equal(ready.ok, true);
+  // run 确定失败 → Task 收口 failed（15 §R3 的另一条行为），reopen 从 failed 起。
+  const failedRun = await context.plane.runs.settleTerminal({
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    to: "failed",
+    endReason: "runtime-unrecoverable",
+    termination: "terminated",
+  });
+  assert.equal(failedRun.ok, true);
+  const failedTask = await context.storage.tasks.get(created.value.taskId);
+  assert.equal(failedTask?.status, "failed");
+  assert.ok(failedTask);
+  const expectedRevision = failedTask.revision;
+
+  // 模拟「预检已通过、接纳事务尚未执行」之间另一台设备 PATCH 推进了 revision：
+  // 在 acceptInput 边界插入一次并发写，事务内必须用持久 taskRow 复核并拒绝。
+  const originalAccept = context.storage.acceptInput.bind(context.storage);
+  let injected = false;
+  context.storage.acceptInput = async (request) => {
+    if (!injected) {
+      injected = true;
+      const current = await context.storage.tasks.get(request.taskId);
+      assert.ok(current);
+      await context.storage.tasks.patchMetadata({
+        taskId: current.taskId,
+        expectedRevision: current.revision,
+        title: "concurrent edit",
+        now: context.clock.now(),
+      });
+    }
+    return originalAccept(request);
+  };
+
+  const reopened = await context.plane.inputs.submit({
+    principalId: PRINCIPAL,
+    taskId: created.value.taskId,
+    source: "http",
+    request: {
+      intent: "reopen",
+      commandId: "00000000-0000-4000-8000-0000000000f1",
+      prompt: "reopen",
+      provider: "e2b",
+      resume: { mode: "restart-from-base" },
+      expectedTaskRevision: expectedRevision,
+    },
+  });
+  assert.equal(injected, true, "并发写必须发生在接纳事务调用边界");
+  assert.equal(reopened.ok, false, "过期 revision 的 reopen 必须失败");
+  assert.equal(reopened.ok === false && reopened.code, "stale");
+  assert.equal(reopened.ok === false && reopened.reason, "revision-mismatch");
+  // 事务拒绝不产生任何持久意图：输入仍只有首发，run 仍只有旧的终态 run。
+  const inputs = await context.storage.inputs.list(created.value.taskId, { limit: 10 });
+  assert.equal(inputs.items.length, 1);
+  assert.equal((await context.storage.runs.listNonTerminal()).length, 0);
 });

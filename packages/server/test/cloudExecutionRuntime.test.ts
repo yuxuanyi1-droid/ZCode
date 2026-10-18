@@ -227,7 +227,8 @@ test("状态目录不可写：早期失败必须带明确诊断，不静默退�
   await assert.rejects(
     () => ensureRuntimeStateDir(target),
     (error: unknown) =>
-      error instanceof Error && /EACCES|EPERM/.test((error as NodeJS.ErrnoException).code ?? error.message),
+      error instanceof Error &&
+      /EACCES|EPERM/.test((error as NodeJS.ErrnoException).code ?? error.message),
     "不可写目录必须当场报错（EACCES），不能等到 hello 之后",
   );
 });

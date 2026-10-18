@@ -18,10 +18,7 @@ import process from "node:process";
 import { appendFileSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createExecutionLogger } from "../adapters/executionSupport.js";
-import {
-  createSandboxSupervisor,
-  type SandboxSupervisor,
-} from "../adapters/supervisorRuntime.js";
+import { createSandboxSupervisor, type SandboxSupervisor } from "../adapters/supervisorRuntime.js";
 import { readSupervisorConfig } from "../adapters/supervisorConfig.js";
 import { DEFAULT_RUNTIME_STATE_DIR } from "../adapters/credentialStateFile.js";
 

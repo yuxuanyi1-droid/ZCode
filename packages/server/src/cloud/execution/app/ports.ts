@@ -80,6 +80,12 @@ export interface BootstrapPort {
     runtimeIncarnation: string;
     executionCapabilities: string[];
   }>;
+  /**
+   * 已 bootstrap 的节点在新连接上重推 `bootstrap.config`（12 §6 A-08）：只比较并重装
+   * provisioning envelope / policy 快照，不重新 clone、不重启 runtime、不重新启动 exporter。
+   * 新代际低于本地已应用代际时抛出 `protocol_incompatible`（由会话按 fault 上报）。
+   */
+  refresh(config: BootstrapConfigFrame): Promise<{ configVersion: string }>;
   /** 上报阶段（bridge.phase）；错误码只带归一码与脱敏诊断。 */
   onPhase(listener: (phase: { phase: string; errorCode?: string; diagnostics?: string }) => void): {
     dispose(): void;

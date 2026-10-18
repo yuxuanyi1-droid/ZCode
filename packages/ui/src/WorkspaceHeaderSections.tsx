@@ -36,8 +36,8 @@ import { useFeedbackStore } from "@/feedback/feedbackStore.js";
 import { useModelTrajectoryStore } from "@/store/modelTrajectoryStore.js";
 import { buildTaskFeedbackDescription } from "@/lib/taskFeedbackDraft.js";
 import { resolveGitBranchTriggerLabel } from "@/git-branch-switcher/display.js";
-import { isCloudTaskArchiveActionAvailable } from "@/cloud/cloudTaskPanel.js";
 import { describeCloudTaskActionError } from "@/cloud/cloudTaskErrorText.js";
+import { resolveCloudConnectionIndicator } from "@/cloud/cloudTaskPanel.js";
 import { resolveCloudTaskIdFromWorkspaceIdentity } from "@/cloud/cloudUiBootstrap.js";
 import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
 import { useCloudTask } from "@/hooks/cloud/useCloudTask.js";
@@ -166,10 +166,15 @@ export function WorkspaceHeaderTitleSection({
   const cloudTaskId = resolveCloudTaskIdFromWorkspaceIdentity(workspaceIdentity);
   const cloudContext = useCloudWorkspaceContext();
   const cloudTask = useCloudTask({ taskId: cloudTaskId });
-  // 归档可用性只认服务端 actions 投影（04 §3.3：服务端未给出 = 无动作可用）。
-  // 详情未加载时同样视为不可用，避免「能点但必被拒」的入口。
-  const cloudArchiveUnavailable =
-    cloudTaskId !== null && !isCloudTaskArchiveActionAvailable(cloudTask.detail);
+  // 顶部云图标连接状态点（2026-10-18 用户诉求）：复用 useCloudTask 的既有详情投影，
+  // 不新增请求；纯投影返回 null 表示不是云任务/没有可呈现的状态（draft/archived）。
+  const cloudConnectionIndicator = useMemo(
+    () => resolveCloudConnectionIndicator(cloudTask.detail),
+    [cloudTask.detail],
+  );
+  // 归档对任何非 archived 状态都可用：服务端会在归档前先通过 provider SDK 停止沙箱
+  // （不等待 checkpoint），然后归档。因此 header 的归档入口不再按 actions 投影禁用；
+  // 停止运行环境的后果由云专用确认文案提示。
   // 新建任务在第一次写入数据库前没有稳定 taskId。
   // 之前 Header 更多菜单虽然点击后会被回调里的空 id guard 拦住，但 UI 仍显示为可点，
   // 用户会感知成“菜单无响应”；这里只禁用依赖已落库 task 的动作，保留 workspace 级入口。
@@ -348,10 +353,17 @@ export function WorkspaceHeaderTitleSection({
     // Header 更多菜单之前点击“归档任务”会直接执行，
     // 和 Sidebar 的二次确认心智不一致，用户容易在查看菜单时误触归档。
     // 这里统一先走现成 ConfirmDialog，再复用原有归档链路。
+    // 云任务归档会先停止运行环境，用云专用文案明确提示未保存更改可能丢失；
+    // 本地任务保持原有确认文案不变。
+    const isCloudTask = cloudTaskId !== null;
     const confirmed = await confirmDialog({
       title: intl.formatMessage({ id: "confirmDialog.taskArchiveTitle" }),
       description: intl.formatMessage(
-        { id: "confirmDialog.taskArchiveDescription" },
+        {
+          id: isCloudTask
+            ? "cloud.tasks.archiveConfirmDescription"
+            : "confirmDialog.taskArchiveDescription",
+        },
         {
           taskTitle:
             activeTaskMeta?.title?.trim() ||
@@ -449,67 +461,94 @@ export function WorkspaceHeaderTitleSection({
         }}
       />
       {!isDraftNewTask ? (
-        <ControlHintTooltip
-          open={workspaceContextOpen}
-          onOpenChange={setWorkspaceContextOpen}
-          side="bottom"
-          align="start"
-          className="w-72 items-start border-popover-border bg-popover p-3 text-popover-foreground shadow-md [&>span:first-child]:min-w-0 [&>span:first-child]:flex-1 [&>span:first-child]:text-ui-base [&>span:first-child]:text-popover-foreground"
-          title={
-            <span
-              data-workspace-header-context-info=""
-              className="flex w-full min-w-0 flex-col gap-3 text-left"
-            >
-              <span className="flex min-w-0 items-start gap-2">
-                {isRemoteWorkspace ? (
-                  <Cloud className="size-4 shrink-0" />
-                ) : (
-                  <Folder className="size-4 shrink-0" />
-                )}
-                <span className="flex min-w-0 flex-1 flex-col gap-1">
-                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">
-                    {workspaceContextLabel}
+        <>
+          <ControlHintTooltip
+            open={workspaceContextOpen}
+            onOpenChange={setWorkspaceContextOpen}
+            side="bottom"
+            align="start"
+            className="w-72 items-start border-popover-border bg-popover p-3 text-popover-foreground shadow-md [&>span:first-child]:min-w-0 [&>span:first-child]:flex-1 [&>span:first-child]:text-ui-base [&>span:first-child]:text-popover-foreground"
+            title={
+              <span
+                data-workspace-header-context-info=""
+                className="flex w-full min-w-0 flex-col gap-3 text-left"
+              >
+                <span className="flex min-w-0 items-start gap-2">
+                  {isRemoteWorkspace ? (
+                    <Cloud className="size-4 shrink-0" />
+                  ) : (
+                    <Folder className="size-4 shrink-0" />
+                  )}
+                  <span className="flex min-w-0 flex-1 flex-col gap-1">
+                    <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                      {workspaceContextLabel}
+                    </span>
+                    {workspaceContextOpen ? (
+                      <WorkspaceContextPath
+                        workspacePath={workspaceAbsPath}
+                        workspaceIdentity={workspaceIdentity}
+                        remoteSessionId={remoteSessionId}
+                      />
+                    ) : null}
                   </span>
-                  {workspaceContextOpen ? (
-                    <WorkspaceContextPath
-                      workspacePath={workspaceAbsPath}
-                      workspaceIdentity={workspaceIdentity}
-                      remoteSessionId={remoteSessionId}
-                    />
-                  ) : null}
                 </span>
+                {workspaceContextOpen ? (
+                  <WorkspaceLastActivity
+                    task={activeTaskMeta?.taskId === activeTaskId ? activeTaskMeta : null}
+                  />
+                ) : null}
+                {workspaceBranchLabel ? (
+                  <span className="flex min-w-0 items-center gap-2 border-t border-border/50 pt-3 font-normal">
+                    <GitBranch className="size-4 shrink-0" />
+                    <span className="min-w-0 break-words [overflow-wrap:anywhere]">
+                      {workspaceBranchLabel}
+                    </span>
+                  </span>
+                ) : null}
               </span>
-              {workspaceContextOpen ? (
-                <WorkspaceLastActivity
-                  task={activeTaskMeta?.taskId === activeTaskId ? activeTaskMeta : null}
-                />
-              ) : null}
-              {workspaceBranchLabel ? (
-                <span className="flex min-w-0 items-center gap-2 border-t border-border/50 pt-3 font-normal">
-                  <GitBranch className="size-4 shrink-0" />
-                  <span className="min-w-0 break-words [overflow-wrap:anywhere]">
-                    {workspaceBranchLabel}
-                  </span>
-                </span>
-              ) : null}
-            </span>
-          }
-        >
-          <Button
-            type="button"
-            variant="ghost"
-            size={compact ? "icon-sm" : "icon-md"}
-            data-testid={TID_WORKSPACE_PATH}
-            aria-label={[workspaceContextLabel, workspaceBranchLabel].filter(Boolean).join(" · ")}
-            onClick={() => setWorkspaceContextOpen(true)}
+            }
           >
-            {isRemoteWorkspace ? (
-              <Cloud className="size-4 text-foreground-subtle" />
-            ) : (
-              <Folder className="size-4 text-foreground-subtle" />
-            )}
-          </Button>
-        </ControlHintTooltip>
+            <Button
+              type="button"
+              variant="ghost"
+              size={compact ? "icon-sm" : "icon-md"}
+              data-testid={TID_WORKSPACE_PATH}
+              aria-label={[workspaceContextLabel, workspaceBranchLabel].filter(Boolean).join(" · ")}
+              onClick={() => setWorkspaceContextOpen(true)}
+            >
+              {isRemoteWorkspace ? (
+                <Cloud className="size-4 text-foreground-subtle" />
+              ) : (
+                <Folder className="size-4 text-foreground-subtle" />
+              )}
+            </Button>
+          </ControlHintTooltip>
+          {/* 云图标旁的连接状态点：紧凑尺寸不撑开标题；颜色之外用 title/aria-label 表达状态。 */}
+          {cloudConnectionIndicator ? (
+            <span
+              role="img"
+              data-testid="cloud-connection-indicator"
+              data-connection-tone={cloudConnectionIndicator.tone}
+              title={intl.formatMessage({ id: cloudConnectionIndicator.labelId })}
+              aria-label={intl.formatMessage({ id: cloudConnectionIndicator.labelId })}
+              className="flex size-4 shrink-0 items-center justify-center"
+            >
+              <span
+                className={cn(
+                  "size-2 rounded-full",
+                  cloudConnectionIndicator.tone === "green" && "bg-success",
+                  cloudConnectionIndicator.tone === "amber" && "bg-warning",
+                  cloudConnectionIndicator.tone === "blue" && "bg-sky-500 dark:bg-sky-400",
+                  cloudConnectionIndicator.tone === "red" && "bg-destructive",
+                  // 灰点用空心圆，区别于「已连接」的实心绿点。
+                  cloudConnectionIndicator.tone === "gray" &&
+                    "border border-foreground-subtle bg-transparent",
+                  cloudConnectionIndicator.pulse && "animate-pulse",
+                )}
+              />
+            </span>
+          ) : null}
+        </>
       ) : null}
       <h1
         data-testid={TID_WORKSPACE_TITLE}
@@ -575,12 +614,6 @@ export function WorkspaceHeaderTitleSection({
                 disableTaskActions={Boolean(readOnlyReason)}
                 disabledReason={readOnlyReason}
                 disablePinTaskAction={taskMenuMembershipLoading}
-                disableArchiveTaskAction={cloudArchiveUnavailable}
-                archiveDisabledReason={
-                  cloudArchiveUnavailable
-                    ? intl.formatMessage({ id: "cloud.tasks.archiveUnavailable" })
-                    : undefined
-                }
                 hideMobileUnsupportedActions={simplifyForNarrowRemote}
                 Item={DropdownMenuItem}
                 Separator={DropdownMenuSeparator}

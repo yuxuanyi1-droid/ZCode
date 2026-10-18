@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ZCodeElicitationRequest, ZCodePermissionOption, ZCodeProvider } from "@zcode/shared";
 import type { ConversationSnapshot } from "@zcode/shared/zcode-protocol-v4";
 import { ElicitationDialog } from "@/ElicitationDialog.js";
 import { PermissionDialog } from "@/PermissionDialog.js";
+import { resolveCloudInteractionRoute } from "@/cloud/cloudInteractionDecision.js";
+import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
 import { useOptionalPlatform } from "@/hooks/usePlatform.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { usePendingInteractionTaskNotifications } from "@/hooks/useTaskNotifications.js";
@@ -15,8 +17,6 @@ import {
   useZCodeSessionStore,
 } from "@/store/zcodeSessionStore.js";
 import type { ElicitationFormDraft } from "@/store/zcodeSessionStoreTypes.js";
-import { createCommandEnvelope } from "@/v4/commandFactory.js";
-import { pendingCommandRegistry } from "@/v4/pendingCommandRegistry.js";
 import { sendInteractionAutoResolutionSnooze } from "@/v4/interactionAutoResolutionCommand.js";
 import {
   pendingPermissionToLegacyRequest,
@@ -24,6 +24,7 @@ import {
   pendingUserInputToViewModel,
 } from "@/v4/pendingInteractionAdapter.js";
 import { V4UserInputDialog } from "@/v4/V4UserInputDialog.js";
+import { useInteractionResolver } from "@/v4/useInteractionResolver.js";
 import { useV4Conversation } from "@/v4/V4ConversationContext.js";
 
 interface V4InteractionDialogsProps {
@@ -100,6 +101,13 @@ export function V4InteractionDialogs({
   onPlanInteractionAccepted,
 }: V4InteractionDialogsProps) {
   const { sendCommand } = useV4Conversation();
+  // 云模式（CloudWorkspaceProvider 已挂载）的审批/交互必须走 durable HTTP 通路，
+  // 不再经 attachment 直发 agent 写命令（03 §7.2；relay 对 client scope 已拦截）。
+  const cloudContext = useCloudWorkspaceContext();
+  const cloudInteractionRoute = useMemo(
+    () => resolveCloudInteractionRoute(cloudContext),
+    [cloudContext],
+  );
   const connectWorkspaceHookCommands = useWorkspaceHookReviewStore((state) => state.connect);
   const disconnectWorkspaceHookCommands = useWorkspaceHookReviewStore((state) => state.disconnect);
   const upsertWorkspaceHookReview = useWorkspaceHookReviewStore((state) => state.upsert);
@@ -188,45 +196,12 @@ export function V4InteractionDialogs({
   } | null>(null);
   const permissionResponseFlight = useRef<string | null>(null);
 
-  const resolveInteraction = useCallback(
-    async (
-      interactionId: string,
-      answer: {
-        optionId?: string;
-        freeText?: string;
-        action?: "accept" | "decline" | "cancel";
-        content?: Record<string, unknown>;
-      },
-    ) => {
-      const envelope = createCommandEnvelope({
-        type: "resolveInteraction",
-        sessionId,
-        payload: { interactionId, answer },
-      });
-      // 权限/freeText/content 不落盘；registry 只持摘要，用于 ACK 丢失后的 query 对账。
-      pendingCommandRegistry.record(envelope);
-      try {
-        const ack = await sendCommand(envelope);
-        pendingCommandRegistry.applyAck(envelope, ack);
-        const accepted =
-          ack.status === "accepted" || ack.status === "duplicate" || ack.status === "noop";
-        if (!accepted) {
-          logger.warn("[v4-interaction] resolveInteraction 被拒绝", {
-            interactionId,
-            status: ack.status,
-            reasonCode: ack.reasonCode,
-          });
-        }
-        return accepted;
-      } catch (error) {
-        logger.error("[v4-interaction] resolveInteraction 失败", { interactionId, error });
-        return false;
-      } finally {
-        onCommandSettled?.(envelope.commandId);
-      }
-    },
-    [onCommandSettled, sendCommand, sessionId],
-  );
+  const resolveInteraction = useInteractionResolver({
+    sessionId,
+    sendCommand,
+    onCommandSettled,
+    cloudRoute: cloudInteractionRoute,
+  });
 
   const snoozeAutoResolution = useCallback(
     async (interactionId: string) => {
@@ -341,13 +316,20 @@ export function V4InteractionDialogs({
           const interactionId = pending.interactionId;
           permissionResponseFlight.current = interactionId;
           setPermissionResponse({ interactionId, pending: true, failed: false });
-          void resolveInteraction(interactionId, {
+          void resolveInteraction(interactionId, "permission", {
             optionId: option.optionId,
             ...(feedback ? { freeText: feedback } : {}),
-          }).then((accepted) => {
+          }).then((result) => {
             if (permissionResponseFlight.current !== interactionId) return;
+            // 云模式 delivering/accepted：保持「提交中」，等权威 snapshot 收口；
+            // 只有 admitted（或本地 ACK accepted）才解除 pending。
+            if (result.status === "pending") return;
             permissionResponseFlight.current = null;
-            setPermissionResponse({ interactionId, pending: false, failed: !accepted });
+            setPermissionResponse({
+              interactionId,
+              pending: false,
+              failed: result.status === "failed",
+            });
           });
         }}
       />
@@ -394,11 +376,12 @@ export function V4InteractionDialogs({
             : undefined
         }
         onRespond={(_requestId, action, content) => {
-          void resolveInteraction(pending.interactionId, {
+          void resolveInteraction(pending.interactionId, "elicitation", {
             action,
             ...(content ? { content } : {}),
-          }).then((accepted) => {
-            if (!accepted) return;
+          }).then((result) => {
+            // delivered/persisted 尚未被 runtime 裁决：保留草稿与弹窗，等 snapshot 收口。
+            if (result.status !== "success") return;
             removeElicitationDraft(pending.interactionId);
             if (isExitPlanMode) {
               // Plan 回执 ACK 与 replayable pending 清场是两条异步路径。
@@ -419,7 +402,7 @@ export function V4InteractionDialogs({
     <V4UserInputDialog
       model={model}
       onSubmit={(answer) => {
-        void resolveInteraction(pending.interactionId, answer);
+        void resolveInteraction(pending.interactionId, "elicitation", answer);
       }}
     />
   );

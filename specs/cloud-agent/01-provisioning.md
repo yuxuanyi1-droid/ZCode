@@ -1,6 +1,6 @@
 # Spec 01 — 沙箱供给、凭据与运行环境
 
-状态：目标设计（2026-10-06 云端实现代码已整体回退，尚未实施）
+状态：**已实现（2026-10-17 回写；验证状态见 [10 §10](./10-implementation-plan.md)）**。2026-10-06“云端实现代码已整体回退，尚未实施”为历史记录；当前 `feat/cloud-agent` 分支已落地本文的 driver、bootstrap、创建执行、凭据与资源路径。
 父文档：[00-overview.md](./00-overview.md)
 关联：[02](./02-bridge-protocol.md)、[03](./03-control-plane.md)、[08](./08-project-task-model.md)、[09](./09-github-integration.md)、[11](./11-project-task-creation.md)
 实施阶段：M0 / M1 / M2 / M4；GitHub 触发与多租户属于 M7。
@@ -129,6 +129,8 @@ interface SandboxDriver {
 
 `ProviderSandboxHandle` 包含 provider、sandboxId、templateRevision、providerDeadline / deadlineEstimate，不含浏览器 attach 凭据。`ProviderObservation` 区分 running / paused / stopped / notFound / unknown（paused 为 2026-10-09 生命周期 v2 增补：暂停保留期的实例不得被 keepalive liveness 按 stopped 收口），记录 observedAt、证据来源与归一错误，并提供可选有界 `evidence`（≤160 字符，运营核对用，不得放凭据/prompt/私有代码）；network timeout、503、权限丢失不是 notFound。
 
+**A-08 与 driver 契约（2026-10-17 回写）**：凭据刷新后的 envelope 重装是**执行节点连接期行为**，不属于 `SandboxDriver` 能力，也不需要重新 create/clone。每次新 bridge 连接在 `ready` 前比较已安装 `credentialGeneration` 与 policy/preferences，落后时重装 envelope（`packages/server/src/cloud/execution/app/bridgeSession.ts:128-182`、`execution/app/bootstrap.ts:193-230`）；driver 的 create/findCreateResult/inspect 语义不变。真机 token 刷新重连未复验。
+
 所有 SDK 调用异步，有限重试并支持请求取消。取消本地等待不代表 provider 创建已取消；create 结果未知进入 reconcile。没有原生 idempotency / operation lookup 时，不能声称 exactly-once 创建：唯一 worker 用持久租约串行，未知结果不自动第二次 create，先按标签 / 清单查询或让运营确认；残留资源保持计费告警与清理记录。
 
 **修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）**：`SandboxDriver` 增加分级能力位 `pauseResume: "memory" | "disk" | "none"` 与 `pause(handle)` / `resume(handle, requestedDeadline)` 方法（签名见上接口）。`memory` 表示暂停保留进程态（resume 后沙箱内运行态继续）；`disk` 表示仅保留文件系统、resume 为冷启动——进程态丢失必须如实向用户披露；`none` 表示不支持，生命周期行为与现状完全一致（终态收口 + reopen）。`resume` 恢复的是同一 run：不换代、不重开，恢复通路同时续展凭据有效期与 run 租期（`requestedDeadline` 收敛于能力上限）。`ProviderObservation` 相应增加 `paused` 观察态：keepalive liveness 对 paused 实例不得按 stopped/notFound 收口，暂停保留期的存在性核对走 paused 态。
@@ -140,6 +142,10 @@ interface SandboxDriver {
 首期同时实现 E2B、Modal、Daytona 三家 adapter（2026-10-05 拍板，见 00 §9）。各家以真实账号实测后解禁：实测覆盖能力声明、期限语义、停止语义与启动开销；验证完成前 capability 门控不显示可选。共同接口不抹平期限、资源和停止语义。
 
 **修订（2026-10-09，生命周期 v2：用户决议发消息自动继续 + pause/resume 分级能力）**：分级能力目标值——E2B = `memory`（SDK 原生 pause/resume；create 配置 `onTimeout=pause`，TTL 到点自动暂停而非被杀）、Daytona = `disk`（stop/start 只停不删；resume 为冷启动，文件系统保留、进程态丢失，须如实向用户披露——**解除下表 Daytona 行「首期不依赖磁盘恢复」冻结**）、Modal = `none`（终态走 reopen）。`pauseResume` 纳入「实测解禁」清单：上句实测覆盖范围扩展为「能力声明、期限语义、停止语义、暂停/恢复语义与启动开销」；实测通过前，三家一律按 `none` 行为（fail-closed：代码与契约在、路径不可达，capability 门控不显示暂停能力，不出现 paused 投影）。
+
+**修订（2026-10-13，E2B 按真实账号证据解禁）**：E2B 已于 2026-10-13 解禁（`SANDBOX_PROVIDER_GATES.e2b.verifiedAt`）——2026-10-07 第五~七批真实联调（create + 对账命中、inspect/terminate/clone/push/checkpoint/draft PR、出站 WSS 回连）、2026-10-09 生命周期 v2 真机（autoPause 到期转 paused、账号寿命上限 Hobby 1h / Pro 24h）、2026-10-13 V4r 全链路重验（provision→ready→输入/回复→自动+手动同步→终态；[10 §10](./10-implementation-plan.md)）。残余未验证项 = `setTimeout` 续期确认（只有实现与回归测试、无真机续期证据），仍保留在 `unverified`，不得冒充已验证。Modal/Daytona 未复验、仍不可选；上段「各家以真实账号实测后解禁」规则不变。
+
+**A-08 跨 provider 口径（2026-10-17 回写）**：重连重装 envelope 是三家 provider 共用的执行节点行为（`bootstrap.config` 走已认证 bridge 通道），与 provider 的 pause/resume、期限和终止语义无关；provider 差异表不因此新增能力位。真机 token 刷新重连未复验。
 
 | Provider | 适配与验证                                                                        | 不能假定的能力                                                                                                                                                                                                   |
 | -------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -180,6 +186,13 @@ Daytona 分别定义生命周期、自动停止与 wall-clock TTL，需核实实
 
 本地校验/DB失败不建资源。provider已建而初始化失败持久补偿terminate；结果未知对账不盲重建。输入确定未投递时按03收口为rejected，资源清理未确认仍占额；create成功而写handle前崩溃为必测断点。
 
+**实施回写（2026-10-17，R1）**：本节的幂等与恢复已落地为唯一实现 `establishRunHandle`（`packages/server/src/cloud/app/provisioning/recoverHandle.ts:251-364`），create 正常路径、startup 启动对账与 readiness 看门狗三处共用（`createOperation.ts:55-56`、`reconciler/startup.ts:43-45,126-149`、`provisioning/readiness.ts:36-38,92-101`）。冻结顺序：持久 workspacePath → `recordProviderHandle`（含 workspacePath）→ 停止意图/迟到 handle 只清理 → clone grant → `startSupervisor` → 结算 operation。
+
+- **同 run create 最多一次**：run 已有 `providerHandle` 时禁止再 create，直接进入统一恢复/启动（`createOperation.ts:145-159`）。
+- **重试前置对账**：operation `attempt > 1`、状态 ambiguous 或 `provider_create_unknown` 时，先按 operationKey `findCreateResult`（锚点 = operation.createdAt）：created → 恢复；notFound → 才允许 create；unknown → 保持 ambiguous（`createOperation.ts:186-230`、`recoverHandle.ts:111-127`）。
+- **恢复路径**：startup/readiness 不再各自 `recordProviderHandle`（旧实现会漏 workspacePath 且从不启动 supervisor）；provider 事实为 paused 而 run 仍 ready 时，按事实收敛 paused 或交停止通路（`startup.ts:151-191`）。
+- 真实 E2B 的“create 成功、handle 落库前崩溃 → 重启恢复”端到端未在本轮复验，证据为单测与装配级测试。
+
 实施决议（2026-10-08，账号设置覆盖的解析时点）：create worker 调用 provider 前经 `SandboxRuntimeSettingsPort.readEffectiveSandboxConfig(provider)` 解析生效配置（超时与 key 的收敛公式见 §4.3 修订）。解析发生在 **create 时点**而非启动期固化——账号设置保存后对新 create 立即生效，无需重启部署；进行中 Run 沿用其 recipe 与已确认期限。部署 env 仍是启动期 fail-closed 的装配基线（缺 env 秘密的 provider 照旧拒绝启动，账号设置不解除装配校验）；host 设置/凭据读取失败时回落 env 基线并留 warn，不因设置存储故障阻断 create。
 
 ### 5.2 Readiness 与错误
@@ -195,6 +208,8 @@ Daytona 分别定义生命周期、自动停止与 wall-clock TTL，需核实实
 重启恢复create/terminate/extend/checkpoint Operation、quota与runGeneration。查询provider事实、等合法bridge恢复再投递；内存表清空不是Run消失。旧ticket不能重新登记已撤销Run，合法重连使用02的run-scoped恢复认证。
 
 未登记资源按operationKey/labels关联唯一记录或清理重复。迟到create响应、重复bridge、旧runGeneration的ready/saved/terminated事件不能覆盖activeRun。provider不可用时标记unknown并保留槽、有界对账及运营入口，不建替代沙箱。
+
+**实施回写（2026-10-17，R1）**：启动对账对 provisioning run（以及 handle 来自对账的旧数据）统一调用 `establishRunHandle`：补持久 workspacePath、签发 clone grant、拉起 supervisor；停止意图在启动前检查，迟到 handle 只进入清理（`packages/server/src/cloud/app/reconciler/startup.ts:126-149`）。readiness 在看门狗超时后也走同一 helper（`provisioning/readiness.ts:92-101`），不再出现“provider 里沙箱活着但没有任何 supervisor 连它”的静默态。provider 事实为 paused 时：run=ready 且未请求停止 → 收敛 `paused`；已 paused → 保持（`startup.ts:151-191`）。
 
 ## 6. 模板与 bootstrap
 

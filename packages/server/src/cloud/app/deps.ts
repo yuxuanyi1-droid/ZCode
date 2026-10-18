@@ -25,6 +25,7 @@ import type { StoragePort } from "./ports/storagePort.js";
 import type { UserPreferencesPort } from "./ports/userPreferencesPort.js";
 import type { UserProfileStorePort } from "./ports/userProfileStorePort.js";
 import type { CloudCoreConfig } from "./config.js";
+import type { CredentialCipherProvider } from "@zcode/services/node";
 
 export interface CloudCoreDeps {
   /** 唯一持久入口（03 §4）；事务语义由实现承担（acceptInput/readiness）。 */
@@ -92,6 +93,12 @@ export interface CloudCoreDeps {
    * profile。
    */
   userProfile?: UserProfileStorePort;
+  /**
+   * 用户资源 profile 的凭据信封加密（M8 / R4；14 §5）：mcp-config（token/headers/env）
+   * 落库前加密、回显与连接期同步前解密。未接线时由服务用部署密钥
+   * （`ZCODE_CREDENTIAL_SECRET`，与 host 凭据同一 provider）构造；测试可注入固定密钥实例。
+   */
+  credentialCipher?: CredentialCipherProvider;
   /**
    * 账号行为偏好读取（M8；14 §6/§9.2⑥）：`bootstrap.config.preferences` 的唯一来源。
    * 未接线时不下发 `preferences` 块、不 fail（偏好缺失不是 run 失败条件）。

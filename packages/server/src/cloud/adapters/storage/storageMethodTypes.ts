@@ -71,7 +71,10 @@ type PageRequest = { cursor?: string; limit: number };
 
 export interface StorageMethodTable {
   // ── projects（03 §4 projects 表）──
-  "projects.get": { params: { projectId: string }; result: CloudProjectReturn["get"] };
+  "projects.get": {
+    params: { projectId: string; includeArchived?: boolean };
+    result: CloudProjectReturn["get"];
+  };
   "projects.findByRepository": {
     params: { principalId: string; repositoryId: number };
     result: CloudProjectReturn["get"];
@@ -82,6 +85,8 @@ export interface StorageMethodTable {
     result: CursorPage<NonNullable<CloudProjectReturn["get"]>>;
   };
   "projects.patchMetadata": MethodSignature<ProjectRepo["patchMetadata"]>;
+  /** Project 软删除（15 §R3）：首次归档 true，已归档 false（不覆盖首次归档时间）。 */
+  "projects.archive": { params: { projectId: string; now: number }; result: boolean };
 
   // ── tasks（08 §2/§3.1）──
   "tasks.get": { params: { taskId: string }; result: CloudTaskRecord | null };
@@ -143,6 +148,11 @@ export interface StorageMethodTable {
   "projections.ingestCursors": MethodSignature<ProjectionRepo["ingestCursors"]>;
   "projections.listCheckpoints": { params: { taskId: string }; result: CloudCheckpointRecord[] };
   "projections.recordCheckpoint": { params: { checkpoint: CloudCheckpointRecord }; result: void };
+  /** 审批等待事实（08 §7）：该 run 最新投影的 pendingInteractions 数量（只读）。 */
+  "projections.readLatestPendingInteractionCount": {
+    params: { runId: string };
+    result: number;
+  };
 
   // ── bridge 凭据（02 §5.1/§5.2；extendForRun 为 B-6 续展，2026-10-09 生命周期 v2）──
   "credentials.saveInitial": MethodSignature<RunCredentialRepo["saveInitial"]>;

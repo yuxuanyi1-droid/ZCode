@@ -30,6 +30,8 @@ import {
 import { CLOUD_SDK_INVOCATIONS } from "./cloudSdkInvocations.js";
 import {
   COMMAND_ID,
+  COMMAND_ID_2,
+  INTERACTION_ID,
   RUN_ID,
   TASK_ID,
   cloudEndpointPayload,
@@ -473,4 +475,70 @@ test("profile 条目级开关与回显走冻结的 PATCH/GET 形状（14 §9.4�
   assert.ok(isCloudApiError(invalid));
   assert.equal(invalid.code, "validation_failed");
   assert.equal(server.requests.length, 2);
+});
+
+test("interaction decisions keep 202/status separate from runtime admission (03 §7.2)", async () => {
+  const server = createCloudFixtureServer({
+    handlers: {
+      submitInteractionDecision: () => ({
+        status: 202,
+        body: { taskId: TASK_ID, interactionId: INTERACTION_ID, deliveryStatus: "accepted" },
+      }),
+      cancelInteractionDecision: () => ({
+        status: 200,
+        body: { taskId: TASK_ID, interactionId: INTERACTION_ID, deliveryStatus: "cancelled" },
+      }),
+    },
+  });
+  const { client } = clientFor(server);
+  const body = {
+    commandId: COMMAND_ID,
+    runId: RUN_ID,
+    runGeneration: 1,
+    kind: "permission" as const,
+    answer: { optionId: "allow" },
+  };
+
+  const submitted = await client.submitCloudInteractionDecision(TASK_ID, INTERACTION_ID, body);
+  assert.equal(server.endpointIds[0], "submitInteractionDecision");
+  assert.equal(server.requests[0]?.method, "POST");
+  assert.equal(
+    server.requests[0]?.pathname,
+    `/api/cloud/tasks/${TASK_ID}/interactions/${INTERACTION_ID}`,
+  );
+  // body 原样来自冻结 schema：SDK 不补 principal/workspace 等权威事实。
+  assert.deepEqual(server.requests[0]?.body, body);
+  assert.equal(submitted.httpStatus, 202);
+  assert.equal(submitted.receipt.deliveryStatus, "accepted");
+  // 回执里没有 runtimeAck：SDK 不合成 CommandAck。
+  assert.equal("runtimeAck" in submitted.receipt, false);
+
+  const cancelled = await client.cancelCloudInteractionDecision(TASK_ID, INTERACTION_ID, {
+    commandId: COMMAND_ID,
+    cancelCommandId: COMMAND_ID_2,
+  });
+  assert.equal(server.endpointIds[1], "cancelInteractionDecision");
+  assert.deepEqual(server.requests[1]?.body, {
+    commandId: COMMAND_ID,
+    cancelCommandId: COMMAND_ID_2,
+  });
+  assert.equal(cancelled.deliveryStatus, "cancelled");
+
+  const read = await client.getCloudInteractionDecision(TASK_ID, INTERACTION_ID);
+  assert.equal(server.endpointIds[2], "getInteractionDecision");
+  assert.equal(server.requests[2]?.method, "GET");
+  assert.equal(server.requests[2]?.body, undefined);
+  assert.equal(read.taskId, TASK_ID);
+
+  // 非法 answer 在发出前被冻结 schema 拒绝（不落成第二条请求）。
+  const invalid = await client
+    .submitCloudInteractionDecision(TASK_ID, INTERACTION_ID, {
+      ...body,
+      answer: { action: "approve" as never },
+    })
+    .then(() => undefined)
+    .catch((thrown: unknown) => thrown);
+  assert.ok(isCloudApiError(invalid));
+  assert.equal(invalid.code, "validation_failed");
+  assert.equal(server.requests.length, 3);
 });

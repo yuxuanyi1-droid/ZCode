@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CHECKPOINT_PENDING_MAX_ATTEMPTS } from "../src/cloud/domain/savePolicy.js";
+import { checkpointOperationKey } from "../src/cloud/domain/idempotency.js";
 import { attachReadySession, buildTestPlane } from "./cloudCoreFakes.js";
 
 const PRINCIPAL = "00000000-0000-4000-8000-0000000000aa";
@@ -142,60 +143,181 @@ test("首发后 draftStartConfig 冻结，PATCH 只能改标题（03 §6、11 §
   assert.equal(frozen.ok === false && frozen.reason, "draft-start-config-frozen");
 });
 
-test("CP-12：有任务的 Project 不物理删除；有活动 run 的 Task 不归档", async () => {
+test("R3：ready run 确定失败后 Task 收口 failed，重复收口幂等（08 §3.1 failed 行）", async () => {
   const context = buildTestPlane();
   const { task, run } = await startRun(context);
   assert.ok(task && run);
+  const settled = await context.plane.runs.settleTerminal({
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    to: "failed",
+    endReason: "runtime-unrecoverable",
+    termination: "terminated",
+  });
+  assert.equal(settled.ok, true, settled.ok ? "" : `${settled.code}/${settled.reason}`);
+  const runAfter = await context.storage.runs.get(run.runId);
+  assert.equal(runAfter?.status, "failed");
+  const taskAfter = await context.storage.tasks.get(task.taskId);
+  assert.equal(taskAfter?.status, "failed", "失败 run 的 active Task 必须 CAS 为 failed");
+  const revision = taskAfter?.revision ?? 0;
+
+  // 幂等：重复 settle 已终态 run 不报错；Task 已 failed 不再重复推进 revision。
+  const again = await context.plane.runs.settleTerminal({
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    to: "failed",
+    endReason: "runtime-unrecoverable",
+    termination: "terminated",
+  });
+  assert.equal(again.ok, true);
+  assert.equal((await context.storage.tasks.get(task.taskId))?.revision, revision);
+});
+
+test("R3：provisioning create 确定失败后 Task 收口 failed（08 §3.1 failed 行）", async () => {
+  const context = buildTestPlane();
+  context.driver.createOutcome = "throw-coded";
+  context.driver.createErrorCode = "unsupported_template";
+  const { task } = await seedDraftTask(context);
+  assert.ok(task);
+  const submit = await context.plane.inputs.submit({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+    source: "http",
+    request: {
+      intent: "start",
+      commandId: "00000000-0000-4000-8000-0000000000e1",
+      prompt: "go",
+      expectedTaskRevision: task.revision,
+      start: { baseBranch: "main", provider: "e2b", templateRef: "zcode-node24" },
+    },
+  });
+  assert.equal(submit.ok, true, submit.ok ? "" : `${submit.code}/${submit.reason}`);
+  const attempt = await context.plane.provisioning.create.runCreateOnce();
+  assert.equal(attempt?.outcome, "failed");
+  const stored = await context.storage.tasks.get(task.taskId);
+  assert.equal(stored?.status, "failed", "provisioning 确定失败的 Task 不能停在 active");
+});
+
+test("R3：Project 软删除幂等，删除后 list / 刷新均不可见（15 §R3、03 §6）", async () => {
+  const context = buildTestPlane();
+  const project = await context.plane.tasks.createProject({
+    principalId: PRINCIPAL,
+    repositoryId: 101,
+  });
+  assert.ok(project.ok);
+  const projectId = project.value.projectId;
+
+  const deleted = await context.plane.tasks.deleteProject({
+    principalId: PRINCIPAL,
+    projectId,
+  });
+  assert.equal(deleted.ok, true, deleted.ok ? "" : `${deleted.code}/${deleted.reason}`);
+  assert.equal(context.storage.archivedProjectIds.has(projectId), true, "必须落归档写入");
+  const listed = await context.plane.tasks.listProjects({ principalId: PRINCIPAL });
+  assert.equal(listed.ok && listed.value.items.some((item) => item.projectId === projectId), false);
+  assert.equal(await context.storage.projects.get(projectId), null, "普通读取过滤已归档");
+  assert.equal(
+    await context.storage.projects.findByRepository(PRINCIPAL, 101),
+    null,
+    "按仓库查找过滤已归档",
+  );
+
+  // 重复删除幂等：已归档事实存在时仍返回 deleted=true，不报 not_found。
+  const repeated = await context.plane.tasks.deleteProject({
+    principalId: PRINCIPAL,
+    projectId,
+  });
+  assert.equal(repeated.ok, true);
+  assert.deepEqual(repeated.ok ? repeated.value : null, { deleted: true });
+  const stillHidden = await context.plane.tasks.listProjects({ principalId: PRINCIPAL });
+  assert.equal(
+    stillHidden.ok && stillHidden.value.items.some((item) => item.projectId === projectId),
+    false,
+    "刷新（重新 list）仍不出现",
+  );
+});
+
+test("CP-12：有任务的 Project 不物理删除；有活动 run 的 Task 归档时先停止运行环境再归档", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  assert.ok(task && run);
+  // Project 删除仍默认 409（03 §6、08 §9：有未归档任务时不级联丢历史）。
   const deleted = await context.plane.tasks.deleteProject({
     principalId: PRINCIPAL,
     projectId: task.projectId,
   });
   assert.equal(deleted.ok, false);
   assert.equal(deleted.ok === false && deleted.reason, "project-has-tasks");
+
+  // 2026-10-18 用户决议：归档不再被活动 run 阻塞——归档命令先持久停止意图并经 provider
+  // terminate 停止沙箱（不等待 checkpoint），随即把 Task 置为 archived。
   const archived = await context.plane.commands.taskLifecycle.archiveTask({
     principalId: PRINCIPAL,
     taskId: task.taskId,
   });
-  assert.equal(archived.ok, false);
-  assert.equal(archived.ok === false && archived.reason, "task-has-active-run");
-
-  // 显式 stop 流程完成后可归档（03 §6：默认 409，显式 stop 流程完成后再归档）。
-  await context.plane.commands.stop.stopTask({ principalId: PRINCIPAL, taskId: task.taskId });
-  const draining = await context.storage.runs.get(run.runId);
-  assert.equal(draining?.status, "draining");
-  assert.equal(draining?.stopRequested, true);
-  await context.plane.lifecycle.checkpoints.handleCheckpointResult({
-    taskId: task.taskId,
-    runId: run.runId,
-    runGeneration: run.runGeneration,
-    frame: {
-      protocolVersion: 1,
-      type: "checkpoint.result",
-      operationId: draining?.stopOperationId ?? "",
-      status: "saved",
-      branch: "zcode/task-x",
-      remoteSha: "c".repeat(40),
-      hadNewCommits: true,
-    },
-  });
-  // 操作由带租约的 worker 结算后，stop 才能推进到 terminate（08 §8.1 依赖顺序）。
-  await context.plane.lifecycle.checkpoints.sweepCheckpointOperations();
-  const advanced = await context.plane.commands.stop.sweep();
-  assert.equal(advanced.advanced, 1);
-  const stopped = await context.storage.runs.get(run.runId);
-  assert.equal(stopped?.status, "stopped");
-  assert.equal(
-    context.storage.quotaReleases.includes(run.runId),
-    true,
-    "provider 确认终止后才释放配额",
+  assert.ok(
+    archived.ok,
+    `有活动 run 的 Task 也可归档：${archived.ok === false ? archived.reason : ""}`,
   );
-  const archivedNow = await context.plane.commands.taskLifecycle.archiveTask({
+  assert.equal(archived.ok === true && archived.value.task.status, "archived");
+  assert.equal(archived.ok === true && archived.value.task.archivedFromStatus, "active");
+  const stopped = await context.storage.runs.get(run.runId);
+  assert.equal(stopped?.status, "stopped", "provider 确认终止后 run 收口 stopped");
+  assert.equal(stopped?.stopRequested, true, "归档驱动停止写持久屏障");
+  assert.equal(stopped?.dataAtRisk, true, "未保存即终止：dataAtRisk 如实落库（08 §8.2）");
+  assert.ok(context.driver.terminateCalls >= 1, "归档时经 provider SDK 终止沙箱");
+  assert.equal(context.attachmentPort.checkpoints.length, 0, "归档停止不发起 checkpoint 请求");
+  assert.ok(context.storage.quotaReleases.includes(run.runId), "provider 确认终止后释放槽");
+
+  // 幂等：已归档任务再次归档直接返回既有详情。
+  const archivedAgain = await context.plane.commands.taskLifecycle.archiveTask({
     principalId: PRINCIPAL,
     taskId: task.taskId,
   });
-  assert.equal(archivedNow.ok, true);
-  assert.equal(archivedNow.ok && archivedNow.value.task.status, "archived");
-  assert.equal(archivedNow.ok && archivedNow.value.task.archivedFromStatus, "active");
+  assert.equal(archivedAgain.ok, true);
+  assert.equal(archivedAgain.ok === true && archivedAgain.value.task.status, "archived");
+});
+
+test("归档 ready run：provider terminate 被调用、run 变 stopped、task archived、dataAtRisk=true（2026-10-18）", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  assert.ok(task && run);
+  const archived = await context.plane.commands.taskLifecycle.archiveTask({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+  });
+  assert.ok(
+    archived.ok,
+    `归档应成功：${archived.ok === false ? `${archived.code}/${archived.reason}` : ""}`,
+  );
+  assert.equal(archived.ok === true && archived.value.task.status, "archived");
+  const after = await context.storage.runs.get(run.runId);
+  assert.equal(after?.status, "stopped");
+  assert.equal(after?.stopRequested, true);
+  assert.ok(after?.stopOperationId, "停止屏障持久化 stopOperationId");
+  assert.equal(after?.dataAtRisk, true, "ready 运行环境未保存即终止：风险如实标注");
+  assert.ok(context.driver.terminateCalls >= 1, "provider terminate 被调用");
+  assert.equal(context.attachmentPort.checkpoints.length, 0, "归档不发起 checkpoint、不等待保存");
+});
+
+test("归档 terminate 未确认（unknown）：task 仍归档，run 留 draining 由 sweep 收口（2026-10-18）", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  assert.ok(task && run);
+  context.driver.terminateStatus = "unknown";
+  const archived = await context.plane.commands.taskLifecycle.archiveTask({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+  });
+  assert.ok(
+    archived.ok,
+    `终止未确认不阻塞归档：${archived.ok === false ? `${archived.code}/${archived.reason}` : ""}`,
+  );
+  assert.equal(archived.ok === true && archived.value.task.status, "archived");
+  const after = await context.storage.runs.get(run.runId);
+  assert.equal(after?.status, "draining", "run 留 draining 占槽，由 stop/compensation sweep 收口");
+  assert.equal(after?.stopRequested, true, "停止屏障与 terminate operation 已持久");
+  assert.ok(context.driver.terminateCalls >= 1, "已尝试 provider 终止");
 });
 
 test("CP-11：未 ready 的 Run 与无 attachment 时解析执行目标返回结构化 not_ready", async () => {
@@ -432,6 +554,8 @@ test("硬期限 drain 会写持久屏障并请求沙箱侧收口（08 §7/§8.1�
 test("checkpoint 结果落库与操作结算（08 §8.2、03 §5）", async () => {
   const context = buildTestPlane();
   const { task, run } = await startRun(context);
+  const taskBranch = (await context.storage.tasks.get(task.taskId))?.taskBranch;
+  assert.ok(taskBranch, "首次接纳已冻结任务分支");
   await context.plane.commands.stop.stopTask({ principalId: PRINCIPAL, taskId: task.taskId });
   const operationId = (await context.storage.runs.get(run.runId))?.stopOperationId ?? "";
   const saved = await context.plane.lifecycle.checkpoints.handleCheckpointResult({
@@ -443,7 +567,7 @@ test("checkpoint 结果落库与操作结算（08 §8.2、03 §5）", async () =
       type: "checkpoint.result",
       operationId,
       status: "saved",
-      branch: "zcode/task-x",
+      branch: taskBranch,
       remoteSha: "d".repeat(40),
       hadNewCommits: true,
     },
@@ -456,6 +580,17 @@ test("checkpoint 结果落库与操作结算（08 §8.2、03 §5）", async () =
   assert.equal(operation?.state, "settled");
 
   // 无合法 remote SHA 的 saved 结果 fail-closed，不写 saved（08 §8.1 第三批）。
+  // R2：结果必须对应真实 operation（15 §3），因此为这条用例另入队一个 checkpoint op。
+  const bogusOperationId = "00000000-0000-4000-8000-0000000000b7";
+  await context.outbox.enqueue({
+    operationId: bogusOperationId,
+    kind: "checkpoint",
+    idempotencyKey: checkpointOperationKey(run.runId, bogusOperationId),
+    taskId: task.taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    now: context.clock.now(),
+  });
   const bogus = await context.plane.lifecycle.checkpoints.handleCheckpointResult({
     taskId: task.taskId,
     runId: run.runId,
@@ -463,9 +598,9 @@ test("checkpoint 结果落库与操作结算（08 §8.2、03 §5）", async () =
     frame: {
       protocolVersion: 1,
       type: "checkpoint.result",
-      operationId: `${operationId}-2`,
+      operationId: bogusOperationId,
       status: "saved",
-      branch: "zcode/task-x",
+      branch: taskBranch,
       remoteSha: "not-a-sha",
     },
   });
@@ -476,6 +611,113 @@ test("checkpoint 结果落库与操作结算（08 §8.2、03 §5）", async () =
     "无证据不写 confirmedRemoteSha",
   );
   assert.equal(bogus.ok && typeof bogus.value.riskSummary === "string", true);
+});
+
+test("R2 checkpoint 归属与单调性：伪造 operation / 错误 branch / 迟到 failed 均不覆盖保存事实", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  const taskBranch = (await context.storage.tasks.get(task.taskId))?.taskBranch;
+  assert.ok(taskBranch, "首次接纳已冻结任务分支");
+  await context.plane.commands.stop.stopTask({ principalId: PRINCIPAL, taskId: task.taskId });
+  const base = {
+    taskId: task.taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+  } as const;
+  const enqueueCheckpoint = async (operationId: string) => {
+    await context.outbox.enqueue({
+      operationId,
+      kind: "checkpoint",
+      idempotencyKey: checkpointOperationKey(run.runId, operationId),
+      taskId: task.taskId,
+      runId: run.runId,
+      runGeneration: run.runGeneration,
+      now: context.clock.now(),
+    });
+  };
+
+  // ① 不存在（伪造）的 operationId：拒绝记录，不改 dataAtRisk / lastCheckpointSha。
+  const forged = await context.plane.lifecycle.checkpoints.handleCheckpointResult({
+    ...base,
+    frame: {
+      protocolVersion: 1,
+      type: "checkpoint.result",
+      operationId: "00000000-0000-4000-8000-0000000000f1",
+      status: "saved",
+      branch: taskBranch,
+      remoteSha: "f".repeat(40),
+      hadNewCommits: true,
+    },
+  });
+  assert.equal(forged.ok, false);
+  assert.equal(forged.ok === false && forged.reason, "checkpoint-operation-not-found");
+  assert.equal(context.storage.checkpoints.length, 0, "伪造结果不落库");
+  assert.equal((await context.storage.runs.get(run.runId))?.dataAtRisk, false);
+  assert.equal((await context.storage.tasks.get(task.taskId))?.lastCheckpointSha, undefined);
+
+  // ② saved 但 branch 不是 Task 的任务分支：fail-closed 记为 failed，不伪造 saved。
+  const wrongBranchOperationId = "00000000-0000-4000-8000-0000000000f2";
+  await enqueueCheckpoint(wrongBranchOperationId);
+  const wrongBranch = await context.plane.lifecycle.checkpoints.handleCheckpointResult({
+    ...base,
+    frame: {
+      protocolVersion: 1,
+      type: "checkpoint.result",
+      operationId: wrongBranchOperationId,
+      status: "saved",
+      branch: "zcode/task-other-branch",
+      remoteSha: "a".repeat(40),
+      hadNewCommits: true,
+    },
+  });
+  assert.equal(wrongBranch.ok && wrongBranch.value.state, "failed");
+  assert.equal(wrongBranch.ok && wrongBranch.value.confirmedRemoteSha, undefined);
+  assert.equal((await context.storage.runs.get(run.runId))?.dataAtRisk, true);
+  assert.equal(
+    (await context.storage.tasks.get(task.taskId))?.lastCheckpointSha,
+    undefined,
+    "错误分支不得推进 lastCheckpointSha",
+  );
+
+  // ③ 同一 operationId 已 saved：迟到 failed 不得覆盖记录/风险标注/lastCheckpointSha。
+  const savedOperationId = "00000000-0000-4000-8000-0000000000f3";
+  await enqueueCheckpoint(savedOperationId);
+  const saved = await context.plane.lifecycle.checkpoints.handleCheckpointResult({
+    ...base,
+    frame: {
+      protocolVersion: 1,
+      type: "checkpoint.result",
+      operationId: savedOperationId,
+      status: "saved",
+      branch: taskBranch,
+      remoteSha: "e".repeat(40),
+      hadNewCommits: true,
+    },
+  });
+  assert.equal(saved.ok && saved.value.state, "saved");
+  assert.equal((await context.storage.runs.get(run.runId))?.dataAtRisk, false);
+  assert.equal((await context.storage.tasks.get(task.taskId))?.lastCheckpointSha, "e".repeat(40));
+
+  context.clock.advance(1_000);
+  const lateFailed = await context.plane.lifecycle.checkpoints.handleCheckpointResult({
+    ...base,
+    frame: {
+      protocolVersion: 1,
+      type: "checkpoint.result",
+      operationId: savedOperationId,
+      status: "failed",
+      errorCode: "checkpoint_failed",
+      error: "late failure",
+    },
+  });
+  assert.equal(lateFailed.ok && lateFailed.value.state, "saved", "saved 是终态");
+  const persisted = (await context.storage.projections.listCheckpoints(task.taskId)).find(
+    (item) => item.operationId === savedOperationId,
+  );
+  assert.equal(persisted?.state, "saved");
+  assert.equal(persisted?.confirmedRemoteSha, "e".repeat(40));
+  assert.equal((await context.storage.runs.get(run.runId))?.dataAtRisk, false);
+  assert.equal((await context.storage.tasks.get(task.taskId))?.lastCheckpointSha, "e".repeat(40));
 });
 
 test("启动对账：重启把在途投递收口为 uncertain，按 provider 存活/终止分流（03 §8）", async () => {
@@ -552,7 +794,10 @@ test("任务详情的 actions 投影：按状态表推导、服务端仍独立�
   assert.ok(actions.includes("complete"), "active 可验收（必要时先 drain）");
   assert.ok(actions.includes("send-input"), "ready run 可追加输入");
   assert.ok(actions.includes("extend"), "provider 支持续期时投影 extend");
-  assert.equal(actions.includes("archive"), false, "有活动写 run 时不可归档");
+  assert.ok(
+    actions.includes("archive"),
+    "有活动写 run 时也可归档（2026-10-18：服务端先停止运行环境再归档）",
+  );
   assert.equal(activeDetail.value.actions.length > 0, true);
 
   // actions 不是授权凭据：停止后 stop 立即从投影消失，但服务端仍会独立校验。
@@ -568,6 +813,43 @@ test("任务详情的 actions 投影：按状态表推导、服务端仍独立�
   assert.equal(stopping.value.actions.includes("stop"), false, "受理停止后不再开放 stop");
   assert.equal(stopping.value.actions.includes("send-input"), false, "停止屏障下不再开放新输入");
   assert.ok(stopping.value.actions.includes("force-stop"));
+});
+
+test("任务详情暴露 attachment 瞬态连接事实：run=ready 不代表 attachment ready（resume 窗口）", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  assert.ok(task && run);
+
+  // resume 窗口：run 已被控制面 CAS 为 ready，但 bridge 尚未重连 → attachment 未 ready。
+  context.attachmentPort.setReady(run.runId, false);
+  const notReady = await context.plane.taskDetail.getDetail({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+  });
+  assert.ok(notReady.ok);
+  assert.equal(notReady.value.activeRun?.status, "ready", "连接事实不得改写 run 状态");
+  assert.equal(notReady.value.attachmentReady, false, "attachment 未回连时详情如实投影 false");
+
+  // attachment 回连后同一 run 的详情翻为 true（瞬态事实，不是持久状态）。
+  context.attachmentPort.setReady(run.runId, true);
+  const ready = await context.plane.taskDetail.getDetail({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+  });
+  assert.ok(ready.ok);
+  assert.equal(ready.value.attachmentReady, true);
+
+  // 无 activeRun（draft）时不带该字段：连接事实只对当前 run 有意义。
+  // 独立装配：同一平面里 creationKey 去重会复用上面已启动的任务。
+  const draftContext = buildTestPlane();
+  const draft = await seedDraftTask(draftContext);
+  assert.ok(draft.task);
+  const draftDetail = await draftContext.plane.taskDetail.getDetail({
+    principalId: PRINCIPAL,
+    taskId: draft.task.taskId,
+  });
+  assert.ok(draftDetail.ok);
+  assert.equal("attachmentReady" in draftDetail.value, false);
 });
 
 test("reactivate 需要 PR 状态投影：有 prRef 时明确 not_implemented（CR-4）", async () => {
@@ -651,6 +933,8 @@ test("C-1：已有停止屏障时 beginDrain 复用 run.stopOperationId，不新
 test("D4-4：stop op 重试成功按最新状态收口，不再假 dataAtRisk", async () => {
   const context = buildTestPlane();
   const { task, run } = await startRun(context);
+  const taskBranch = (await context.storage.tasks.get(task.taskId))?.taskBranch;
+  assert.ok(taskBranch, "首次接纳已冻结任务分支");
   await context.plane.commands.stop.stopTask({ principalId: PRINCIPAL, taskId: task.taskId });
   const operationId = (await context.storage.runs.get(run.runId))?.stopOperationId ?? "";
 
@@ -688,7 +972,7 @@ test("D4-4：stop op 重试成功按最新状态收口，不再假 dataAtRisk", 
       type: "checkpoint.result",
       operationId,
       status: "saved",
-      branch: "zcode/task-x",
+      branch: taskBranch,
       remoteSha: "e".repeat(40),
       hadNewCommits: true,
     },
@@ -839,4 +1123,44 @@ test("C-4：分相领取——停止 sweep 只领屏障关联 op，周期保存�
     "第 2 相领取周期保存 op（不饿死）",
   );
   assert.ok(secondPhase);
+});
+
+test("stop 保存失败重试会重新排队操作，attempt 可推进（2026-10-18 停止死锁回归）", async () => {
+  const context = buildTestPlane();
+  const { task, run } = await startRun(context);
+  await context.plane.commands.stop.stopTask({ principalId: PRINCIPAL, taskId: task.taskId });
+  const operationId = (await context.storage.runs.get(run.runId))?.stopOperationId ?? "";
+  assert.ok(operationId);
+
+  // 第一次保存失败 → 结果落库、op 结算 failed（attempt=1）。
+  await context.plane.lifecycle.checkpoints.handleCheckpointResult({
+    taskId: task.taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    frame: {
+      protocolVersion: 1,
+      type: "checkpoint.result",
+      operationId,
+      status: "failed",
+      errorCode: "checkpoint_failed",
+      error: "git push rejected",
+    },
+  });
+  await context.plane.lifecycle.checkpoints.sweepCheckpointOperations();
+  const failed = await context.outbox.get(operationId);
+  assert.equal(failed?.state, "failed");
+  assert.equal(failed?.attempt, 1, "首次失败后 attempt 不再增长（旧实现的死锁起点）");
+
+  // stop sweep 进入预算内重试：必须把 failed op 重新排队，否则 attempt 永远冻结在 1，
+  // 重试预算永远用不完，run 卡在 draining 直到硬期限。
+  const drainsBeforeRetry = context.attachmentPort.drains.length;
+  const retry = await context.plane.commands.stop.sweep();
+  assert.equal(retry.waitingSave, 1);
+  const requeued = await context.outbox.get(operationId);
+  assert.equal(requeued?.state, "pending", "重试必须重新武装同一条停止保存操作");
+  assert.equal(
+    context.attachmentPort.drains.length,
+    drainsBeforeRetry,
+    "重试不得重复发 drain：旧执行节点会因此关闭刚重连的 bridge，保存结果丢失",
+  );
 });

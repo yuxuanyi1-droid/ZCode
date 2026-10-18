@@ -81,12 +81,15 @@ function createTickRunner(plane: CloudControlPlane, workerId: string) {
     /** 投递 + 输入对账（delivery 循环）。 */
     async deliveryTick(): Promise<CloudLoopTickReport> {
       const report = emptyReport();
+      // 修复依据（2026-10-17 R2，spec 15 §3、02 §6.3）：先对账再投递。旧顺序先 dispatch
+      // 后 reconcile，delivering/uncertain 输入可能在确认结果未知时被再次投递；对账先行
+      // 能让 dispatcher 只处理「明确 unknown 才同 commandId 重投」的剩余记录。
+      const reconciliations = await plane.inputControl.reconcileOnce();
+      report.reconciliation = summarizeReconciliation(reconciliations);
       const dispatches = await plane.delivery.dispatchOnce();
       report.deliveredTasks = dispatches.filter((item) =>
         item.outcomes.some((outcome) => outcome.result === "sent"),
       ).length;
-      const reconciliations = await plane.inputControl.reconcileOnce();
-      report.reconciliation = summarizeReconciliation(reconciliations);
       return report;
     },
     /** 生命周期：终止结算 → create → readiness → checkpoint 结算 → stop 推进 → 保活/drain → 验收扫尾 → 心跳。 */

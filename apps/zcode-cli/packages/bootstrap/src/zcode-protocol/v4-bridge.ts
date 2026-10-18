@@ -82,7 +82,7 @@ import type {
   WorkspaceId,
 } from "@zcode/contracts";
 import { HYDRATION_TRACE_ID } from "../zcode-protocol-v4/projection-state.js";
-import { resolveWorkspaceRefFromId } from "./mapper.js";
+import { resolveWorkspaceRefFromCreateSession } from "./mapper.js";
 import { buildLiveWorkspaceConfigStateV4 } from "./v4-workspace-config.js";
 import {
   hasSessionModelProvider,
@@ -1104,6 +1104,7 @@ export function createConversationV4Gateway(
     // 语义决策（draft persistence / firstInput 走原生 prompt turn）在原生 handler。
     createSessionRecord: async ({
       workspaceId,
+      workspacePath,
       mcpServers,
       offPeakToolEnabled,
       dynamicWorkflowEnabled,
@@ -1117,8 +1118,11 @@ export function createConversationV4Gateway(
       //   （workspaceKey = identity，sessions-index topic / 隔离语义不变）。
       // shared parser 统一兼容 WSL legacy 与显式 user identity；非远程格式继续按
       // 本地 workspacePath 处理。
+      // 云任务（02 §2）：cloud-task:<taskId> 不含路径，payload 必须携带控制面按
+      // attachment 事实填写的 workspacePath；缺失时 resolver fail-closed，禁止把
+      // identity 当成本地目录（2026-10-13 V4r 真机：cwd 被污染为 <cwd>/cloud-task:<id>）。
       const created = await createSessionRecordForV4(context, {
-        workspace: resolveWorkspaceRefFromId(workspaceId),
+        workspace: resolveWorkspaceRefFromCreateSession({ workspaceId, workspacePath }),
         // 一律 deferred（draft 不进 sqlite）；提升时机归原生 prompt-turn。
         persistence: "deferred",
         // MCP 是 runtime 创建期配置；v4 createSession 必须与 legacy

@@ -3,19 +3,17 @@
  * 03 §5 operation 结算、01 §8 checkpoint）。
  *
  * 事实来源：
- * - 沙箱侧保存结果以 `checkpoint.result` 帧回到控制面（02 §4）；本文件把它落成
- *   `checkpoints` 记录（`saved` 必须有 confirmedRemoteSha，08 §8.2），并更新
- *   Task 的 lastCheckpointSha。
+ * - `checkpoint.result` 的落库与 R2 归属/单调性校验在 `checkpointResults.ts`；
+ *   本文件只负责周期保存、结果缺失退避与带租约的操作结算。
  * - checkpoint operation 的结算由**带租约的 worker**完成（`sweepCheckpointOperations`）：
  *   它读取已持久的结果记录再 CAS 结算，避免用没有租约令牌的迟到结果覆盖新 worker
  *   （OperationOutboxPort 的租约语义）。
  * - 保存失败不伪装 saved：state=failed + dataAtRisk（08 §8.2）。
  */
-import type { CheckpointResultFrame, CloudCheckpointRecord } from "@zcode/shared";
+import type { CloudCheckpointRecord } from "@zcode/shared";
 import { checkpointOperationKey } from "../../domain/idempotency.js";
 import {
   checkpointPendingExhausted,
-  evaluateCheckpointOutcome,
   shouldRequestPeriodicCheckpoint,
 } from "../../domain/savePolicy.js";
 import {
@@ -27,9 +25,10 @@ import { isTerminalRunStatus } from "../../domain/taskRunState.js";
 import type { CloudCoreDeps } from "../deps.js";
 import { type CloudGitGrantService } from "../gitGrants.js";
 import { cloudCoreLogger } from "../logger.js";
-import { fail, ok, type CloudAppResult } from "../result.js";
+import type { CloudAppResult } from "../result.js";
 import type { ExternalOperationRecord } from "../ports/operationOutboxPort.js";
 import { createCheckpointFailureLedger } from "./checkpointBackoffLedger.js";
+import { createCheckpointResultHandler, type CheckpointResultInput } from "./checkpointResults.js";
 
 export interface CheckpointSweepReport {
   requested: number;
@@ -40,12 +39,9 @@ export interface CheckpointSweepReport {
 
 export interface CheckpointPipeline {
   /** 处理 bridge 的 checkpoint.result：只落事实，不在没有租约的情况下结算 operation。 */
-  handleCheckpointResult(input: {
-    taskId: string;
-    runId: string;
-    runGeneration: number;
-    frame: CheckpointResultFrame;
-  }): Promise<CloudAppResult<CloudCheckpointRecord>>;
+  handleCheckpointResult(
+    input: CheckpointResultInput,
+  ): Promise<CloudAppResult<CloudCheckpointRecord>>;
   /** 周期保存（08 §7：5 分钟候选，优先轮次安全点，dirty 且能获得写屏障才执行）。 */
   sweepPeriodicCheckpoints(now?: number): Promise<CheckpointSweepReport>;
   /** 结算已到期的 checkpoint operation（租约 + 已持久结果）。 */
@@ -184,78 +180,10 @@ export function createCheckpointPipeline(
   }
 
   return {
-    async handleCheckpointResult(input) {
-      const run = await storage.runs.get(input.runId);
-      if (!run || run.taskId !== input.taskId) return fail("not_found", "run-not-found");
-      if (run.runGeneration !== input.runGeneration) {
-        // 旧代际的 checkpoint 结果不得修改新 run（08 §4.2）。
-        return fail("stale", "stale-generation");
-      }
-      const task = await storage.tasks.get(input.taskId);
-      if (!task) return fail("not_found", "task-not-found");
-
-      const outcome = evaluateCheckpointOutcome({
-        status: input.frame.status,
-        branch: input.frame.branch,
-        remoteSha: input.frame.remoteSha,
-        hadNewCommits: input.frame.hadNewCommits,
-        errorCode: input.frame.errorCode,
-        errorMessage: input.frame.error,
-        frozenBaseSha: task.baseSha,
-      });
-      const now = clock.now();
-      const record: CloudCheckpointRecord = {
-        operationId: input.frame.operationId,
-        taskId: input.taskId,
-        runId: input.runId,
-        runGeneration: input.runGeneration,
-        state: outcome.state,
-        // v1 收口范围 = tracked + non-ignored untracked，逐文件清单未上报（08 §8.1 第三批如实记录）。
-        includedFiles: [],
-        ...(input.frame.remoteSha && outcome.confirmedRemoteSha
-          ? { confirmedRemoteSha: outcome.confirmedRemoteSha }
-          : {}),
-        ...(outcome.riskSummary ? { riskSummary: outcome.riskSummary } : {}),
-        createdAt: now,
-        updatedAt: now,
-      };
-      await storage.projections.recordCheckpoint(record);
-      // CR-6 冻结写口（08 §8.2「不得宣称工作全部保住」），且**双向如实**：最新一次保存
-      // 带确认 SHA 即解除既有风险标注（D4-4：stop 保存重试成功不得被更早的失败永久
-      // 标成 dataAtRisk）；失败/未知则如实标注。run.dataAtRisk 的语义 =「最新保存事实
-      // 是否有丢失风险」，由本通路（唯一写口之一）随结果推进。
-      await storage.runs.setRunDataAtRisk({
-        runId: input.runId,
-        runGeneration: input.runGeneration,
-        dataAtRisk: outcome.dataAtRisk,
-        now,
-      });
-      if (outcome.state === "saved" && outcome.confirmedRemoteSha) {
-        // 保存成功：清零结果缺失连击（08 §7 退避：成功即恢复正常周期档）。
-        resultlessFailures.clear(input.runId);
-        // 最近确认 checkpoint 的 remote SHA 落在 Task 上（08 §2、§9 重开 resumeSha 来源）。
-        await storage.tasks.recordCheckpointSha({
-          taskId: input.taskId,
-          remoteSha: outcome.confirmedRemoteSha,
-          now,
-        });
-        cloudCoreLogger.info(undefined, "cloud checkpoint saved", {
-          taskId: input.taskId,
-          runId: input.runId,
-          operationId: input.frame.operationId,
-          noNewCommits: outcome.noNewCommits === true,
-        });
-      } else {
-        cloudCoreLogger.warn(undefined, "cloud checkpoint not saved", {
-          taskId: input.taskId,
-          runId: input.runId,
-          operationId: input.frame.operationId,
-          state: outcome.state,
-          dataAtRisk: outcome.dataAtRisk,
-        });
-      }
-      return ok(record);
-    },
+    // 结果落库与 R2 归属/单调性校验在 checkpointResults.ts；结果缺失连击清零回调在此注入。
+    handleCheckpointResult: createCheckpointResultHandler(deps, (runId) =>
+      resultlessFailures.clear(runId),
+    ),
 
     async sweepPeriodicCheckpoints(now = clock.now()) {
       const report: CheckpointSweepReport = { requested: 0, settled: 0, ambiguous: 0, failed: 0 };

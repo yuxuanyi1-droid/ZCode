@@ -51,6 +51,29 @@ Cloud 控制面：云服务端（= 标准 ZCode host 本体 + cloud 叠加层，
     帧下发（welcome 之后、ready 之前）；provider env/元数据对 provider API 可读，禁承载凭据，
     provider 命令通道只下发自举要素（01 §6.2、12 §6）。`credentialGeneration` 供 A-08 代际核对。
 11. 时间戳统一 epoch 毫秒（对齐 zcode-protocol-v4 Timestamp）。
+12. **同 run 的 `driver.create` 最多一次**（15 §R1）：run 已有 `providerHandle` 直接走统一恢复；
+    operation attempt > 1/ambiguous/`provider_create_unknown` 必须先按 operationKey
+    `findCreateResult`（锚点 operation.createdAt）：created → 恢复，unknown → 保持 ambiguous，
+    只有 notFound 才允许 create。
+13. **恢复路径唯一实现**：create/startup/readiness 共用 `establishRunHandle`
+    （`app/provisioning/recoverHandle.ts`）：持久 workspacePath → `recordProviderHandle` →
+    clone grant → `startSupervisor` → 结算；停止意图在启动前检查，迟到 handle 只清理。
+14. **checkpoint.result 归属与单调**（15 §R2）：operationId 必须对应本 task/run/generation 上
+    真实存在的 `kind=checkpoint` 操作；`saved` 仅在 `branch === task.taskBranch` 时允许；
+    已 saved 的记录不再被迟到 failed/unknown 覆盖（`domain/checkpointPolicy.ts`）。
+15. **run 终态 Task 收口**：仅 runStatus=failed 且 Task 仍 active 且无剩余活动 run 时，
+    CAS 写 Task→failed；completed/archived/draft 与 stopped/expired 不改写
+    （`domain/taskRunState.ts`、`app/runOrchestrator.ts`）。
+16. **Project 软删除**（15 §R3）：`projects.archived_at`（迁移 0009）只追加列、不物理删除；
+    读路径过滤已归档行；有活动任务仍 409；重复删除幂等。
+17. **交互决定 durable**（15 §R6）：审批/提问决定先落 `task_input_interaction_decisions`
+    再投递；`client` scope 直发 `resolveInteraction` 被拒；任务输入 `createSession`/`sendText`
+    由 UI 包装拒绝直发。编辑/重试/反馈仍走 agent 通道（遗留 durable 化项）。
+18. **审批等待不是业务空闲**（08 §7，2026-10-17）：等待工具审批（持久投影
+    `pendingInteractions` 非空）的 run 不得被 idle pause / idle drain 收口，keepalive 续期
+    必须把 `pendingInteractionCount > 0` 视为有工作；三个消费者统一读
+    `ProjectionRepo.readLatestPendingInteractionCount(runId)`。投影是最终一致事实：审批
+    尚未落入投影的窗口内仍可能短暂误判为空闲。
 
 ## DB schema 冻结（03 §4；W2 实现）
 
@@ -59,7 +82,7 @@ Cloud 控制面：云服务端（= 标准 ZCode host 本体 + cloud 叠加层，
 | 表                                 | 核心内容                                                                                                                                                                                                                            | 唯一/CAS 约束                                                                                                       |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `principals`                       | 部署/账号主体与禁用状态                                                                                                                                                                                                             | `principal_id` 唯一                                                                                                 |
-| `projects`                         | owner、repo descriptor、展示名                                                                                                                                                                                                      | `(owner_principal_id, repository_id)` 唯一；`revision` CAS                                                          |
+| `projects`                         | owner、repo descriptor、展示名、`archived_at`（软删除，0009）                                                                                                                                                                       | `(owner_principal_id, repository_id)` 唯一；`revision` CAS；读路径过滤 `archived_at IS NULL`                        |
 | `tasks`                            | owner/project/creationKey/draftStartConfig/冻结分支/状态                                                                                                                                                                            | `task_id` 唯一；`(owner_principal_id, creation_key)` 唯一；`revision` CAS                                           |
 | `runs`                             | task/generation/firstInputCommandId/recipe/provider/期限                                                                                                                                                                            | `(task_id, run_generation)` 唯一；每任务至多一个有效写 run；`connection_epoch` CAS                                  |
 | `task_inputs`                      | commandId、payloadHash、acceptanceSeq、deliveryStatus                                                                                                                                                                               | `(owner_principal_id, task_id, command_id)` 唯一；`(task_id, acceptance_seq)` 唯一                                  |
@@ -85,6 +108,8 @@ Cloud 控制面：云服务端（= 标准 ZCode host 本体 + cloud 叠加层，
 0005_task_input_interaction_decisions
 0006_attachment_objects
 0007_run_status_paused                  # 表重建迁移：走 FK 关闭专用通道（见下方规则）
+0008_user_profile                      # M8 profile 两表 + runs 冻结列 + 版本 1 种子
+0009_project_archive                   # Project 软删除：projects.archived_at（15 §R3）
 ```
 
 规则：**编号一经应用不可改**——只能追加新编号，不得插入、改名、复用退役号或改写已应用
@@ -167,6 +192,11 @@ lang_altertable 官方表重建 recipe；FK 开启时 `DROP TABLE` 对子表残�
     `runGeneration` 由 driver 从输入顶层字段自动写入 provider metadata/tags，**调用方传入会被
     确定性拒绝**（`validation_failed: … key reserved: …`，实现见 `adapters/sandbox/reconcile.ts`）；
     键须匹配 `[A-Za-z0-9._-]{1,64}`、值非空且 ≤256 字符。
+13. **`ProjectionRepo.readLatestPendingInteractionCount(runId)`**（2026-10-17）：按 run 读最新
+    包含 `pendingInteractions` 的持久投影事件，解析统一收口在
+    `domain/projectionInteractions.ts`（支持 snapshot 与 `state.updated` delta 两种落库
+    形态；无事实/解析失败返回 0，不猜不抛）。仅供 idle pause / idle drain / keepalive 续期
+    三个消费者读取；返回 0 表示"没有已知 pending 审批"，不等于"从未有过审批"。
 
 暂不补的端口（集成阶段欠账，W10 记录）：`account_installations` 与 `webhook_inbox` 属 M7 条件性，
 只有 schema、无端口；投影留存/裁剪作业与附件下载端点暂无端口；`MintTokenRequest` 的只读 CI 用途
@@ -187,6 +217,9 @@ node --import tsx --test packages/server/test/cloud*.test.ts     # 本模块（W
 ## 端点与 schema 对照
 
 见 `packages/shared/src/cloud/CONTRACT.md`（端点 ↔ 请求/响应 schema ↔ 生产者/消费者）。
+2026-10-17 新增的三个 durable 交互端点（提交/取消/回执查询）见该表 15a–15c；实现分别在
+`adapters/http/routes.ts`、`app/commands/interactions.ts`，持久记录在
+`task_input_interaction_decisions`（ACK 按 `delivery_command_id` 回写）。
 
 ## 边界与禁止
 

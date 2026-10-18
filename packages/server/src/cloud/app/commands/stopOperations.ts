@@ -58,9 +58,11 @@ async function resolveLatestStopOperation(
   stopOperation: ExternalOperationRecord,
   readSavedFact: () => Promise<SavedCheckpointFact | null>,
 ): Promise<ExternalOperationRecord> {
-  if (stopOperation.state !== "failed" && stopOperation.state !== "ambiguous") {
-    return stopOperation;
-  }
+  // 2026-10-18 停止无响应修复：重试会把 failed 的 stop op 重新排队（重新武装 attempt），
+  // 在 checkpoint worker 下一拍结算前它是 pending/leased。已落库的 saved 记录是该
+  // operationId 的终态保存事实（checkpoints 单调写口），无论 op 行当前处于哪种未结算
+  // 状态都应立即放行终止，不能因为「op 行还没结算」再等一拍或误判 waitingSave。
+  if (stopOperation.state === "settled") return stopOperation;
   const saved = await readSavedFact();
   if (!saved) return stopOperation;
   return { ...stopOperation, state: "settled", resultRef: saved.confirmedRemoteSha };

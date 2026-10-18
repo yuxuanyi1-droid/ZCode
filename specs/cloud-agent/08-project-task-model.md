@@ -1,6 +1,6 @@
 # Spec 08 — 项目、任务、执行 Run 与生命周期
 
-状态：目标设计（2026-10-06 云端实现代码已整体回退），尚未实施。本文负责领域模型、状态迁移、单活写入规则与保存/恢复语义。
+状态：**已实现（2026-10-17 回写；验证状态见 [10 §10](./10-implementation-plan.md)）**。2026-10-06“目标设计，尚未实施”为历史记录；当前 `feat/cloud-agent` 分支已落地本文的领域模型、状态迁移与保存/恢复语义。
 关联：[00](./00-overview.md)、[01](./01-provisioning.md)、[02](./02-bridge-protocol.md)、[03](./03-control-plane.md)、[09](./09-github-integration.md)、[11](./11-project-task-creation.md)。
 
 ## 1. 产品规则
@@ -47,15 +47,17 @@ Cloud Task 和现有runtime task/session不是同一个数据库实体。新增 
 
 ### 3.1 Task：工作委托生命周期
 
-| 状态      | 进入依据                               | 允许操作                                                             |
-| --------- | -------------------------------------- | -------------------------------------------------------------------- |
-| draft     | 元数据已创建，从未发送accepted input   | 编辑标题/起始配置、发送、归档                                        |
-| active    | 首输入已持久接收，存在执行或可继续工作 | 查看、发送、停止、符合条件时重开、验收                               |
-| completed | 用户验收或显式配置的PR merge策略       | 查看、归档；PR未merged时显式reactivate，已merged则新建follow-up Task |
-| failed    | 已确定失败且无活跃写run，未完成目标    | 查看原因、重试/新输入、归档                                          |
-| archived  | 无活动写run且用户归档                  | 只读历史；恢复为原前置状态后再操作                                   |
+| 状态      | 进入依据                                    | 允许操作                                                             |
+| --------- | ------------------------------------------- | -------------------------------------------------------------------- |
+| draft     | 元数据已创建，从未发送accepted input        | 编辑标题/起始配置、发送、归档                                        |
+| active    | 首输入已持久接收，存在执行或可继续工作      | 查看、发送、停止、符合条件时重开、验收                               |
+| completed | 用户验收或显式配置的PR merge策略            | 查看、归档；PR未merged时显式reactivate，已merged则新建follow-up Task |
+| failed    | 已确定失败且无活跃写run，未完成目标         | 查看原因、重试/新输入、归档                                          |
+| archived  | 用户归档（存在未终态 run 时先停止运行环境） | 只读历史；恢复为原前置状态后再操作                                   |
 
 Task active不表示Agent此刻running；用户停止沙箱后Task可以仍active、run=stopped。不能把provider到期直接写为“任务完成”，也不能用connected作为Task状态。
+
+**实施回写（2026-10-17，R3）**：run 进入终态后的 Task 落点已按 CAS 收口（`packages/server/src/cloud/app/runOrchestrator.ts:110-146`、`packages/server/src/cloud/domain/taskRunState.ts:205-220`）：仍存在非终态 run 时保持 Task 不动；Task 为 archived/completed/draft 时不改写；**仅 runStatus=failed 且 Task 仍 active 时**以 `from:["active"]` + 新 revision 写 `failed`；重复收口幂等返回。stopped/expired 不改变 Task 委托状态（provider 到期不等于任务完成）。失败 run 的 Task=failed 为用户提供 failed → reopen 的显式入口。
 
 ### 3.2 Run：执行载体/连接状态
 
@@ -94,6 +96,13 @@ stateDiagram-v2
 
 **修订（2026-10-10 用户产品决议，archive on paused run）**：归档是用户结束任务的显式意图——对 Run=paused 的任务直接归档不再 409，而是复用暂停中停止推进的同一实现（屏障复用 `run.stopOperationId` → `paused → draining` → 直接 terminate → `stopped` 收口，dataAtRisk 按停止 op 未结算如实标注）后完成归档；归档 HTTP 响应返回归档完成后的任务详情（同步收口）。terminate 未当场确认时 run 留在 draining（既有 stop/compensation sweep 按证据收口），归档按既有语义返回 409 `not_ready/task-has-active-run` 让 UI 重试。其余未终态（ready/provisioning/draining/disconnected）仍 409 引导先停止。actions 投影同表：paused run 投影 `archive`（`complete` 拒绝不变，仍须先 resume 或完成停止收口）。
 
+**修订（2026-10-18 用户决议，archive 对任何非 archived 状态可用）**：上条「仅 paused 放行 / 未确认 409 重试」修订为归档不再被活动 run 阻塞。Run 状态只决定归档时如何停止运行环境，不决定归档是否受理：
+
+- **受理**：Task 状态 ∈ {draft, active, completed, failed} 即可归档；`archived` 幂等返回既有详情。存在未终态 run 时，归档命令先终止运行环境，再立即把 Task 置为 `archived`（`archivedFromStatus` = 归档前状态）。
+- **停止序列**：`paused` 复用既有暂停中停止实现（beginDrain 写屏障并推进 `paused → draining` → advancePausedStop 直接 terminate → `stopped`，失败只记 warn）；其余状态先幂等 `requestStop`（已有停止意图保留原 `stopOperationId`），`ready`/`disconnected` CAS 到 `draining`（CAS 失败按重读状态分支），随后 `compensation.terminateRun(reason="archive")`。**归档驱动停止不发起 checkpoint 请求、不等待保存**。
+- **未确认不阻塞**：terminate 结果未知或未确认时仍完成 Task 归档；run 保持 `draining` 占槽，由既有 stop/compensation sweep 继续按证据收口。归档端点不再返回 `409 task-has-active-run`。
+- **风险如实标注**：verdict=`terminated` 且原状态为 `ready`/`disconnected`/`draining` 时写 `dataAtRisk=true`（未保存即终止，08 §8.2）；`paused` 维持既有语义（暂停态无运行时写入，dataAtRisk 按停止 op 结算事实标注）；`provisioning` 不强行标风险。
+
 ### 3.3 Execution / 保存 / 产物投影
 
 - Execution：unknown / idle / running / awaiting-input；更新必须有runtime来源、epoch与revision。
@@ -102,6 +111,8 @@ stateDiagram-v2
 - PR：none / creating / draft / open / merged / closed / publication-failed。
 
 审批等待不是业务空闲。运行时失联时保留last-known execution并标过期时间，不用控制面猜idle。PR存在不代表无未保存修改；saved不代表用户完成验收。
+
+**实施回写（2026-10-17，真实联调）**：等待工具审批时持久投影 `pendingInteractions` 非空，即使 execution=idle、无 pending 输入也不得视为空闲。事实源是只读查询 `ProjectionRepo.readLatestPendingInteractionCount(runId)`（解析器 `packages/server/src/cloud/domain/projectionInteractions.ts`，SQL handler `adapters/storage/repositories/projectionInteractionRepo.ts:30-65`）：支持 snapshot 与 `state.updated` delta 两种落库形态，按 run 取最新一条包含该字段的投影；无事实/解析失败返回 0，不猜不抛。投影是最终一致事实——审批事件尚未落入投影的窗口内仍可能短暂误判为空闲。
 
 ## 4. 身份与单活边界
 
@@ -185,6 +196,14 @@ provider续期失败或到期时间未知时保留上一次已确认expiresAt；
 
 **修订（2026-10-09，生命周期 v2 审计第一批：空闲占用的输入事实含 uncertain）**：空闲判定（空闲 pause 拍与 idle drain 共用口径）的「无 pending input」事实必须计入 `uncertain` 投递状态——uncertain 输入可能已在沙箱执行（投递结果未知，03 §8 对账通路负责收敛），不是可安全暂停/归档的空闲事实；只数 accepted/delivering 会让带 uncertain 输入的 run 被空闲暂停且无法自驱恢复（与 resume 触发放宽配套，03 §6）。
 
+**实施回写（2026-10-17，R3）**：idle drain 的 checkpoint 在途判定已统一到 `domain/checkpointPolicy.ts` 的 `hasCheckpointInFlight`（`CHECKPOINT_IN_FLIGHT_WINDOW_MS` = 2 分钟，`packages/server/src/cloud/domain/checkpointPolicy.ts:35-57`）：只有窗口内的 `saving`/`pending` 记录算占用保存通道，超窗僵尸事实不再永久阻塞 idle drain；`drain.ts:201-216` 与 `idlePause.ts:87` 共用同一函数，空转/失败风险由 `run.dataAtRisk` 如实承载。
+
+**修订（2026-10-17，真实联调：审批等待不是业务空闲）**：新增只读事实 `ProjectionRepo.readLatestPendingInteractionCount(runId)`，空闲 pause、idle drain 与 keepalive 续期三处统一读取（`lifecycle/idlePause.ts:72-90`、`lifecycle/drain.ts:203-216`、`lifecycle/keepalive.ts:116-128`）：
+
+- 有 pending interaction 时 idle pause / idle drain **跳过**（`pendingInteractionCount > 0` 使空闲谓词不成立）；
+- 续期按 `pendingInteractionCount > 0` 视为有工作（`domain/savePolicy.ts:85-88`），审批窗口内不停止续期；
+- 事实源是持久投影的最终一致副本：审批事件尚未 ingest 时读取仍可能为 0，该窗口内存在短暂误判为空闲的可能；不新增第二份状态，也不把「投影未到」解释为「无审批」。
+
 ## 8. 统一 checkpoint / stop 通路
 
 ```mermaid
@@ -220,6 +239,20 @@ create未发出时取消意图并确认无资源；已在途时保留资源/配�
 - 沙箱对 `checkpoint.request` 的处理无论成败**必须回 `checkpoint.result`**（异常按 `failed` + `checkpoint_failed` 如实上报，02 §4）。不回帧时 op 只能靠 attempt 封顶结算 failed，且周期保存 sweep 因「无 checkpoint 记录」每拍重建新 op（终验实证：30 分钟 90 个 failed op、309 次 attempt 空转，并拖慢 stop drain 80-90s）。
 - 周期保存与 stop/drain 同属保存通路：发 `checkpoint.request` 前由唯一签发点成组签发 push+fetch grant（01 §7.2 签发时机修订）；draining 下的 fetch 是 push 后远端 SHA 对账的规格内只读动作。
 
+**实施回写（2026-10-17，R2）**：`checkpoint.result` 的准入与单调性已落地（`packages/server/src/cloud/domain/checkpointPolicy.ts:93-123`、`packages/server/src/cloud/app/lifecycle/checkpointResults.ts:45-105`）：
+
+- **operation 归属**：`operationId` 必须对应本 task/run/generation 上真实存在、`kind=checkpoint` 的操作；伪造/不存在/别 run 的 op 返回 `not_found`/`validation_failed`，不改 `run.dataAtRisk` 与 `task.lastCheckpointSha`。
+- **branch 约束**：`saved` 仅在 `branch` 等于非空 `task.taskBranch` 时允许；否则按 failed 语义 fail-closed（`checkpoint_failed`），不伪造保存成功。
+- **saved 单调**：同一 operationId 已 `saved` 后，迟到的 failed/unknown 结果只忽略，不覆盖记录、不改派生事实。
+
+**修订（2026-10-18，用户实测缺陷：停止生成无响应）**：停止保存的重试必须让预算真实推进，且 drain 后仍要保留完成保存所需的连接装配：
+
+- **重试重新武装操作（P0）**：`beginDrain` 复用屏障指针时，若该 stop operation 已是 `failed`，必须先 `requeueFailed` 再重发保存。租约只领取 pending/到期 leased/ambiguous，终态 failed 永不重领；旧实现直接 `enqueue`（幂等返回原行），`attempt` 冻结在失败当次，stop sweep 每拍都认为「还有重试预算」，run 永久卡在 draining（实测 2 分钟以上无进展，直到硬期限）。重新排队后 attempt 按租约推进，3 次预算用尽即按 §8.1 收口 terminate 并如实标 `dataAtRisk`。
+- **放行须读最新保存事实**：stop sweep 判定是否可 terminate 时，只要该 operationId 已有 `saved` 记录就视为已确认（覆盖 op 行仍处于 pending/leased 的结算窗口），不得因「op 行未结算」多等一拍或误判 waitingSave。
+- **draining 保留连接装配**：停止屏障只阻断新 input/新 Agent，不阻断 `bootstrap.config` 重装与 `bridge.ready` 连接确认；ready 不得把 run 迁回 ready。`bridge.drain` 不得关闭连接（详见 02 §4 2026-10-18 修订）。
+- **重试不重复发 drain**：只在本次真正进入 draining 时发送 `bridge.drain`；已 draining 的保存重试只重发 `checkpoint.request`。旧执行节点在 drain 后会关闭连接，重试再发 drain 会把刚重连的 bridge 关掉，保存结果再次丢失。
+- **预算内保存失败**：每次重试携带同一 operationId；成功回写后按最新记录放行 terminate，`dataAtRisk` 随最新事实双向更新（D4-4 语义不变）。
+
 **修订（2026-10-09，生命周期 v2 审计第一批：terminate 明确拒绝后的持久重试）**：`terminate` op 结算 `failed`（provider 明确拒绝，如 403/402）不是终局——outbox 租约只领 pending/到期 leased/ambiguous，failed 行永不重领，而 `enqueue` 幂等返回既有行不改状态，非终态 run 会永久卡 draining/paused。规则：
 
 - **重排队**：非终态 run 的 failed terminate op，由停止编排（stop sweep 对屏障指针不入队/无 op 的形态直接驱动 `terminateRun`）与补偿入口（`terminateRun` 内）按 attempt 退避重置回 `pending`（新增 `operations.requeueFailed` CAS：仅 `failed → pending`，attempt/幂等键/runGeneration 不变），由既有补偿循环重试 provider 终止。退避阶梯 30s→2min→5min 封顶（对齐周期保存退避风格），锚点为 op 的 failed 结算时刻（updatedAt）。
@@ -238,6 +271,13 @@ quiesce是明确协议能力，不是“sleep几秒等Agent写完”。范围包
 stop默认checkpoint后终止；无变化但已有未push commit也必须push并核验。local commit成功、remote push失败状态是failed/dataAtRisk。可以在剩余租期内保留资源并重试保存；继续新工作须用户明确撤销停止意图，不能无限保活超硬期限。
 
 **修订（2026-10-10 用户产品决议，归档驱动的暂停中停止）**：归档（archive on paused run）触发的停止属同一停止链路的例外分支——暂停态无运行时写入、无 checkpoint 前置可执行，直接 terminate 后收口 `stopped`；因为没有可结算的保存事实，dataAtRisk 必须如实标注（08 §8.2「不得宣称工作全部保住」），与 force-stop/keepalive 兜底认领同一诚实口径。归档与停止推进之间不复刻第二套状态裁决：屏障与 `paused → draining` 由既有 beginDrain 写入，terminate 与终态收口复用 advancePausedStop 同一实现，归档命令只在其返回终止已确认后才推进 Task → archived。
+
+**修订（2026-10-18 用户决议，归档停止不等保存）**：归档对任何非 archived Task 受理后，若存在未终态 run 则执行「持久停止屏障 → （paused 走既有 beginDrain/advancePausedStop；ready/disconnected CAS 到 draining）→ `compensation.terminateRun`」，**不发起 checkpoint 请求、不等待保存完成**，随后立即推进 Task → archived。由此：
+
+- `ready`/`disconnected`/`draining` 的 run 属「未保存即终止」——terminate 已确认时写 `dataAtRisk=true`，UI 不得显示为已保存；
+- `paused` 维持既有停止推进语义（暂停态无运行时写入，dataAtRisk 按停止 op 结算事实如实标注）；
+- `provisioning` 不强行标风险（创建未进入业务写入），终止由既有补偿通路按证明收口；
+- terminate 未确认不阻塞归档：run 保持 `draining`（占槽），由 stop/compensation sweep 继续重试终止并收口终态，归档响应仍返回 archived 任务详情。
 
 force stop是单独显式动作，返回预期丢失信息，需要用户选择；不得用普通stop失败后悄悄force。terminal/projection断线时operation仍持久恢复，不依赖某个页面确认才能继续。
 
@@ -270,6 +310,8 @@ force stop是单独显式动作，返回预期丢失信息，需要用户选择�
 用户complete先持久验收意图，阻断新输入/写入并收口执行：accepted/delivering/uncertain全部计入未决输入，已admitted的在途执行也须达到可信安全点；不能只检查accepted集合。最终completed需保存策略/产物核验及活动Run终止确认，不把写outbox等同完成。保存风险必须可见，代码产物指向可review的分支/PR；无差异的调查/答疑允许kind=noChanges且有持久结果摘要，PR保持none，不创建空commit/空PR。Agent结束轮次不自动complete；merge自动完成是可配置产品规则，未启用时仅更新artifact状态。验收使用同一drain依赖通路；进行中显示验收/停止进度，必要条件未满足前不宣告最终completed。
 
 归档与删除区分：归档保留历史和artifact，资源终止；物理删除遵循保留策略并独立清理附件。删除Project默认有任务时拒绝或要求明确归档策略，不级联丢历史。
+
+**实施回写（2026-10-17，R3）**：Project 删除采用**软删除**（`projects.archived_at`，迁移 0009；`packages/server/src/cloud/adapters/storage/sqlite/schema.ts:95-100`、`tables/projectArchive.ts:12`）：不物理删除行，任务历史与外键保留；`get`/`findByRepository`/`list` 过滤已归档行；`deleteProject` 先分页扫描任务，存在未归档任务（含活动 run）时 409 `project-has-tasks`，扫描通过后才写归档事实（`app/taskService.ts:150-179`、`repositories/projectRepo.ts:146-160`）。重复/并发删除按幂等成功返回；扫描上限内无法确认时保守拒绝（`project-task-scan-incomplete`）。
 
 ## 10. 失败/恢复矩阵
 

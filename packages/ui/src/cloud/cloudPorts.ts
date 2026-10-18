@@ -9,10 +9,12 @@
  * `operationId`）一律由**调用方**给出，客户端不生成也不替换（03 §6.1/§6.2）。
  */
 import type {
+  CancelCloudInteractionDecisionRequest,
   CapabilitiesResponse,
   CloudAttachmentUploadResponse,
   CloudBranchPage,
   CloudDeletedResponse,
+  CloudInteractionDecisionReceipt,
   CloudUserProfileCategory,
   CloudUserProfileEntryDeleteResponse,
   CloudUserProfileEntryReadResponse,
@@ -41,6 +43,7 @@ import type {
   PatchCloudProjectRequest,
   PatchCloudTaskRequest,
   ReopenCloudTaskRequest,
+  SubmitCloudInteractionDecisionRequest,
   SubmitTaskInput,
   TaskDetailResponse,
 } from "@zcode/shared";
@@ -58,6 +61,15 @@ export interface CloudControlPlaneRequestOptions {
 export interface CloudControlPlaneInputSubmission {
   readonly httpStatus: number;
   readonly receipt: InputReceipt;
+}
+
+/**
+ * 交互决定提交结果：`httpStatus` 是 HTTP 事实（202 = 持久接纳），
+ * `receipt.deliveryStatus` 才是投递语义；admitted 才代表 runtime 已裁决（03 §7.2）。
+ */
+export interface CloudControlPlaneInteractionSubmission {
+  readonly httpStatus: number;
+  readonly receipt: CloudInteractionDecisionReceipt;
 }
 
 export interface CloudControlPlanePort {
@@ -129,6 +141,27 @@ export interface CloudControlPlanePort {
     commandId: string,
     options?: CloudControlPlaneRequestOptions,
   ): Promise<InputReceipt>;
+
+  /** 提交审批/交互决定：云模式唯一写通路（03 §7.2；不再直发 agent 写命令）。 */
+  submitCloudInteractionDecision(
+    taskId: string,
+    interactionId: string,
+    body: SubmitCloudInteractionDecisionRequest,
+    options?: CloudControlPlaneRequestOptions,
+  ): Promise<CloudControlPlaneInteractionSubmission>;
+  /** 取消已提交决定：独立 cancelCommandId，不覆盖原决定记录（02 §6.3）。 */
+  cancelCloudInteractionDecision(
+    taskId: string,
+    interactionId: string,
+    body: CancelCloudInteractionDecisionRequest,
+    options?: CloudControlPlaneRequestOptions,
+  ): Promise<CloudInteractionDecisionReceipt>;
+  /** 只读回执查询（响应丢失/重启恢复）：不产生第二份状态。 */
+  getCloudInteractionDecision(
+    taskId: string,
+    interactionId: string,
+    options?: CloudControlPlaneRequestOptions,
+  ): Promise<CloudInteractionDecisionReceipt>;
 
   reopenTask(
     taskId: string,

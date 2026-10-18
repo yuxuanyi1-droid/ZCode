@@ -161,10 +161,11 @@ test("run 结束后的 Task 落点（08 §3.1 failed 行）", () => {
   );
 });
 
-test("归档/重新激活前置（03 §6、08 §3.1）", () => {
+test("归档/重新激活前置（03 §6、08 §3.1；2026-10-18 归档不要求无活动 run）", () => {
   const active = makeRun({ taskId: "t", runId: "r", status: "ready" });
-  assert.equal(canArchiveTask(task({ status: "active" }), active), false);
+  assert.equal(canArchiveTask(task({ status: "active" }), active), true);
   assert.equal(canArchiveTask(task({ status: "active" }), null), true);
+  assert.equal(canArchiveTask(task({ status: "archived" }), active), false);
   assert.equal(hasActiveWriteRun(active), true);
   assert.equal(
     canReactivateTask({ task: task({ status: "completed" }), activeRun: null, prStatus: "open" }),
@@ -555,7 +556,9 @@ test("投递状态机：唯一边表钉死，单向推进、终态不回退、un
   // P1「同一冻结规则两套实现」），任何一侧改动都必须显式改这里并同步 02 §6.3。
   assert.deepEqual(INPUT_DELIVERY_TRANSITIONS, {
     accepted: ["delivering", "admitted", "rejected", "uncertain", "cancelled"],
-    delivering: ["admitted", "rejected", "uncertain"],
+    // R2（15 §3、02 §6.3）：delivering → accepted 仅在先查询 runtime 并明确 unknown 后
+    // 由 dispatcher 使用；不得把 delivering 直接当 uncertain 重投。
+    delivering: ["accepted", "admitted", "rejected", "uncertain"],
     uncertain: ["accepted", "delivering", "admitted", "rejected", "cancelled"],
     admitted: [],
     rejected: [],
@@ -574,6 +577,11 @@ test("投递状态机：唯一边表钉死，单向推进、终态不回退、un
     "RPC timeout/断连先置 uncertain（02 §6.3）",
   );
   assert.equal(canAdvanceDeliveryStatus("delivering", "admitted"), true);
+  assert.equal(
+    canAdvanceDeliveryStatus("delivering", "accepted"),
+    true,
+    "R2：对账确认 runtime 无该命令事实后才退回 accepted，用同一 commandId 重投",
+  );
   assert.equal(
     canAdvanceDeliveryStatus("delivering", "cancelled"),
     false,
@@ -641,10 +649,15 @@ test("actions 投影：状态表推导 + 无事实不猜（04 §3.3、08 §3.1/�
     "force-stop",
     "extend",
     "complete",
+    "archive",
   ]);
-  assert.equal(active.includes("archive"), false, "有活动写 run 时不可归档");
+  assert.equal(
+    active.includes("archive"),
+    true,
+    "有活动写 run 时也可归档（2026-10-18：服务端先停止运行环境再归档）",
+  );
 
-  // 停止意图受理后：不再开放输入/停止/撤销，但保留显式强制停止（08 §8.2）。
+  // 停止意图受理后：不再开放输入/停止/撤销，但保留显式强制停止与归档（08 §8.2）。
   const stopping = deriveTaskActions({
     task: task({ status: "active" }),
     activeRun: makeRun({ taskId: TASK_ID, runId: "r1", status: "draining", stopRequested: true }),
@@ -652,7 +665,7 @@ test("actions 投影：状态表推导 + 无事实不猜（04 §3.3、08 §3.1/�
     artifact: null,
     providerCanExtend: true,
   });
-  assert.deepEqual(stopping, ["force-stop", "complete"]);
+  assert.deepEqual(stopping, ["force-stop", "complete", "archive"]);
 
   // provider 能力未知 → 不投影 extend（无事实不猜）。
   const unknownCapability = deriveTaskActions({

@@ -20,6 +20,7 @@ export const RUN_ID = "1c8e4a02-3b7d-4f61-9a2e-5d7c8b9a0f13";
 export const COMMAND_ID = "2b7f5c1a-9d3e-4f8a-b1c2-d3e4f5a6b7c8";
 export const COMMAND_ID_2 = "5f2c3d4e-7a96-4c85-8d32-be4f5a6b7c82";
 export const OPERATION_ID = "4e1b2c3d-6f85-4b74-9c21-ad3e4f5a6b71";
+export const INTERACTION_ID = "interaction-fixture-1";
 
 const EPOCH_MS = 1_700_000_000_000;
 const SHA = "b".repeat(40);
@@ -168,6 +169,15 @@ export function cloudEndpointPayload(endpointId: CloudSdkEndpointId): Record<str
     case "getInput":
     case "cancelInput":
       return inputReceipt();
+    // R6 交互决定（03 §7.2）：回执只含 task/interaction/投递状态，不携带答案正文。
+    case "submitInteractionDecision":
+    case "cancelInteractionDecision":
+    case "getInteractionDecision":
+      return {
+        taskId: TASK_ID,
+        interactionId: INTERACTION_ID,
+        deliveryStatus: "accepted",
+      };
     case "listInputs":
       return { items: [] };
     case "extendTask":

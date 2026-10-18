@@ -129,6 +129,8 @@ import { shouldIgnoreEscapeForStopGeneration } from "@/v4/composer/escapeStop.js
 import { ConversationDraftEmptyState } from "@/v4/ConversationDraftEmptyState.js";
 import { useCloudComposerSubmit } from "@/hooks/cloud/useCloudComposerSubmit.js";
 import { useCloudTaskHistoryReplay } from "@/hooks/cloud/useCloudTaskHistoryReplay.js";
+import { useCloudWorkspaceContext } from "@/cloud/cloudWorkspaceContext.js";
+import { CLOUD_ATTACHMENT_MESSAGE_IDS } from "@/cloud/cloudAttachmentGate.js";
 import { CloudTaskHistoryTimeline } from "@/cloud/CloudTaskHistoryTimeline.js";
 import { resolveCloudTaskIdFromWorkspaceIdentity } from "@/cloud/cloudUiBootstrap.js";
 import { conversationTopic } from "@/v4/transport.js";
@@ -401,6 +403,12 @@ const EMPTY_SUBAGENT_PROJECTION: NonNullable<ConversationSnapshot["subagents"]> 
 };
 
 const MAX_CONVERSATION_FILE_CHANGES_CACHE_ENTRIES = 20;
+
+// 修复依据（2026-10-18）：草稿态（timelineSnapshot 为 null）每次渲染都传新的 `[]`，
+// ConversationTimeline 的吸底 effect 以 rows 为依赖，composer 里敲一个字符的重渲染
+// 就会重跑贴底；此时若布局被判定为「空态居中」，写入的是 scrollTop=0（见
+// ConversationTimeline.centeredEmptyLayout），表现为输入即跳到顶部。空行集用稳定常量。
+const EMPTY_CONVERSATION_ROWS: ConversationSnapshot["rows"]["window"] = [];
 
 function toComposerUiError(
   sessionId: string | null | undefined,
@@ -2365,6 +2373,9 @@ export function SessionPane({
     snapshot?.rows.window,
   ]);
   const isCloudWorkspace = cloudComposerSubmit.enabled;
+  // 应用级云判定：context 非 null 即运行在云入口内，与单个 pane 的 workspaceIdentity
+  // 是否落定无关（云 Web 任务视图实测 identity 可为 null）。
+  const cloudWorkspaceContext = useCloudWorkspaceContext();
   const { binding: prewarmBinding } = useDraftSessionPrewarm({
     enabled: sessionId === null && draftAgentStartupAllowed && !isCloudWorkspace,
     workspaceKey,
@@ -3056,6 +3067,19 @@ export function SessionPane({
       // 本机路径——那会绕开控制面、把输入直接发给 CLI，并让「关页后仍执行」与
       // 「同 commandId 不重复」失去依据。非云工作区完全不受影响。
       if (cloudComposerSubmit.enabled) {
+        // R6 云附件 fail-closed（specs/cloud-agent/15 §2/§3）：durable input 尚不携带
+        // 附件引用，附件只存在于 UI 本地。附件入口已由 cloudAttachmentGate 恒禁用，
+        // 这里对发送快照再做一次防御性拦截——否则带附件/上下文附件的输入会被接受并
+        // 在投递时静默丢弃，形成「发送成功但内容缺失」。非云路径不经过本分支。
+        if ((options?.attachments?.length ?? 0) > 0 || (options?.contextAttachmentCount ?? 0) > 0) {
+          setSendSubmissionError({
+            code: "CLOUD_ATTACHMENTS_UNSUPPORTED",
+            message: intl.formatMessage({
+              id: CLOUD_ATTACHMENT_MESSAGE_IDS.durableInputUnsupported,
+            }),
+          });
+          return "blocked";
+        }
         try {
           // 与本机路径（dispatchSendText）同一冻结语义：发送点击瞬间把 composer 选择
           // 冻结成本次 Submission。云适配层把它映射为控制面 requestedConfig 随信封
@@ -3077,6 +3101,14 @@ export function SessionPane({
               appendPendingCloudInput({ commandId: outcome.commandId, text });
             }
             focusTimelineToLatest();
+            // 原因：发送成功后 optimistic overlay 先插入、composer 随后清空，两处高度变化
+            // 都落在下一帧；只在同步点吸底会停在旧布局的底部，留下可见偏差。这里在下一帧
+            // 再吸一次底，保证最终布局仍贴底。回调可能晚于 timeline 卸载（cleanup 会把
+            // ref 置 null），因此调用前判空。
+            window.requestAnimationFrame(() => {
+              if (!timelineScrollToBottomRef.current) return;
+              focusTimelineToLatest();
+            });
             return "sent";
           }
           // 错误文案就地归一（04 §6「UI 不解析异常文字」）：code+reason 命中
@@ -3710,7 +3742,19 @@ export function SessionPane({
       // 生命周期——继续 dispatch `stop` 只会零请求零状态变化。判定不依赖
       // snapshot.control.canStop（那是 CLI runtime 的执行面事实，与服务端 run 状态
       // 是两套所有者）；服务端按 run 状态裁决并幂等。
+      //
+      // 2026-10-18 用户决议：首条消息尚未进入 runtime（provisioning / ready 但
+      // attachment 未回连）时停止会直接终止正在进行的 create/run，必须置灰。该判定
+      // 只作用于云分支，本地/SSH 的 stop 语义保持不变。
       if (cloudTaskStop.enabled) {
+        if (!cloudTaskStop.canStop) {
+          logger.lifecycle.info("[v4-pane] 云任务 stop 被跳过（首条输入或运行环境未就绪）", {
+            source,
+            sessionId,
+            reason: "first-input-or-environment-not-ready",
+          });
+          return;
+        }
         logger.lifecycle.info("[v4-pane] 云任务 stop 请求发出", { source, sessionId });
         void cloudTaskStop.stopTask().then((outcome) => {
           if (outcome.ok) return;
@@ -4607,7 +4651,14 @@ export function SessionPane({
       // backgroundWorks；Composer 若直接读目录会提前隐藏 Agent 入口。这里复用状态面板按
       // childSessionId 精确回退后的计数，让两个入口共享同一份运行态真值。
       runningSubagentCount={runningAgentCount}
-      onRecoverCustomModelSelection={handleRecoverCustomModelSelection}
+      // 云模式（context 非 null）下 pane 的 workspaceIdentity 可能为 null（云 Web 任务
+      // 视图即如此，2026-10-17 真机实测 identity=null 使 isCloudWorkspace 恒 false）；
+      // 云应用内的任何 pane 都没有本机 zcode-task 频道，恢复依赖的
+      // restartWorkspaceProcess 必然失败并曾静默吞掉模型点击（选择器停留原模型）。
+      // 因此一律不提供桌面恢复 handler，点击直接走 onSelectModel 草稿意图。
+      onRecoverCustomModelSelection={
+        cloudWorkspaceContext ? undefined : handleRecoverCustomModelSelection
+      }
       onSendCompressionCommand={handleSendCompressionCommand}
       error={composerError}
       onDismissError={handleDismissComposerError}
@@ -4982,7 +5033,7 @@ export function SessionPane({
               scrollToBottomActionRef={timelineScrollToBottomRef}
               scrollToQueryActionRef={timelineScrollToQueryRef}
               selectionPanelLayoutContainerRef={conversationLayoutContainerRef}
-              rows={timelineSnapshot?.rows.window ?? []}
+              rows={timelineSnapshot?.rows.window ?? EMPTY_CONVERSATION_ROWS}
               pendingGuides={timelineSnapshot ? pendingGuideProjection?.pendingGuides : []}
               apiRetry={timelineSnapshot?.control.apiRetry ?? null}
               totalCount={timelineSnapshot?.rows.totalCount ?? 0}

@@ -6958,10 +6958,8 @@ const enUS: Record<string, string> = {
   "cloud.tasks.archive": "Archive task",
   "cloud.tasks.archiveConfirmTitle": "Archive this task?",
   "cloud.tasks.archiveConfirmDescription":
-    '"{taskTitle}" will be archived. History stays readable, but the task no longer accepts commands until it is restored.',
+    '"{taskTitle}" will be archived. The runtime will be stopped and unsaved changes may be lost. History stays readable, but the task no longer accepts commands until it is restored.',
   "cloud.tasks.archiveFailed": "Could not archive the task: {reason}",
-  "cloud.tasks.archiveUnavailable":
-    "The control plane does not allow archiving this task right now",
   "cloud.tasks.archivedSection": "Archived ({count})",
   "cloud.tasks.restore": "Restore task",
   "cloud.tasks.restoreFailed": "Could not restore the task: {reason}",
@@ -7000,6 +6998,18 @@ const enUS: Record<string, string> = {
   "cloud.run.statusPaused": "Run environment paused",
   "cloud.run.statusPausedHint": "Send a message to resume the same run (it will not restart)",
   "cloud.run.statusProvisioning": "Preparing the cloud environment (sandbox, clone, warm-up)…",
+  "cloud.run.statusResuming": "Resuming runtime environment",
+  "cloud.run.statusResumingHint": "Your message will be sent once the environment is ready",
+  "cloud.run.statusDisconnected": "Connection lost. Reconnecting automatically…",
+  "cloud.run.statusDisconnectedHint": "Your message will be sent once the connection recovers",
+  "cloud.connection.ready": "Cloud runtime connected",
+  "cloud.connection.provisioning": "Cloud runtime is being prepared",
+  "cloud.connection.resuming": "Cloud runtime is reconnecting",
+  "cloud.connection.paused": "Cloud runtime paused",
+  "cloud.connection.draining": "Cloud runtime is stopping",
+  "cloud.connection.disconnected": "Cloud runtime disconnected. Reconnecting automatically",
+  "cloud.connection.failed": "Cloud runtime connection failed",
+  "cloud.connection.idle": "No active cloud runtime",
   "cloud.run.statusFailedTitle": "Task run failed",
   "cloud.run.statusStoppedTitle": "Task run stopped",
   "cloud.run.statusExpiredTitle": "Task run expired",
@@ -7058,6 +7068,8 @@ const enUS: Record<string, string> = {
     "The connection to this task's runtime is down. Attachments resume after reconnect and are never uploaded to another environment.",
   "chat.attachments.cloud.waitingEnvironment":
     "The runtime is not ready yet, so attachments cannot be uploaded. This restores automatically.",
+  "chat.attachments.cloud.durableInputUnsupported":
+    "Attachments are not supported for cloud tasks yet: durable input does not carry attachment references, so they would not be sent. Remove attachments before sending.",
 };
 
 export default enUS;

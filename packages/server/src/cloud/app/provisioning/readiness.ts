@@ -6,11 +6,14 @@
  * 注意：timeout 只表示「未就绪」，不证明资源不存在（01 §5.2）；因此未知结论保留 run 与配额。
  */
 import { createOperationKey } from "../../domain/idempotency.js";
+import { isTerminalRunStatus } from "../../domain/taskRunState.js";
 import type { CloudCoreDeps } from "../deps.js";
 import type { ProviderSandboxHandle } from "../ports/sandboxDriverPort.js";
 import { cloudCoreLogger } from "../logger.js";
 import type { RunCompensation } from "./compensation.js";
 import type { RunOrchestrator } from "../runOrchestrator.js";
+import type { CloudGitGrantService } from "../gitGrants.js";
+import { createRunHandleEstablisher } from "./recoverHandle.js";
 
 export interface ReadinessSweepReport {
   inspected: number;
@@ -27,8 +30,12 @@ export function createReadinessWatchdog(
   deps: CloudCoreDeps,
   orchestrator: RunOrchestrator,
   compensation: RunCompensation,
+  gitGrants: CloudGitGrantService,
 ): ReadinessWatchdog {
   const { storage, operations, drivers, clock, config } = deps;
+  // 统一 handle 恢复/启动（R1）：readiness 不再自己 recordProviderHandle——避免漏
+  // workspacePath、也避免「找到沙箱但从不拉起 supervisor」的静默态。
+  const establish = createRunHandleEstablisher(deps, compensation, gitGrants);
 
   return {
     async sweep(now = clock.now()) {
@@ -80,16 +87,29 @@ export function createReadinessWatchdog(
               continue;
             }
             handle = reconciliation.handle;
-            await storage.runs.recordProviderHandle({
-              runId: run.runId,
-              runGeneration: run.runGeneration,
-              provider: handle.provider,
-              providerHandle: handle.sandboxId,
-              providerDeadline: handle.providerDeadline,
-              deadlineEstimate: handle.deadlineEstimate,
-              now,
-            });
           }
+
+          // R1：handle（持久或对账发现）统一走 establishRunHandle——补持久 workspacePath、
+          // 签发 clone grant、拉起 supervisor；停止意图在启动前检查，迟到 handle 只清理。
+          // 之后仍按本看门狗的 soft timeout 规则核验事实（running 无 bridge 会收口）。
+          const capabilities = await driver.describeCapabilities();
+          const established = await establish.establish({
+            driver,
+            run,
+            handle,
+            deadlineSource: capabilities.deadlineSource,
+          });
+          if (established.status === "skipped") {
+            report.terminated += 1;
+            continue;
+          }
+          if (established.status === "failed") {
+            const after = await storage.runs.get(run.runId);
+            if (after && isTerminalRunStatus(after.status)) report.settled += 1;
+            else report.unknown += 1;
+            continue;
+          }
+
           const observation = await driver.inspect(handle);
           if (observation.status === "unknown") {
             // 不可查询：保留 disconnected/reconciling 信息，禁止新的写 run（03 §8）。

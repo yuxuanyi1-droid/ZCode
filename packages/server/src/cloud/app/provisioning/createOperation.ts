@@ -6,23 +6,32 @@
  * - 领取操作前检查当前代际与 stopRequested（01 §5.1 第 2 条、08 §8.1）：停止意图优先，
  *   迟到 handle 只能进入清理，回调不能发布 ready 或启动 Agent。
  * - 使用 Run recipe 中冻结的 provider/模板/资源与配置，不读取新部署默认值（01 §5.1 第 2 条）。
+ * - **同 run 的 driver.create 最多一次**（R1）：run 已有 providerHandle 时禁止再 create，
+ *   直接进入统一恢复/启动；create 重试（attempt > 1）或上次 ambiguous 时必须先按
+ *   operationKey `findCreateResult`（锚点 = operation.createdAt），created → 恢复，
+ *   unknown → 保持 ambiguous，只有 notFound 才允许 create（01 §4.1、03 §5）。
  * - create 结果未知进对账（按 operationKey），不自动第二次 create（03 §5、01 §4.1）。
  * - create 成功立即持久 handle/deadline，再等 bridge（01 §5.1 第 3 条）。
  * - DB 失败/本地校验失败不建资源（01 §5.1 尾段）。
  */
 import { type CloudErrorCode, type CloudRunRecord } from "@zcode/shared";
 import { createOperationKey } from "../../domain/idempotency.js";
-import { buildCloudTaskWorkspacePath } from "../../domain/workspacePath.js";
 import { resolveHardDeadline } from "../../domain/savePolicy.js";
 import type { CloudCoreDeps } from "../deps.js";
 import { cloudCoreLogger } from "../logger.js";
 import { startOperationLeaseKeepalive } from "./leaseKeepalive.js";
 import type { LeasedOperation } from "../ports/operationOutboxPort.js";
-import type { CreateReconciliation, ProviderSandboxHandle } from "../ports/sandboxDriverPort.js";
 import type { RunCompensation } from "./compensation.js";
 import type { RunOrchestrator } from "../runOrchestrator.js";
-import { classifyCreateFailure, describeCreateError } from "./createFailure.js";
 import { persistRunHandle, type CreateAttemptOutcome } from "./handlePersistence.js";
+import {
+  createRunHandleEstablisher,
+  createSandboxOrReconcile,
+  mintRunBootstrapTicket,
+  persistedProviderHandle,
+  reconcileCreateBeforeRetry,
+  resolveRunWorkspacePath,
+} from "./recoverHandle.js";
 import type { CloudGitGrantService } from "../gitGrants.js";
 
 export type { CreateAttemptOutcome } from "./handlePersistence.js";
@@ -42,7 +51,9 @@ export function createCreateOperationRunner(
   compensation: RunCompensation,
   gitGrants: CloudGitGrantService,
 ): CreateOperationRunner {
-  const { storage, operations, drivers, clock, ids, hash, config } = deps;
+  const { storage, operations, drivers, clock, config } = deps;
+  // create 正常路径、对账恢复、startup/readiness 共用同一 handle 恢复/启动实现（R1）。
+  const establish = createRunHandleEstablisher(deps, compensation, gitGrants);
 
   async function settle(
     leased: LeasedOperation,
@@ -58,23 +69,30 @@ export function createCreateOperationRunner(
     });
   }
 
-  /** bootstrap ticket 只经秘密注入通道下发（01 §6.2）；库内只持久 hash（02 §5.1）。 */
-  async function mintBootstrapTicket(run: CloudRunRecord, operationId: string): Promise<string> {
-    const ticket = ids.newSecret();
-    await storage.credentials.saveInitial({
-      runId: run.runId,
-      runGeneration: run.runGeneration,
-      credentialHash: await hash.sha256Hex(ticket),
-      // 凭据行的有效期 = run 硬期限（修复依据 2026-10-07 真实链路：这行凭据不只是
-      // "自举票据"，而是 run 终身的 bridge 身份——旋转只换 hash 不换行；原来按 10 分钟
-      // TTL 落库后，bridge 连接存活超过 10 分钟的 run 一旦断线就永远 credential-rejected
-      // （expires_at > now 恒假），恢复阶梯走完 exhausted，run 只能等 1h 硬期限收口）。
-      // 旋转时 consumeForHello 会把 expires_at 跟随 runs.hard_deadline_at（run 延期不受影响）。
-      // 硬期限尚未规划（类型可空）时按 run 时长默认值兜底；首个 hello 就会对齐到真实值。
-      expiresAt: run.hardDeadlineAt ?? clock.now() + config.hardRunDurationMs,
-      bootstrapOperationId: operationId,
+  /** 确定失败的统一收口：结算 operation + run 收口（instance 已确认处置）。 */
+  async function failAttempt(input: {
+    leased: LeasedOperation;
+    run: CloudRunRecord;
+    code: CloudErrorCode;
+    reason: string;
+    outcomeReason?: string;
+    detail?: string;
+    skipped?: boolean;
+  }): Promise<CreateAttemptOutcome> {
+    await settle(input.leased, "failed", input.code);
+    await orchestrator.failProvisioning({
+      runId: input.run.runId,
+      runGeneration: input.run.runGeneration,
+      reason: input.reason,
+      instanceDispositioned: true,
+      termination: "terminated",
+      ...(input.detail ? { lastError: input.detail } : {}),
     });
-    return ticket;
+    return {
+      operationId: input.leased.operation.operationId,
+      outcome: input.skipped ? "skipped" : "failed",
+      reason: input.outcomeReason ?? input.reason,
+    };
   }
 
   async function executeCreate(
@@ -87,53 +105,68 @@ export function createCreateOperationRunner(
     const driver = providerName ? await drivers.resolve(providerName) : null;
     if (!driver) {
       // 冻结 recipe 的 provider 不可用：明确失败，不在 worker 中替换 provider（01 §7.3）。
-      await settle(leased, "failed", "validation_failed");
-      await orchestrator.failProvisioning({
-        runId: run.runId,
-        runGeneration: run.runGeneration,
+      return await failAttempt({
+        leased,
+        run,
+        code: "validation_failed",
         reason: "provider-not-available",
-        instanceDispositioned: true,
-        termination: "terminated",
       });
-      return {
-        operationId: leased.operation.operationId,
-        outcome: "failed",
-        reason: "provider-not-available",
-      };
     }
 
     if (run.stopRequested) {
       // 停止意图优先：create 未发出（attempt=0）时取消意图并确认无资源（08 §8.1）。
-      await settle(leased, "failed", "recovery_required");
-      await orchestrator.failProvisioning({
-        runId: run.runId,
-        runGeneration: run.runGeneration,
+      return await failAttempt({
+        leased,
+        run,
+        code: "recovery_required",
         reason: "stop-before-create",
-        instanceDispositioned: true,
-        termination: "terminated",
+        outcomeReason: "stop-requested",
+        skipped: true,
       });
-      return {
-        operationId: leased.operation.operationId,
-        outcome: "skipped",
-        reason: "stop-requested",
-      };
+    }
+
+    // checkout 路径唯一计算点（01 §6.2 步骤 2）：创建期下发、持久化、校验 hello。
+    // 恢复场景优先复用已持久事实；缺失时按 project.repoName 重算（与创建期同一计算点）。
+    const workspacePath = await resolveRunWorkspacePath(storage, run);
+    if (!workspacePath.ok) {
+      // 仓库名不安全/缺失：明确失败，不落临时目录、不回退别的路径（01 §6.2 步骤 2）。
+      return await failAttempt({
+        leased,
+        run,
+        code: "validation_failed",
+        reason:
+          workspacePath.reason === "project-repository-missing"
+            ? "project-repository-missing"
+            : "repo-name-unresolved",
+        outcomeReason: "workspace-path-unresolved",
+      });
+    }
+
+    // 幂等优先（R1）：run 已有 providerHandle 说明上一次 create 已成功，只是 handle 落库后
+    // supervisor/结算未完成。禁止再次 create，直接进入统一恢复/启动路径。
+    if (run.providerHandle) {
+      const capabilities = await driver.describeCapabilities();
+      return await persistRunHandle({
+        establish,
+        driver,
+        leased,
+        run,
+        handle: persistedProviderHandle(run, run.providerHandle),
+        deadlineSource: capabilities.deadlineSource,
+        workspacePath: workspacePath.path,
+        settle: (outcome, errorCode) => settle(leased, outcome, errorCode),
+      });
     }
 
     const capabilities = await driver.describeCapabilities();
     if (!capabilities.supportsOutboundWss) {
-      await settle(leased, "failed", "resource_unsupported");
-      await orchestrator.failProvisioning({
-        runId: run.runId,
-        runGeneration: run.runGeneration,
+      return await failAttempt({
+        leased,
+        run,
+        code: "resource_unsupported",
         reason: "provider-no-outbound-wss",
-        instanceDispositioned: true,
-        termination: "terminated",
+        outcomeReason: "no-outbound-wss",
       });
-      return {
-        operationId: leased.operation.operationId,
-        outcome: "failed",
-        reason: "no-outbound-wss",
-      };
     }
 
     // 版本/digest 固定的镜像引用，禁止 latest（01 §5.1 第 2 条）。
@@ -141,43 +174,62 @@ export function createCreateOperationRunner(
     // 这里的兜底用于老 recipe（无 digest/ref）：仍 fail-closed，不猜默认镜像。
     const imageRef = recipe?.imageDigest ?? recipe?.templateRef;
     if (!imageRef) {
-      await settle(leased, "failed", "unsupported_template");
-      await orchestrator.failProvisioning({
-        runId: run.runId,
-        runGeneration: run.runGeneration,
+      return await failAttempt({
+        leased,
+        run,
+        code: "unsupported_template",
         reason: "template-reference-unfrozen",
-        instanceDispositioned: true,
-        termination: "terminated",
+        outcomeReason: "template-unfrozen",
       });
-      return {
-        operationId: leased.operation.operationId,
-        outcome: "failed",
-        reason: "template-unfrozen",
-      };
     }
 
-    // checkout 路径唯一计算点（01 §6.2 步骤 2）：创建期下发、持久化、校验 hello。
-    const task = await storage.tasks.get(run.taskId);
-    const project = task ? await storage.projects.get(task.projectId) : null;
-    const workspacePath = project?.repoName ? buildCloudTaskWorkspacePath(project.repoName) : null;
-    if (!workspacePath?.ok) {
-      // 仓库名不安全/缺失：明确失败，不落临时目录、不回退别的路径（01 §6.2 步骤 2）。
-      await settle(leased, "failed", "validation_failed");
-      await orchestrator.failProvisioning({
+    // create 重试/上次 ambiguous（R1）：provider 可能已经建好资源，只是 handle 没落库。
+    // 先按 operationKey 对账（锚点取 operation.createdAt），只有 notFound 才允许 create。
+    const needsReconciliation =
+      leased.operation.attempt > 1 ||
+      leased.operation.state === "ambiguous" ||
+      leased.operation.errorCode === "provider_create_unknown";
+    if (needsReconciliation) {
+      const reconciliation = await reconcileCreateBeforeRetry({
+        driver,
         runId: run.runId,
-        runGeneration: run.runGeneration,
-        reason: workspacePath ? workspacePath.reason : "project-repository-missing",
-        instanceDispositioned: true,
-        termination: "terminated",
+        operationAttemptedAtMs: leased.operation.createdAt,
       });
-      return {
+      if (reconciliation.status === "created") {
+        // provider 已有该 operationKey 的资源：走统一恢复/启动，绝不再次 create。
+        return await persistRunHandle({
+          establish,
+          driver,
+          leased,
+          run,
+          handle: reconciliation.handle,
+          deadlineSource: capabilities.deadlineSource,
+          workspacePath: workspacePath.path,
+          settle: (outcome, errorCode) => settle(leased, outcome, errorCode),
+        });
+      }
+      if (reconciliation.status === "unknown") {
+        await settle(leased, "ambiguous", "provider_create_unknown");
+        cloudCoreLogger.warn(undefined, "cloud create result unknown before retry", {
+          runId: run.runId,
+          operationId: leased.operation.operationId,
+          detail: reconciliation.detail,
+        });
+        return {
+          operationId: leased.operation.operationId,
+          outcome: "unknown",
+          reason: "create-unknown",
+        };
+      }
+      // notFound：provider 明确没有该 operationKey 的资源，才允许发起（唯一一次）create。
+      cloudCoreLogger.info(undefined, "cloud create retry after notFound reconciliation", {
+        runId: run.runId,
         operationId: leased.operation.operationId,
-        outcome: "failed",
-        reason: "workspace-path-unresolved",
-      };
+        attempt: leased.operation.attempt,
+      });
     }
 
-    const ticket = await mintBootstrapTicket(run, leased.operation.operationId);
+    const ticket = await mintRunBootstrapTicket(deps, run, leased.operation.operationId);
     // 请求寿命只在接纳期算一次（01 §4.3）：读持久化的 hardDeadlineAt，不重算；
     // 老 run 无该字段时按旧规则兜底一次。
     const requestedDeadline =
@@ -188,9 +240,11 @@ export function createCreateOperationRunner(
         providerMaxLifetimeSeconds: capabilities.maxLifetimeSeconds,
       });
 
-    let handle: ProviderSandboxHandle;
-    try {
-      handle = await driver.create({
+    const attempt = await createSandboxOrReconcile({
+      driver,
+      runId: run.runId,
+      operationAttemptedAtMs: leased.operation.createdAt,
+      createInput: {
         operationKey: createOperationKey(run.runId),
         runId: run.runId,
         runGeneration: run.runGeneration,
@@ -202,121 +256,60 @@ export function createCreateOperationRunner(
         requestedDeadline,
         publicControlPlaneUrl: config.publicControlPlaneUrl,
         bootstrapTicket: ticket,
-        // labels 只放额外业务标签：operationKey/runId/runGeneration 是 driver 保留键（由它从
-        // 顶层字段自动写入，调用方传会被本地拒绝）。当前没有额外标签 → 空对象。
+        // 保留键由 driver 从顶层字段写入；当前没有额外标签 → 空对象。
         labels: {},
         signal: signal ?? new AbortController().signal,
-      });
-    } catch (error) {
-      // 01 §9 / 03 §5 三分类：确定失败立即收口；只有"结果未知"才留 ambiguous 对账。
-      const failure = classifyCreateFailure(error);
-      const detail = describeCreateError(error);
-      if (failure.definite) {
-        await settle(leased, "failed", failure.code);
-        await orchestrator.failProvisioning({
-          runId: run.runId,
-          runGeneration: run.runGeneration,
-          reason: failure.reason,
-          instanceDispositioned: true,
-          termination: "terminated",
-          lastError: detail,
-        });
-        cloudCoreLogger.warn(undefined, "cloud create rejected definitively", {
-          runId: run.runId,
-          operationId: leased.operation.operationId,
-          code: failure.code,
-          detail,
-        });
-        return {
-          operationId: leased.operation.operationId,
-          outcome: "failed",
-          reason: failure.reason,
-        };
-      }
-
-      // 抛错不等于失败：网络超时/结果未知必须走 provider 对账，不自动第二次 create（03 §5）。
-      let reconciliation: CreateReconciliation;
-      try {
-        reconciliation = await driver.findCreateResult(createOperationKey(run.runId), {
-          // C-3（定稿附录 6）：对账必须带持久锚点——operation 行的 createdAt 是跨重启
-          // 可用的 create 尝试时间；没有它，「查不到」无法安全判 notFound（01 §4.1）。
-          operationAttemptedAtMs: leased.operation.createdAt,
-        });
-      } catch (reconcileError) {
-        // 对账本身失败（网络/权限）：保留 unknown 语义等下一次租约重试，不猜也不丢文本。
-        const reconcileDetail = describeCreateError(reconcileError);
-        await settle(leased, "ambiguous", "provider_create_unknown");
-        cloudCoreLogger.warn(undefined, "cloud create reconciliation failed", {
-          runId: run.runId,
-          operationId: leased.operation.operationId,
-          detail: reconcileDetail,
-        });
-        return {
-          operationId: leased.operation.operationId,
-          outcome: "unknown",
-          reason: "create-unknown",
-        };
-      }
-      if (reconciliation.status === "created") {
-        return await persistRunHandle({
-          driver,
-          leased,
-          run,
-          handle: reconciliation.handle,
-          deadlineSource: capabilities.deadlineSource,
-          workspacePath: workspacePath.path,
-          bootstrapTicket: ticket,
-          storage,
-          clock,
-          config,
-          compensation,
-          gitGrants,
-          settle: (outcome, errorCode) => settle(leased, outcome, errorCode),
-        });
-      }
-      if (reconciliation.status === "notFound") {
-        await settle(leased, "failed", "bootstrap_failed");
-        await orchestrator.failProvisioning({
-          runId: run.runId,
-          runGeneration: run.runGeneration,
-          reason: "create-failed",
-          instanceDispositioned: true,
-          termination: "terminated",
-          lastError: detail,
-        });
-        return {
-          operationId: leased.operation.operationId,
-          outcome: "failed",
-          reason: "create-failed",
-        };
-      }
-      await settle(leased, "ambiguous", "provider_create_unknown");
-      cloudCoreLogger.warn(undefined, "cloud create result unknown", {
+      },
+    });
+    if (attempt.status === "failed") {
+      cloudCoreLogger.warn(undefined, "cloud create rejected definitively", {
         runId: run.runId,
         operationId: leased.operation.operationId,
-        detail,
+        code: attempt.code,
+        detail: attempt.detail,
       });
-      return {
-        operationId: leased.operation.operationId,
-        outcome: "unknown",
-        reason: "create-unknown",
-      };
+      return await failAttempt({
+        leased,
+        run,
+        code: attempt.code,
+        reason: attempt.reason,
+        detail: attempt.detail,
+      });
     }
-    return await persistRunHandle({
-      driver,
-      leased,
-      run,
-      handle,
-      deadlineSource: capabilities.deadlineSource,
-      workspacePath: workspacePath.path,
-      bootstrapTicket: ticket,
-      storage,
-      clock,
-      config,
-      compensation,
-      gitGrants,
-      settle: (outcome, errorCode) => settle(leased, outcome, errorCode),
+    if (attempt.status === "created" || attempt.status === "reconciled") {
+      return await persistRunHandle({
+        establish,
+        driver,
+        leased,
+        run,
+        handle: attempt.handle,
+        deadlineSource: capabilities.deadlineSource,
+        workspacePath: workspacePath.path,
+        bootstrapTicket: ticket,
+        settle: (outcome, errorCode) => settle(leased, outcome, errorCode),
+      });
+    }
+    if (attempt.status === "notFound") {
+      return await failAttempt({
+        leased,
+        run,
+        code: "bootstrap_failed",
+        reason: "create-failed",
+        detail: attempt.detail,
+      });
+    }
+    // 结果未知：保持 ambiguous 等下一次租约对账，绝不自动第二次 create（03 §5）。
+    await settle(leased, "ambiguous", "provider_create_unknown");
+    cloudCoreLogger.warn(undefined, "cloud create result unknown", {
+      runId: run.runId,
+      operationId: leased.operation.operationId,
+      detail: attempt.detail,
     });
+    return {
+      operationId: leased.operation.operationId,
+      outcome: "unknown",
+      reason: "create-unknown",
+    };
   }
 
   return {

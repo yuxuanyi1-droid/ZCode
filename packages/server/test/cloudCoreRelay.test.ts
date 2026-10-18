@@ -579,6 +579,32 @@ function sentFrame<T extends { type?: string }>(sent: string[], type: string): T
   return sent.map((item) => safeParse(item) as T | undefined).find((frame) => frame?.type === type);
 }
 
+/** setupReadyRun 首次 hello 的等价帧（同 socket 重复 hello 用例复用同一 attempt/地址）。 */
+function setupHello(harness: RelayHarness, workspacePath: string) {
+  return {
+    protocolVersion: 1,
+    type: "bridge.hello",
+    address: {
+      taskId: harness.taskId,
+      runId: harness.runId,
+      runGeneration: harness.runGeneration,
+      workspaceIdentity: `cloud-task:${harness.taskId}`,
+      workspacePath,
+      remoteSessionId: `remote-${harness.runId}`,
+    },
+    helloAttemptId: "00000000-0000-4000-8000-0000000008aa",
+    credentialToken: TICKET,
+    candidateNextResumeToken: "candidate-relay",
+    runtimeIncarnation: "incarnation-relay",
+  };
+}
+
+function welcomeFrames(sent: string[]): Record<string, unknown>[] {
+  return sent
+    .map((item) => safeParse(item))
+    .filter((frame): frame is Record<string, unknown> => frame?.["type"] === "bridge.welcome");
+}
+
 test("未鉴权 socket：非 hello 帧被 close(1008, unauthenticated)，关闭不摘除 attachment、不置 disconnected（02 §5.1）", async () => {
   const harness = await setupReadyRun();
   const readySession = harness.plane.attachments.current(harness.runId);
@@ -709,4 +735,250 @@ test("新 socket hello 接管：旧连接被 close superseded，registry 保留�
     "heartbeat on new session",
   );
   await harness.bridge.close();
+});
+
+// ── 02 §5.1 第 5 条：同 socket 重复 hello（2026-10-17 review R5）──
+test("同 socket 重复 hello：重发原 welcome（epoch/rotationId/cursors 不变），不二次消费凭据", async () => {
+  const harness = await setupReadyRun();
+  const run = await harness.storage.runs.get(harness.runId);
+  assert.ok(run?.workspacePath, "前置：持久工作区事实在册");
+  const first = welcomeFrames(harness.fake.sent)[0];
+  assert.ok(first, "前置：首个 welcome 已发送");
+
+  // 首次 hello 已把凭据 hash 切到候选；之后开始计数：重复 hello 若再次 consume 会被拒绝
+  // （同一票已失效），所以「计数为 0 且仍回 welcome」同时证明未消费凭据。
+  let consumes = 0;
+  const credentials = harness.storage.credentials;
+  const consume = credentials.consumeForHello.bind(credentials);
+  credentials.consumeForHello = (async (input) => {
+    consumes += 1;
+    return consume(input);
+  }) as typeof credentials.consumeForHello;
+
+  harness.fake.push(JSON.stringify(setupHello(harness, run.workspacePath)));
+  await waitFor(() => welcomeFrames(harness.fake.sent).length === 2, "duplicate hello welcome");
+  const second = welcomeFrames(harness.fake.sent)[1]!;
+  assert.equal(
+    second["connectionEpoch"],
+    first["connectionEpoch"],
+    "同 socket 重复 hello 不递增 epoch",
+  );
+  assert.equal(second["rotationId"], first["rotationId"], "重发原 rotationId");
+  assert.deepEqual(second["ingestCursors"], first["ingestCursors"], "重发原 ingest cursors");
+  assert.equal(consumes, 0, "重复 hello 不得再次消费凭据");
+  assert.equal(harness.fake.closedInfo(), undefined, "幂等重放不得关闭连接");
+  await harness.bridge.close();
+});
+
+test("同 socket 重复 hello：attemptId 或地址不一致 → 1008 hello-mismatch", async () => {
+  // 不同 attemptId：已认证连接不得借重复 hello 切换 attempt/rotation。
+  const attemptHarness = await setupReadyRun();
+  const attemptRun = await attemptHarness.storage.runs.get(attemptHarness.runId);
+  assert.ok(attemptRun?.workspacePath);
+  attemptHarness.fake.push(
+    JSON.stringify({
+      ...setupHello(attemptHarness, attemptRun.workspacePath),
+      helloAttemptId: "00000000-0000-4000-8000-0000000008ac",
+    }),
+  );
+  await waitFor(() => attemptHarness.fake.closedInfo() !== undefined, "attempt mismatch close");
+  assert.deepEqual(attemptHarness.fake.closedInfo(), { code: 1008, reason: "hello-mismatch" });
+  await attemptHarness.bridge.close();
+
+  // 地址不一致（remoteSessionId 不同）：同样不得改写已绑定的路由事实。
+  const addressHarness = await setupReadyRun();
+  const addressRun = await addressHarness.storage.runs.get(addressHarness.runId);
+  assert.ok(addressRun?.workspacePath);
+  const hello = setupHello(addressHarness, addressRun.workspacePath);
+  addressHarness.fake.push(
+    JSON.stringify({
+      ...hello,
+      address: { ...hello.address, remoteSessionId: `remote-other-${addressHarness.runId}` },
+    }),
+  );
+  await waitFor(() => addressHarness.fake.closedInfo() !== undefined, "address mismatch close");
+  assert.deepEqual(addressHarness.fake.closedInfo(), { code: 1008, reason: "hello-mismatch" });
+  await addressHarness.bridge.close();
+});
+
+// ── P2：bridge 入站帧按连接串行处理（2026-10-17 review R5）──
+test("入站帧串行：慢 projection.batch 未完成时后帧不得先处理", async () => {
+  const harness = await setupReadyRun();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const order: string[] = [];
+  let calls = 0;
+  const ingest = harness.plane.projections.ingest;
+  const original = ingest.ingestProjectionBatch.bind(ingest);
+  ingest.ingestProjectionBatch = async (frame) => {
+    calls += 1;
+    const index = calls;
+    order.push(`start-${index}`);
+    if (index === 1) await gate;
+    order.push(`end-${index}`);
+    return original(frame);
+  };
+
+  const record = (seq: number) => ({
+    schemaVersion: 1,
+    taskId: harness.taskId,
+    runId: harness.runId,
+    runGeneration: harness.runGeneration,
+    runtimeIncarnation: "incarnation-order",
+    topic: "conversation/order",
+    logEpoch: "epoch-order",
+    sourceSeq: seq,
+    kind: seq === 0 ? "snapshot" : "delta",
+    payload: { text: `record-${seq}` },
+    contentHash: seq.toString(16).padStart(64, "0"),
+  });
+  const batch = (seq: number) =>
+    JSON.stringify({
+      protocolVersion: 1,
+      type: "projection.batch",
+      connectionEpoch: harness.connectionEpoch,
+      records: [record(seq)],
+    });
+  harness.fake.push(batch(0));
+  harness.fake.push(batch(1));
+
+  await waitFor(() => order.length >= 1, "first batch started");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ["start-1"], "第二帧必须等待第一帧处理完成");
+  release();
+  await waitFor(() => order.length === 4, "both batches processed");
+  assert.deepEqual(order, ["start-1", "end-1", "start-2", "end-2"]);
+  await harness.bridge.close();
+});
+
+test("入站帧串行：hello 与随后的 rpc.response 同 tick 到达时先完成认证", async () => {
+  const harness = await setupReadyRun();
+  const run = await harness.storage.runs.get(harness.runId);
+  assert.ok(run?.workspacePath);
+  const newcomer = createFakeSocket();
+  await harness.bridge.acceptConnection({ runId: harness.runId, socket: newcomer.socket });
+
+  // 同一 tick：先 hello（含异步 CAS），再回投 rpc.response。未串行化时 rpc 帧会以
+  // `unauthenticated` 关闭连接（正是修复前的帧乱序缺陷）。
+  newcomer.push(
+    JSON.stringify({
+      ...setupHello(harness, run.workspacePath),
+      helloAttemptId: "00000000-0000-4000-8000-0000000008ad",
+      credentialToken: "candidate-relay",
+      candidateNextResumeToken: "candidate-relay-2",
+      runtimeIncarnation: "incarnation-relay-3",
+    }),
+  );
+  newcomer.push(
+    JSON.stringify({
+      protocolVersion: 1,
+      type: "rpc.response",
+      runId: harness.runId,
+      runGeneration: harness.runGeneration,
+      connectionEpoch: harness.connectionEpoch,
+      streamId: "00000000-0000-4000-8000-0000000008ee",
+      payload: Buffer.from("ok").toString("base64"),
+    }),
+  );
+
+  await waitFor(() => sentFrame(newcomer.sent, "bridge.welcome") !== undefined, "newcomer welcome");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    newcomer.closedInfo(),
+    undefined,
+    "rpc.response 必须在 hello 认证完成后处理，不得被当作未认证帧关闭",
+  );
+  await harness.bridge.close();
+});
+
+// ── 02 §4：沙箱主动 rpc.close（checkpoint quiesce/releaseAll）→ 控制面三通道作废流缓存 ──
+// 2026-10-13 V4r 真机：quiesce 静默撕流后，控制面流缓存按 epoch 复用了死流，
+// checkpoint 后手动同步全超时、append uncertain/closed。
+test("沙箱回发 rpc.close：命令流/控制面同步流重开，浏览器流被释放（02 §4）", async () => {
+  const harness = await setupReadyRun();
+  try {
+    const opens = () => harness.relay.received.filter((frame) => frame.type === "rpc.open");
+    const closeFrame = (streamId: string) => ({
+      protocolVersion: CLOUD_RPC_PROTOCOL_VERSION,
+      type: "rpc.close" as const,
+      runId: harness.runId,
+      runGeneration: harness.runGeneration,
+      connectionEpoch: harness.connectionEpoch,
+      streamId,
+    });
+
+    // 1) 浏览器流。
+    let browserClosed: string | null = null;
+    const browserStream = harness.bridge.openBrowserRpcStream({
+      runId: harness.runId,
+      runGeneration: harness.runGeneration,
+      connectionEpoch: harness.connectionEpoch,
+      deliver: () => undefined,
+      onClosed: (reason) => {
+        browserClosed = reason;
+      },
+    });
+    assert.ok(browserStream);
+    assert.equal(opens().length, 1, "浏览器流先开 rpc.open");
+
+    // 2) 命令投递流：查询命令事实触发 ensureSession。
+    const query = () =>
+      harness.bridge.runtimeCommands.queryCommand({
+        taskId: harness.taskId,
+        runId: harness.runId,
+        runGeneration: harness.runGeneration,
+        commandId: "00000000-0000-4000-8000-0000000008c1",
+      });
+    await query();
+    const commandOpen = opens().at(-1);
+    assert.equal(commandOpen?.type, "rpc.open");
+    assert.equal(
+      (commandOpen as unknown as { serviceScope?: string } | undefined)?.serviceScope,
+      "control-plane",
+    );
+    const commandStreamId = commandOpen?.streamId ?? "";
+    assert.ok(commandStreamId);
+
+    // 3) 控制面同步流。
+    const busySync = () =>
+      harness.bridge.controlPlaneRpc.call({
+        runId: harness.runId,
+        runGeneration: harness.runGeneration,
+        connectionEpoch: harness.connectionEpoch,
+        channel: ServiceChannels.File,
+        method: "readFile",
+        args: [{ path: "/workspace/demo/a.txt" }],
+      });
+    assert.equal((await busySync()).status, "ok");
+    const syncOpen = opens().at(-1);
+    const syncStreamId = syncOpen?.streamId ?? "";
+    assert.ok(syncStreamId);
+    assert.notEqual(syncStreamId, commandStreamId, "控制面同步流与命令流 streamId 隔离");
+
+    // 4) 浏览器流被沙箱释放：控制面关闭浏览器 socket（不再永久挂起）。
+    harness.fake.push(JSON.stringify(closeFrame(browserStream.streamId)));
+    // 入站帧按连接串行处理（R5）：rpc.close 在微任务队列中生效，等它落定再断言。
+    await waitFor(() => browserClosed === "sandbox-closed", "browser stream released");
+    assert.equal(harness.bridge.hasOpenBrowserStreams(harness.runId), false);
+
+    // 5) 命令流被沙箱释放：下一次 ensureSession 重发 rpc.open（固定 bridge streamId）。
+    const beforeCommandReopen = opens().length;
+    harness.fake.push(JSON.stringify(closeFrame(commandStreamId)));
+    await new Promise((resolve) => setImmediate(resolve));
+    await query();
+    assert.equal(opens().length, beforeCommandReopen + 1, "命令流释放后必须重开");
+    assert.equal(opens().at(-1)?.streamId, commandStreamId, "命令传输用同一 bridge streamId 重开");
+
+    // 6) 控制面同步流被沙箱释放：下一次调用重开新流（新 streamId）。
+    const beforeSyncReopen = opens().length;
+    harness.fake.push(JSON.stringify(closeFrame(syncStreamId)));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal((await busySync()).status, "ok");
+    assert.equal(opens().length, beforeSyncReopen + 1, "控制面同步流释放后必须重开");
+    assert.notEqual(opens().at(-1)?.streamId, syncStreamId, "重开使用新 streamId");
+  } finally {
+    await harness.bridge.close();
+  }
 });

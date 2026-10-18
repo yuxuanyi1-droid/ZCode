@@ -18,7 +18,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { CloudCheckpointRecord } from "@zcode/shared";
+import type { CloudCheckpointRecord, CloudProjectionRecord } from "@zcode/shared";
 import {
   TERMINATE_RETRY_MAX_ATTEMPTS,
   terminateRetryDue,
@@ -153,6 +153,45 @@ function checkpointRecord(
     updatedAt: context.clock.now(),
     confirmedRemoteSha: "a".repeat(40),
     ...overrides,
+  };
+}
+
+/** 真实导出形态的投影：最新 state.updated 声明 pendingInteractions（审批等待事实）。 */
+function pendingInteractionProjection(
+  session: { taskId: string; runId: string; runGeneration: number },
+  sourceSeq: number,
+  count: number,
+): CloudProjectionRecord {
+  return {
+    schemaVersion: 1,
+    taskId: session.taskId,
+    runId: session.runId,
+    runGeneration: session.runGeneration,
+    runtimeIncarnation: "incarnation-b6",
+    topic: "conversation/sess-b6",
+    logEpoch: "epoch-b6",
+    sourceSeq,
+    kind: "delta",
+    payload: {
+      topic: "conversation/sess-b6",
+      fromSeq: sourceSeq,
+      toSeq: sourceSeq,
+      sentAt: 0,
+      payload: {
+        kind: "deltas",
+        deltas: [
+          {
+            op: "state.updated",
+            patch: {
+              pendingInteractions: Array.from({ length: count }, (_unused, index) => ({
+                interactionId: `b6-${index}`,
+              })),
+            },
+          },
+        ],
+      },
+    },
+    contentHash: String(sourceSeq).repeat(64),
   };
 }
 
@@ -435,6 +474,142 @@ test("P2 idle drain：uncertain 输入同样阻塞归档（与空闲 pause 同�
   assert.equal(report.began, 0, "uncertain 输入阻塞 idle drain");
   assert.equal(report.skipped, 1);
   assert.equal((await context.storage.runs.get(session.runId))?.status, "ready");
+});
+
+test("P2 idle drain：等待审批（最新投影 pendingInteractions>0）不算空闲（08 §7）", async () => {
+  const context = buildTestPlane({ config: { idleArchiveThresholdMs: 1_000 } });
+  // pauseResume=none（缺省门禁）：idle 归 drain 拍（单轨 F-3 的 none 级路径）。
+  const session = await seedReadyRun(context);
+  for (const input of await context.storage.inputs.listDeliverable(session.taskId)) {
+    await context.storage.inputs.markDelivery({
+      taskId: session.taskId,
+      commandId: input.commandId,
+      to: "admitted",
+      now: context.clock.now(),
+    });
+  }
+  await context.storage.runs.touchBusinessActivity({
+    runId: session.runId,
+    at: context.clock.now() - 2_000,
+  });
+  // 复现路径：工具权限审批中，pending 输入为 0、业务活动已停止；旧实现恒传
+  // pendingInteractionCount=0 会 idle drain，审批之后无法投递。
+  await context.storage.projections.appendBatch([pendingInteractionProjection(session, 0, 1)]);
+
+  const report = await context.plane.lifecycle.drain.sweep();
+  assert.equal(report.began, 0, "审批等待阻塞 idle drain");
+  assert.equal(report.skipped, 1);
+  assert.equal((await context.storage.runs.get(session.runId))?.status, "ready");
+});
+
+test("keepalive：等待审批视为有工作，执行空闲也续期（08 §7）", async () => {
+  const context = buildTestPlane();
+  const session = await seedReadyRun(context);
+  for (const input of await context.storage.inputs.listDeliverable(session.taskId)) {
+    await context.storage.inputs.markDelivery({
+      taskId: session.taskId,
+      commandId: input.commandId,
+      to: "admitted",
+      now: context.clock.now(),
+    });
+  }
+  // 执行已空闲：业务活动事实早于「仍在执行」窗口（5 分钟）。
+  await context.storage.runs.touchBusinessActivity({
+    runId: session.runId,
+    at: context.clock.now() - 6 * 60_000,
+  });
+  await context.storage.runs.updateLease({
+    runId: session.runId,
+    runGeneration: session.runGeneration,
+    expiresAt: context.clock.now() + 60_000,
+    now: context.clock.now(),
+  });
+  await context.storage.projections.appendBatch([pendingInteractionProjection(session, 0, 1)]);
+
+  const report = await context.plane.lifecycle.keepalive.sweep();
+  assert.equal(report.renewed, 1, "pending interaction 阻止「空闲不续期」");
+  assert.equal(report.skipped, 0);
+  assert.equal((await context.storage.runs.get(session.runId))?.expiresAt, 0);
+});
+
+test("keepalive：无 pending interaction 的纯空闲 run 不续期（对照）", async () => {
+  const context = buildTestPlane();
+  const session = await seedReadyRun(context);
+  for (const input of await context.storage.inputs.listDeliverable(session.taskId)) {
+    await context.storage.inputs.markDelivery({
+      taskId: session.taskId,
+      commandId: input.commandId,
+      to: "admitted",
+      now: context.clock.now(),
+    });
+  }
+  await context.storage.runs.touchBusinessActivity({
+    runId: session.runId,
+    at: context.clock.now() - 6 * 60_000,
+  });
+  await context.storage.runs.updateLease({
+    runId: session.runId,
+    runGeneration: session.runGeneration,
+    expiresAt: context.clock.now() + 60_000,
+    now: context.clock.now(),
+  });
+
+  const report = await context.plane.lifecycle.keepalive.sweep();
+  assert.equal(report.renewed, 0, "仅观看/无工作面不续期");
+  assert.equal(report.skipped, 1);
+});
+
+test("R3 idle drain：pending/saving checkpoint 在 2 分钟窗口内阻塞；超窗僵尸事实不永久阻塞", async () => {
+  const context = buildTestPlane({ config: { idleArchiveThresholdMs: 1_000 } });
+  // pauseResume=none（缺省门禁）：idle 归 drain 拍（单轨 F-3 的 none 级路径）。
+  const session = await seedReadyRun(context);
+  const deliverable = await context.storage.inputs.listDeliverable(session.taskId);
+  for (const input of deliverable) {
+    await context.storage.inputs.markDelivery({
+      taskId: session.taskId,
+      commandId: input.commandId,
+      to: "admitted",
+      now: context.clock.now(),
+    });
+  }
+  await context.storage.runs.touchBusinessActivity({
+    runId: session.runId,
+    at: context.clock.now() - 2_000,
+  });
+  const operationId = "00000000-0000-4000-8000-0000000000c9";
+  const checkpoint = {
+    operationId,
+    taskId: session.taskId,
+    runId: session.runId,
+    runGeneration: session.runGeneration,
+    state: "pending" as const,
+    includedFiles: [],
+    createdAt: context.clock.now(),
+    updatedAt: context.clock.now(),
+  };
+  await context.storage.projections.recordCheckpoint(checkpoint);
+
+  const pendingReport = await context.plane.lifecycle.drain.sweep();
+  assert.equal(pendingReport.began, 0, "窗口内 pending checkpoint 占用保存通道");
+  assert.equal(pendingReport.skipped, 1);
+  assert.equal((await context.storage.runs.get(session.runId))?.status, "ready");
+
+  // 旧实现只认 saving，pending 不阻塞；R3 后两者同口径。
+  await context.storage.projections.recordCheckpoint({
+    ...checkpoint,
+    state: "saving",
+    updatedAt: context.clock.now(),
+  });
+  const savingReport = await context.plane.lifecycle.drain.sweep();
+  assert.equal(savingReport.began, 0, "窗口内 saving checkpoint 占用保存通道");
+  assert.equal(savingReport.skipped, 1);
+
+  // 超过 2 分钟在途窗口：僵尸 saving 记录不再阻塞，idle drain 正常推进（数据风险由
+  // run.dataAtRisk 承载，不能让超窗事实永久卡住归档）。
+  context.clock.advance(120_001);
+  const expiredReport = await context.plane.lifecycle.drain.sweep();
+  assert.equal(expiredReport.began, 1, "超窗后 idle drain 恢复");
+  assert.equal((await context.storage.runs.get(session.runId))?.status, "draining");
 });
 
 // ── E.【P3】forceStopTask 的 CAS 复核（08 §8.1 修订） ──

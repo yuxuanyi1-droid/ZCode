@@ -12,6 +12,10 @@
  *   独立的持久投递记录（与 task_inputs 共用投递状态机，见 cloud/CONTRACT.md 表
  *   `task_input_interaction_decisions`），W0 冻结的 `StoragePort` 未暴露该能力，故本函数
  *   在该分支返回结构化 `not_implemented` 且**不发送**未持久化的副作用（见报告 CR-3）。
+ * - **首条输入禁止取消**（2026-10-18 用户决议，03 §6 cancel 行、11 §8）：首条输入被取消后
+ *   Run 仍会正常 provisioning→ready，但后续 append 没有 createSession 载体，会永久停在
+ *   `awaiting-runtime-session`；取消首条没有安全的清理通路，服务端直接拒绝
+ *   `not_ready/first-input-not-cancellable`。
  */
 import type { CloudTaskInputRecord, InputReceipt } from "@zcode/shared";
 import type { CommandAck } from "@zcode/shared/zcode-protocol-v4";
@@ -273,11 +277,22 @@ export function createInputDeliveryControl(
       const record = await storage.inputs.get(input.taskId, input.commandId);
       if (!record) return fail("not_found", "input-not-found");
 
+      // 幂等重放优先：已 cancelled/rejected 的输入继续返回原 receipt，不被下面的首条
+      // 输入保护改写（否则重复取消已取消的输入会从幂等成功变成 409）。
+      if (record.deliveryStatus === "cancelled" || record.deliveryStatus === "rejected") {
+        return ok(await receiptOf(record));
+      }
+
+      // 首条输入在 runtime admission 前禁止取消（2026-10-18 用户决议）。
+      // 原因：首条被取消后 run 仍会正常 provisioning→ready，但后续 append 没有
+      // createSession 载体，会永久停在 `awaiting-runtime-session`；cancel 首条没有
+      // 安全的清理通路（不静默提拔下一条、也不能伪造 runtime 停止），故直接拒绝。
+      const activeRun = await storage.runs.activeOfTask(input.taskId);
+      if (activeRun && activeRun.firstInputCommandId === input.commandId) {
+        return fail("not_ready", "first-input-not-cancellable");
+      }
+
       switch (record.deliveryStatus) {
-        case "cancelled":
-        case "rejected":
-          // 幂等撤销：已是终态直接回原 receipt（03 §6 cancel 行）。
-          return ok(await receiptOf(record));
         case "accepted": {
           const cancelled = await storage.inputs.cancelPending({
             taskId: input.taskId,
@@ -332,7 +347,7 @@ export function createInputDeliveryControl(
 
 /** 02 §6.2：只有 accepted 与「原结果为接受的 duplicate」算 admitted；其余保持错误与原因。 */
 export function mapCommandAck(ack: CommandAck): {
-  deliveryStatus: CloudTaskInputRecord["deliveryStatus"];
+  deliveryStatus: "admitted" | "rejected";
   lastError?: string;
 } {
   switch (ack.status) {
@@ -348,7 +363,7 @@ export function mapCommandAck(ack: CommandAck): {
 }
 
 /** createSession 的 ACK 携带 sessionId：控制面保存 receipt 与 runtime session 的映射（02 §6.2）。 */
-function sessionIdFromAck(ack: CommandAck): string | undefined {
+export function sessionIdFromAck(ack: CommandAck): string | undefined {
   const result = ack.result;
   if (result && result.type === "createSession" && "sessionId" in result) {
     return typeof result.sessionId === "string" ? result.sessionId : undefined;

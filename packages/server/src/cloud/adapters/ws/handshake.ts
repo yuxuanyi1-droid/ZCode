@@ -85,6 +85,42 @@ export async function handleBridgeHandshake(
     return { handled: true };
   }
 
+  // 同 socket 重复 hello（02 §5.1 第 5 条）：已认证连接只接受同一 attemptId + 同一地址的
+  // 幂等重放，返回原 welcome 事实；不再次消费凭据、不递增 epoch、不重绑注册表。
+  // 修复依据（2026-10-17 review R5）：此前重复 hello 会再次 consumeForHello（凭据已切到
+  // 候选 hash，重放同一 hello 反而被拒）并再次 bumpConnectionEpoch。
+  if (connection.authenticated) {
+    const recorded = connection.hello;
+    if (
+      recorded &&
+      recorded.attemptId === frame.helloAttemptId &&
+      sameHelloAddress(recorded.address, address)
+    ) {
+      logger.info(undefined, "bridge hello replayed; resending original welcome", {
+        runId: run.runId,
+        connectionEpoch: connection.connectionEpoch,
+        helloAttemptId: frame.helloAttemptId,
+      });
+      sendFrame(connection, {
+        protocolVersion: 1,
+        type: "bridge.welcome",
+        connectionEpoch: connection.connectionEpoch,
+        rotationId: recorded.rotationId,
+        capabilities: [...CLOUD_BRIDGE_CAPABILITIES],
+        ingestCursors: recorded.ingestCursors,
+        policyVersion: context.services().config.bootstrapPolicyVersion,
+      });
+      return { handled: true };
+    }
+    // 不同 attemptId 或地址不一致：已认证连接不得借此切换身份/代际，1008 关闭。
+    rejectHandshake("duplicate-hello-mismatch", {
+      attemptId: frame.helloAttemptId,
+      recordedAttemptId: recorded?.attemptId ?? "unknown",
+    });
+    connection.socket.close(1008, "hello-mismatch");
+    return { handled: true };
+  }
+
   // 凭据只比较 hash，失败 fail-closed（02 §5.1）。
   const credential = await storage.credentials.consumeForHello({
     runId: run.runId,
@@ -125,7 +161,7 @@ export async function handleBridgeHandshake(
     return { handled: true };
   }
 
-  // 新 socket 接管：epoch 由数据库 CAS 递增（同 socket 重复 hello 复用原值，02 §5.1）。
+  // 新 socket 接管：epoch 由数据库 CAS 递增（同 socket 重复 hello 已在上面幂等返回）。
   const epoch =
     (await storage.runs.bumpConnectionEpoch({
       runId: run.runId,
@@ -151,6 +187,14 @@ export async function handleBridgeHandshake(
   });
 
   const ingestCursors = await storage.projections.ingestCursors({ runId: run.runId });
+  // 记录本连接的 hello 事实：同 socket 重复 hello 只重发这些原值（02 §5.1 第 5 条）。
+  connection.hello = {
+    attemptId: frame.helloAttemptId,
+    rotationId: credential.rotationId,
+    // 地址以持久事实为准（与上面的校验一致，不采用上报值覆盖）。
+    address: { ...address, workspacePath: run.workspacePath },
+    ingestCursors,
+  };
   // 握手成功：epoch 接管 + 能力/策略版本（不记 token、不记帧正文）。
   logger.info(undefined, "bridge welcome sent", {
     runId: run.runId,
@@ -194,4 +238,16 @@ export async function handleBridgeHandshake(
     });
   }
   return { handled: true };
+}
+
+/** 地址逐字段比较：重复 hello 只有在身份/工作区/会话路由完全一致时才允许幂等重放。 */
+function sameHelloAddress(left: CloudRunAddress, right: CloudRunAddress): boolean {
+  return (
+    left.taskId === right.taskId &&
+    left.runId === right.runId &&
+    left.runGeneration === right.runGeneration &&
+    left.workspaceIdentity === right.workspaceIdentity &&
+    left.workspacePath === right.workspacePath &&
+    left.remoteSessionId === right.remoteSessionId
+  );
 }

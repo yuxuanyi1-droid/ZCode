@@ -16,6 +16,7 @@ import type { SandboxDriverRegistryPort } from "../app/ports/sandboxDriverRegist
 import type { SandboxRuntimeSettingsPort } from "../app/ports/sandboxRuntimeSettingsPort.js";
 import type { UserPreferencesPort } from "../app/ports/userPreferencesPort.js";
 import type { UserProfileStorePort } from "../app/ports/userProfileStorePort.js";
+import type { InteractionDecisionRepo } from "../app/ports/inputPort.js";
 import type { SandboxTemplateResolverPort } from "../app/ports/sandboxDriverPort.js";
 import type { CloudGitGrantService } from "../app/gitGrants.js";
 import type { GitGrantStore } from "../app/ports/gitGrantPort.js";
@@ -58,6 +59,11 @@ export interface CloudStorageReadinessSource {
   readonly grants?: GitGrantStore;
   /** 用户资源 profile store（M8；14 §9.2①）：控制面复用同一实例（上传与资源下发组装）。 */
   readonly userProfile?: UserProfileStorePort;
+  /**
+   * 交互决定持久端（03 §4、02 §6.3）：与 W2 客户端同一实例；控制面装配据此接通
+   * 交互决定端点（否则生产路径以 `interaction-decision-persistence-missing` 501）。
+   */
+  readonly interactions?: InteractionDecisionRepo;
   /** W2 客户端的启动门（迁移/可写性/磁盘/锁）；注入裸 `StoragePort` 时不存在。 */
   assertReady?(): Promise<StoredStorageReadiness>;
   /** 只有**打开方**负责关闭：注入方持有生命周期时入口不调它。 */
@@ -222,6 +228,9 @@ export async function openCloudStorage(
     operations: client.operations,
     grants: client.grants,
     userProfile: client.userProfile,
+    // 交互决定持久面与控制面其余端口同源：生产入口自持存储时必须一并透传，
+    // 否则控制面看不到 `interactions`，提交端点退化为 not_implemented。
+    interactions: client.interactions,
     readiness: () => client.readiness(),
     assertReady: () => client.assertReady(),
     close: () => client.close(),

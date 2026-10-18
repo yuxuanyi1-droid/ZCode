@@ -142,12 +142,6 @@ function acceptInputInTransaction(
     // start 仅属于 draft：active 上的新 start 冲突，不降级为 append（08 §5）。
     if (taskStatus !== "draft") return conflict("stale", "start-on-active");
     if (activeRun) return conflict("stale", "start-on-active");
-    if (
-      request.expectedTaskRevision !== undefined &&
-      request.expectedTaskRevision !== taskRevision
-    ) {
-      return conflict("stale", "revision-mismatch");
-    }
     // 启动选择必须与已持久 draftStartConfig 一致（03 §6「事务验证两者一致」，W1 CR-1）。
     if (!request.start) invalid("start 必须携带 start 启动选择（与已持久 draft 一致）");
     const persistedDraft = readPersistedDraftStartConfig(task);
@@ -174,11 +168,17 @@ function acceptInputInTransaction(
   if (request.intent === "reopen") {
     // 旧 run 必须已终态：无法确认旧写权处置时返回 recovery_required（02 §2 不变量 5、08 §9）。
     if (activeRun) return conflict("recovery_required", "start-on-active");
-    if (taskStatus === "draft" || taskStatus === "archived") {
+    if (taskStatus === "draft" || taskStatus === "archived")
       return conflict("stale", "start-on-active");
-    }
   }
-
+  // 15 §R3：start/reopen 在事务内复核 expectedTaskRevision，过期基线按 stale 拒绝。
+  if (
+    request.intent !== "append" &&
+    request.expectedTaskRevision !== undefined &&
+    request.expectedTaskRevision !== taskRevision
+  ) {
+    return conflict("stale", "revision-mismatch");
+  }
   // ② 附件引用必须是本 owner 已发布的对象，且在同一事务里被标记引用（03 §4）。
   if (request.attachmentIds && request.attachmentIds.length > 0) {
     markAttachmentsReferenced(context, {

@@ -148,8 +148,12 @@ export function createTaskService(deps: CloudCoreDeps): TaskService {
     },
 
     async deleteProject(input) {
-      const project = await ownedProject(input.principalId, input.projectId);
-      if (!project) return fail("not_found", "project-not-found");
+      // 软删除（15 §R3、03 §6 deleteProject「明确归档，不静默销毁」）：读取包含已归档
+      // 行的记录，让重复删除可以幂等返回 deleted=true；所有权校验仍在归档写入之前。
+      const project = await storage.projects.get(input.projectId, { includeArchived: true });
+      if (!project || project.ownerPrincipalId !== input.principalId) {
+        return fail("not_found", "project-not-found");
+      }
       // 03 §6 / 08 §9：默认有活动任务时 409，不级联丢历史。
       let cursor: string | undefined;
       for (let page = 0; page < DELETE_SCAN_MAX_PAGES; page += 1) {
@@ -160,7 +164,13 @@ export function createTaskService(deps: CloudCoreDeps): TaskService {
             return fail("validation_failed", "project-has-tasks", { taskId: task.taskId });
           }
         }
-        if (!tasks.nextCursor) return ok({ deleted: true as const });
+        if (!tasks.nextCursor) {
+          // 只有扫描通过后才写归档事实；不能在不写入的情况下返回成功（15 §R3）。
+          // archive=false 只可能是「已归档」：项目行在上方已确认存在且属于本主体，
+          // 项目没有物理删除路径，因此重复/并发删除按幂等成功返回。
+          await storage.projects.archive(project.projectId, clock.now());
+          return ok({ deleted: true as const });
+        }
         cursor = tasks.nextCursor;
       }
       // 扫描上限内无法确认「无活动任务」时保守拒绝，不冒险删除历史。

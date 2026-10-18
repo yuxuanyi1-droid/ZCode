@@ -8,12 +8,67 @@
  *   rpc 帧到沙箱的转接由 W6 的 rpcRelay 承担，未接线前连接不可用（不静默假装可用）。
  */
 import type { Context, Hono } from "hono";
-import { notImplemented, type CloudHttpRouteDeps, type CloudUpgradeWebSocket } from "./support.js";
+import {
+  errorResponse,
+  notImplemented,
+  type CloudHttpRouteDeps,
+  type CloudUpgradeWebSocket,
+} from "./support.js";
 
 /** hono `WSContext` 的结构子集：只用到 send/close（浏览器通道要能发二进制字节）。 */
 interface WsLike {
   send(data: string | Uint8Array | ArrayBuffer): void;
   close(code?: number, reason?: string): void;
+}
+
+/** 回环开发源：`http(s)://localhost[:port]`、`http(s)://127.0.0.1[:port]`、`http(s)://[::1][:port]`。 */
+export function isLoopbackDevOrigin(origin: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  if (url.username || url.password) return false;
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+/**
+ * 任务通道的 Origin 白名单（03 §3「WS upgrade 校验凭据和 Origin 白名单」）：
+ * - 无 `Origin`（非浏览器客户端）放行；
+ * - `Origin` 精确等于部署 `publicOrigin` 放行（跨域部署的唯一合法浏览器源）；
+ * - 回环开发源（localhost/127.0.0.1/[::1]）放行，供本地联调；
+ * - 其余拒绝：不在 upgrade 后建 bridge stream，直接返回 403 错误信封。
+ */
+export function isAllowedTaskChannelOrigin(
+  origin: string | undefined,
+  publicOrigin: string,
+): boolean {
+  if (origin === undefined || origin === "") return true;
+  // 按 URL 规范规范化后精确比较（浏览器 Origin 已是序列化形态；默认端口/主机大小写差异
+  // 不构成不同源）。
+  try {
+    if (new URL(origin).origin === publicOrigin) return true;
+  } catch {
+    return false;
+  }
+  return isLoopbackDevOrigin(origin);
+}
+
+/**
+ * bridge 通道是执行节点出站连接（02 §4）：浏览器永远不该带 `Origin` 升级它。
+ * 无 `Origin` 放行；存在任何浏览器 `Origin` 一律拒绝（03 §3 防跨站 WebSocket）。
+ */
+export function isAllowedBridgeChannelOrigin(origin: string | undefined): boolean {
+  return origin === undefined || origin === "";
+}
+
+/** 在 upgrade 前拦截非法 Origin：返回响应即不进入 `upgradeWebSocket`（不建流）。 */
+function originGuard(c: Context, allowed: boolean): Response | undefined {
+  if (allowed) return undefined;
+  return errorResponse(c, "unauthorized", "origin-not-allowed", { reason: "origin-not-allowed" });
 }
 
 export function registerCloudWsRoutes(
@@ -29,8 +84,24 @@ export function registerCloudWsRoutes(
     return;
   }
   const bind = upgrade as unknown as (createEvents: (c: Context) => unknown) => never;
+  /** 任务通道：Origin 白名单（03 §3）；返回响应表示拒绝且不 upgrade。 */
+  const guardTaskOrigin = async (c: Context, next: () => Promise<void>) => {
+    const rejected = originGuard(
+      c,
+      isAllowedTaskChannelOrigin(c.req.header("origin"), deps.publicOrigin),
+    );
+    if (rejected) return rejected;
+    await next();
+  };
+  /** bridge 通道：执行节点出站，存在浏览器 Origin 即拒绝（03 §3）。 */
+  const guardBridgeOrigin = async (c: Context, next: () => Promise<void>) => {
+    const rejected = originGuard(c, isAllowedBridgeChannelOrigin(c.req.header("origin")));
+    if (rejected) return rejected;
+    await next();
+  };
   app.get(
     "/ws/cloud/bridge/:runId",
+    guardBridgeOrigin,
     bind((c: Context) => {
       const runId = c.req.param("runId") ?? "";
       // hono 的 createEvents 回调与我的 BridgeSocket 抽象之间做一层适配：帧可能在
@@ -85,6 +156,7 @@ export function registerCloudWsRoutes(
   );
   app.get(
     "/ws/cloud/tasks/:taskId",
+    guardTaskOrigin,
     bind((c: Context) => {
       const taskId = c.req.param("taskId") ?? "";
       const expectedRunGeneration = c.req.query("generation");

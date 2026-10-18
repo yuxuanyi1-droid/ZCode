@@ -5,6 +5,7 @@
  */
 import type { CloudProjectRecord, CloudRunRecord, CloudTaskRecord } from "@zcode/shared";
 import type {
+  ProjectionHistoryRecord,
   ProjectRepo,
   RunRepo,
   StoragePort,
@@ -33,11 +34,13 @@ export interface FakeStorageOptions {
 
 export interface FakeStorage extends StoragePort {
   readonly projectsById: Map<string, CloudProjectRecord>;
+  /** 软删除事实（15 §R3）：与真实库 archived_at 同语义，普通读路径据此过滤。 */
+  readonly archivedProjectIds: Set<string>;
   readonly tasksById: Map<string, CloudTaskRecord>;
   readonly runsById: Map<string, CloudRunRecord>;
   readonly inputsByKey: Map<string, CloudTaskInputRecord>;
   readonly checkpoints: CloudCheckpointRecord[];
-  readonly projectionRecords: CloudProjectionRecord[];
+  readonly projectionRecords: ProjectionHistoryRecord[];
   readonly revokedRuns: string[];
   readonly quotaReleases: string[];
   /** 持久正文（投递时只读；不进 receipt 投影、不进日志，02 §6.1）。 */
@@ -64,18 +67,23 @@ export function createFakeStorage(
     payloadText,
   } = state;
   const createOperations: string[] = [];
+  const archivedProjectIds = new Set<string>();
   const inputsRepo = createInputsRepo(state);
-  const projectionsRepo = createProjectionsRepo(state);
+  const projectionsRepo = createProjectionsRepo(state, clock);
   const credentialsRepo = createCredentialsRepo(state);
   const payloadsRepo = createPayloadReadRepo(state);
   const projectsRepo: ProjectRepo = {
-    async get(projectId) {
+    async get(projectId, options) {
+      if (options?.includeArchived !== true && archivedProjectIds.has(projectId)) return null;
       return projectsById.get(projectId) ?? null;
     },
     async findByRepository(principalId, repositoryId) {
       return (
         [...projectsById.values()].find(
-          (item) => item.ownerPrincipalId === principalId && item.repositoryId === repositoryId,
+          (item) =>
+            item.ownerPrincipalId === principalId &&
+            item.repositoryId === repositoryId &&
+            !archivedProjectIds.has(item.projectId),
         ) ?? null
       );
     },
@@ -104,13 +112,22 @@ export function createFakeStorage(
     },
     async list(principalId, page) {
       return paginate(
-        [...projectsById.values()].filter((item) => item.ownerPrincipalId === principalId),
+        [...projectsById.values()].filter(
+          (item) =>
+            item.ownerPrincipalId === principalId && !archivedProjectIds.has(item.projectId),
+        ),
         page,
       );
     },
     async patchMetadata(request) {
       const current = projectsById.get(request.projectId);
-      if (!current || current.revision !== request.expectedRevision) return null;
+      if (
+        !current ||
+        current.revision !== request.expectedRevision ||
+        archivedProjectIds.has(request.projectId)
+      ) {
+        return null;
+      }
       const updated: CloudProjectRecord = {
         ...current,
         displayName: request.displayName ?? current.displayName,
@@ -119,6 +136,13 @@ export function createFakeStorage(
       };
       projectsById.set(updated.projectId, updated);
       return updated;
+    },
+    async archive(projectId, now) {
+      const current = projectsById.get(projectId);
+      if (!current || archivedProjectIds.has(projectId)) return false;
+      archivedProjectIds.add(projectId);
+      projectsById.set(projectId, { ...current, updatedAt: now });
+      return true;
     },
   };
 
@@ -394,6 +418,7 @@ export function createFakeStorage(
 
   const storage: FakeStorage = {
     projectsById,
+    archivedProjectIds,
     tasksById,
     runsById,
     inputsByKey,

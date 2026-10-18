@@ -1,6 +1,6 @@
 # Spec 12 — 账号域云适配（登录、套餐与套餐模型注入沙箱）
 
-状态：目标设计（2026-10-06 决议⑦⑧，见 [00 §11](./00-overview.md)）；云端实现代码已整体回退（[10 §10](./10-implementation-plan.md)），按本 spec 重新实施。本文是账号域的唯一负责文档：OAuth 登录、凭据保管、套餐权益、套餐 provider 模型进入沙箱。
+状态：**已实现（2026-10-17 回写；A-08 真机未复验）**。2026-10-06 决议⑦⑧（见 [00 §11](./00-overview.md)）与当年“云端实现代码已整体回退”（[10 §10](./10-implementation-plan.md)）为历史记录；当前 `feat/cloud-agent` 分支已按本 spec 落地。本文是账号域的唯一负责文档：OAuth 登录、凭据保管、套餐权益、套餐 provider 模型进入沙箱。
 
 ## 1. 范围与决议
 
@@ -103,17 +103,18 @@ sequenceDiagram
 - 套餐 provider 必须按 `zhipu-account` 类型工作：不得转成 `api-key` 型注入（否则请求期换 key 不触发，表现为 `provider_not_ready`）。
 - 沙箱内 builtin catalog（`zcode-builtin.json`）为模型清单来源；部署须确保沙箱内存在同一份 builtin 配置。
 - **运行中凭据刷新传播（A-08）**：host 刷新 token 成功后把新 envelope 重推到运行中的 Run。v1 采用"标记 + 下次 bridge 连接时重装"的简化实现；不得改造 bridge 协议或引入第二队列。重推失败按 run fault 语义记录。只记录代际而不做重装的实现不满足 A-08，必须作为明确 gap 记录，不能声称已满足。
+  - **实施状态（2026-10-17）**：**已实现**。每次新连接都应用控制面重推的 `bootstrap.config`：比较已安装 `credentialGeneration` 与 policy/preferences，落后时在 `ready` 前重装 envelope + policy，**不重新 clone、不重启 runtime、不重新启动 exporter**；`bridge.ready.configVersion` 反映新版本（`packages/server/src/cloud/execution/app/bridgeSession.ts:128-182`、`execution/app/bootstrap.ts:193-230`）。本地已安装代际高于下发值时按 `protocol_incompatible` fail-closed，不用旧凭据覆盖新代际。**真机（token 过期 → 刷新 → 重连）未复验**，当前证据为单元/装配测试。
 - 登出/换账号：新 Run 不携带旧凭据；运行中 Run 不中途撤销凭据，由用户显式停止/重开进入新代际。
 
 ## 7. 验收（计划）
 
-| ID   | 场景                                      | 断言                                                                         |
-| ---- | ----------------------------------------- | ---------------------------------------------------------------------------- |
-| A-01 | 云模式未登录打开模型设置                  | 登录/套餐入口可见可用；catalog 为空态有明确引导                              |
-| A-02 | ZAI 后端轮询登录 + BigModel redirect 登录 | 会话状态正确；token 不出现于任何 HTTP 响应/浏览器存储                        |
-| A-03 | 登录后套餐模型出现在 catalog 与选择器     | 与权益状态一致；未登录/无权益时 fail-closed                                  |
-| A-04 | 创建 Run → 沙箱内请求成功                 | 沙箱凭据经 envelope 安装；请求期换 apiKey 生效（真实模型回复证据）           |
-| A-05 | 登出后创建新 Run                          | envelope 不含凭据；旧 Run 不受影响；重复登出幂等                             |
-| A-06 | 凭据文件损坏/权益接口 5xx                 | fail-closed 且可恢复；不静默降级为静态配置                                   |
-| A-07 | 云服务端重启                              | 登录态恢复；envelope 来源一致（账号 vs 静态互斥判定无漂移）                  |
-| A-08 | 运行中 token 过期 → UI 401 → 刷新         | host 单飞刷新 → 新 envelope 重推运行中 Run → 请求恢复；重推失败有 fault 记录 |
+| ID   | 场景                                      | 断言                                                                                                                                                                                                                    |
+| ---- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A-01 | 云模式未登录打开模型设置                  | 登录/套餐入口可见可用；catalog 为空态有明确引导                                                                                                                                                                         |
+| A-02 | ZAI 后端轮询登录 + BigModel redirect 登录 | 会话状态正确；token 不出现于任何 HTTP 响应/浏览器存储                                                                                                                                                                   |
+| A-03 | 登录后套餐模型出现在 catalog 与选择器     | 与权益状态一致；未登录/无权益时 fail-closed                                                                                                                                                                             |
+| A-04 | 创建 Run → 沙箱内请求成功                 | 沙箱凭据经 envelope 安装；请求期换 apiKey 生效（真实模型回复证据）                                                                                                                                                      |
+| A-05 | 登出后创建新 Run                          | envelope 不含凭据；旧 Run 不受影响；重复登出幂等                                                                                                                                                                        |
+| A-06 | 凭据文件损坏/权益接口 5xx                 | fail-closed 且可恢复；不静默降级为静态配置                                                                                                                                                                              |
+| A-07 | 云服务端重启                              | 登录态恢复；envelope 来源一致（账号 vs 静态互斥判定无漂移）                                                                                                                                                             |
+| A-08 | 运行中 token 过期 → UI 401 → 刷新         | host 单飞刷新 → 新 envelope 重推运行中 Run → 请求恢复；重推失败有 fault 记录。**已实现（2026-10-17）**：每次新连接比较 generation/policy，落后时 ready 前重装 envelope，不重新 clone/runtime；真机 token 刷新重连未复验 |

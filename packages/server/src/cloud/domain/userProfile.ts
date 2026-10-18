@@ -48,6 +48,27 @@ export function userProfileContentKindOf(
   return CONTENT_KIND_BY_CATEGORY[category];
 }
 
+/** agents-md 单例条目的固定 `entryId`（14 §4.5；唯一落点 `~/.zcode/AGENTS.md`）。 */
+const CLOUD_USER_PROFILE_AGENTS_MD_ENTRY_ID = "user-agents";
+
+/**
+ * agents-md 单例约束（2026-10-17 收口，14 §4.3/§4.5；原 §9.4⑥ 悬项）。
+ *
+ * 第二条 agents-md 条目与第一条争夺同一落点 `~/.zcode/AGENTS.md`，同步时会互相覆盖；
+ * 约束必须在写入入口 fail-closed（HTTP 400 `invalid_entry`），不能推迟到同步期——
+ * 否则用户先看到"上传成功"，随后在沙箱里得到不可预测的覆盖结果。
+ * 返回 null = 通过；否则是拒绝 reason（复用既有错误码目录，不新增 wire 错误码）。
+ */
+export function userProfileAgentsMdEntryIdReason(
+  category: CloudUserProfileCategory,
+  entryId: string,
+): string | null {
+  if (category !== "agents-md") return null;
+  return entryId === CLOUD_USER_PROFILE_AGENTS_MD_ENTRY_ID
+    ? null
+    : "agents-md-entry-id-must-be-user-agents";
+}
+
 /**
  * 正文（存储形态）→ 条目负载（14 §9.2③ 的 `payload`；shared schema 是唯一形状来源）。
  *

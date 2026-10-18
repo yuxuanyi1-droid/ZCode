@@ -68,6 +68,11 @@ export interface CloudHttpRouteDeps {
   router: CloudCommandRouter;
   bridge: CloudBridgeChannel;
   principalId: string;
+  /**
+   * 部署声明的公开 origin（`ZCODE_CLOUD_PUBLIC_ORIGIN`，裸 origin）：WS upgrade 的
+   * Origin 白名单基点（03 §3「WS upgrade 校验凭据和 Origin 白名单」）。
+   */
+  publicOrigin: string;
   /** GitHub App 是否已配置：未配置时 `repositories` 返回 `not_configured`（03 §6）。 */
   githubConfigured: boolean;
   /** 仓库目录（W4 catalog）；未注入即视为未配置。 */
@@ -147,7 +152,11 @@ export async function readJson(c: Context): Promise<unknown> {
     const text = await c.req.text();
     if (!text.trim()) return {};
     return JSON.parse(text);
-  } catch {
+  } catch (error) {
+    // 请求体流被 `bodyLimit` 中止时必须让错误冒泡：吞掉会先落到路由的
+    // validation_failed(400)，掩盖真实的 413 `payload_too_large`
+    // （chunked 请求没有 content-length，无法在进入 handler 前预判超限）。
+    if (error instanceof Error && error.name === "BodyLimitError") throw error;
     return null;
   }
 }

@@ -18,7 +18,6 @@ import {
   encodeCanonicalBase64,
   planArchiveChunks,
   planCommandFileWrite,
-  subagentConfigFromMarkdown,
 } from "../../domain/userProfileSync.js";
 
 /**
@@ -142,29 +141,18 @@ export async function syncCommandEntry(
   ]);
 }
 
-/** subagents 逐条：markdown front-matter → 既有 create/update 的 `SubAgentConfig`（14 §4.5）。 */
+/** subagents 逐条：markdown 原始正文整文件覆盖写（14 §4.5，2026-10-17 收口）。 */
 export async function syncSubagentEntry(
   call: SyncCall,
   target: SyncTarget,
   record: UserProfileEntryRecord,
-  existing: ReadonlyMap<string, { agentId: string; filePath: string }>,
 ): Promise<void> {
-  const config = subagentConfigFromMarkdown({ entryId: record.entryId, content: record.content });
-  const current = existing.get(record.entryId);
-  if (!current) {
-    await call(target, "subagents", "createAgent", [
-      { config, provider: CLOUD_SUBAGENT_PROVIDER, scope: "user" },
-    ]);
-    return;
-  }
-  await call(target, "subagents", "updateAgent", [
-    {
-      agentId: current.agentId,
-      config,
-      oldFilePath: current.filePath,
-      provider: CLOUD_SUBAGENT_PROVIDER,
-      scope: "user",
-    },
+  // 不再做 front-matter → `SubAgentConfig` 映射：既有 create/update 路径会把内容交给
+  // `serializeSubagentMarkdown` 规范化（键序/引号/未知键丢失），与条目正文不逐字节一致。
+  // 沙箱原生形态就是用户 agents 目录下的 `*.md`；存在性由编排层的一次 list 判断，
+  // 新增与已存在都走同一整文件覆盖方法（覆盖语义由 14 §4.7② 固定，不分支第二写路径）。
+  await call(target, "subagents", "writeUserAgentMarkdownFile", [
+    { fileName: record.entryId, content: record.content },
   ]);
 }
 

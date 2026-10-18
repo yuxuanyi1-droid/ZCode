@@ -66,6 +66,12 @@ export function createIdlePauseSweep(deps: CloudCoreDeps, pauseRun: PauseRunFn):
         const pendingInputCount = pendingInputs.filter((input) =>
           occupiesWorkspaceByInput(input.deliveryStatus),
         ).length;
+        // 修复依据（08 §7「审批等待不是业务空闲」，2026-10-17）：等待工具权限审批时
+        // pending 输入为 0，但 run 仍有未完成交互；旧实现恒传 0 会把这类 run 暂停，
+        // 之后审批无法投递。事实源是唯一持久投影（单一数据源），按 run 读取。
+        const pendingInteractionCount = await storage.projections.readLatestPendingInteractionCount(
+          run.runId,
+        );
         const checkpoints = await storage.projections.listCheckpoints(run.taskId);
         const decision = decideIdlePause({
           runStatus: run.status,
@@ -81,6 +87,7 @@ export function createIdlePauseSweep(deps: CloudCoreDeps, pauseRun: PauseRunFn):
           // socket），沙箱存活期间恒在线，错接曾使空闲 pause 永不触发。
           hasBrowserWatcher: deps.browserWatch?.hasWatcher(run.runId) ?? false,
           pendingInputCount,
+          pendingInteractionCount,
           // 08 §7 修订（2026-10-09 终验缺陷 B）：在途占用有界窗口——超窗无更新的
           // saving/pending 是僵尸事实，不永久阻塞 pause；风险由 run.dataAtRisk 承载
           // （「上次周期保存已 failed」按事实暂停，不虚报已保存）。

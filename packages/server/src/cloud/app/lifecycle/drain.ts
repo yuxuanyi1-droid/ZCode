@@ -14,6 +14,7 @@
  */
 import type { BridgeDrainFrame, CloudRunRecord } from "@zcode/shared";
 import { checkpointOperationKey } from "../../domain/idempotency.js";
+import { hasCheckpointInFlight } from "../../domain/checkpointPolicy.js";
 import { occupiesWorkspaceByInput } from "../../domain/deliveryStatus.js";
 import {
   isIdleArchiveEligible,
@@ -92,7 +93,19 @@ export function createDrainLoop(deps: CloudCoreDeps, gitGrants: CloudGitGrantSer
       });
       return ok(pausedDraining);
     }
-    // 2) 操作意图先落库（03 §5：外部操作不是数据库事务）。
+    // 2a) 重试必须重新武装失败/未知的停止保存操作（修复依据 2026-10-18 停止无响应实测）。
+    // `enqueue` 幂等返回既有行、不重置 state；而 `sweepCheckpointOperations` 只领
+    // pending/leased/到期 ambiguous，终态 failed 的停止 op 永远不会再被领取，`attempt`
+    // 冻结在失败当次。stop sweep 于是每拍都认为「还有重试预算」→ 永远重新 beginDrain，
+    // run 卡在 draining 直到硬期限。这里把 failed 显式重排队，让 attempt 随租约推进并
+    // 在 3 次预算用尽后按 08 §8.1 收口终止。
+    if (barrierActive) {
+      const existing = await operations.get(operationId);
+      if (existing?.state === "failed") {
+        await operations.requeueFailed({ operationId, now: clock.now() });
+      }
+    }
+    // 2b) 操作意图先落库（03 §5：外部操作不是数据库事务）。
     await operations.enqueue({
       operationId,
       kind: "checkpoint",
@@ -116,18 +129,23 @@ export function createDrainLoop(deps: CloudCoreDeps, gitGrants: CloudGitGrantSer
       if (!updated) return fail("stale", "run-transition-cas-failed");
     }
     // 4) 通知 attachment 进入 quiesce（投递屏障 + 沙箱侧收口提交；无等待面）。
+    // 修复依据（2026-10-18 停止无响应实测）：只有本次真正进入 draining 时才发 drain。
+    // 停止 sweep 的保存重试会对**已 draining** 的 run 再次 beginDrain；重复发 drain 会让
+    // 旧执行节点（drain 后关闭连接）每次重试都把刚重连的 bridge 关掉，保存结果永远回不来。
     cloudCoreLogger.debug(undefined, "cloud run drain requested", {
       taskId: run.taskId,
       runId: run.runId,
       reason: input.reason,
     });
-    await attachments.requestDrain({
-      taskId: run.taskId,
-      runId: run.runId,
-      runGeneration: run.runGeneration,
-      operationId,
-      reason: input.reason,
-    });
+    if (run.status !== "draining") {
+      await attachments.requestDrain({
+        taskId: run.taskId,
+        runId: run.runId,
+        runGeneration: run.runGeneration,
+        operationId,
+        reason: input.reason,
+      });
+    }
     // push/fetch grant 必须在 checkpoint 通路**之前**签发（TTL 60s；01 §7.2、09 §3 矩阵）。
     // 签发点收口到 `issueSaveGrants`（与周期保存 sweep 同一实现，01 §7.2 签发时机修订
     // 2026-10-09）；失败分流在服务内记录（可自愈/不可自愈），不在此补兜底——保存通路会
@@ -196,6 +214,12 @@ export function createDrainLoop(deps: CloudCoreDeps, gitGrants: CloudGitGrantSer
         const pendingInputCount = pendingInputs.filter((input) =>
           occupiesWorkspaceByInput(input.deliveryStatus),
         ).length;
+        // 修复依据（08 §7「审批等待不是业务空闲」，2026-10-17）：等待审批的 run 没有
+        // pending 输入，旧实现恒传 0 会把它 idle drain；与空闲 pause 共用同一读取口径
+        // （按 run 的最新持久投影，单一数据源）。
+        const pendingInteractionCount = await storage.projections.readLatestPendingInteractionCount(
+          run.runId,
+        );
         const checkpoints = await storage.projections.listCheckpoints(run.taskId);
         const idle = isIdleArchiveEligible({
           now,
@@ -203,8 +227,12 @@ export function createDrainLoop(deps: CloudCoreDeps, gitGrants: CloudGitGrantSer
           // 执行状态读取端口未冻结（CR-4）：只用持久业务活动时间与 pending 输入做保守判定。
           execution: run.lastBusinessActivityAt === undefined ? "unknown" : "idle",
           pendingInputCount,
-          pendingInteractionCount: 0,
-          checkpointInFlight: checkpoints.some((checkpoint) => checkpoint.state === "saving"),
+          pendingInteractionCount,
+          // 在途判定收口到 domain/checkpointPolicy（15 §R3、08 §7 修订 2026-10-09）：
+          // 只有窗口内（2 分钟）的 saving/pending 才算占用保存通道。旧实现只认
+          // `state === "saving"`：pending 记录不阻塞 idle drain，且超窗僵尸事实会让 run
+          // 永久无法归档。超窗后按「僵尸事实」继续 idle drain，数据风险由 dataAtRisk 承载。
+          checkpointInFlight: hasCheckpointInFlight({ records: checkpoints, now }),
           idleArchiveThresholdMs: config.idleArchiveThresholdMs,
         });
         if (idle) {

@@ -15,6 +15,7 @@ import {
   canTransitionRun,
   isTerminalRunStatus,
   provisioningCancelKeepsSupplyFact,
+  taskStatusAfterRunEnd,
 } from "../domain/taskRunState.js";
 import { mayReleaseQuota } from "../domain/quota.js";
 import { fenceFrame } from "../domain/fencing.js";
@@ -105,6 +106,47 @@ export function createRunOrchestrator(
     }
   }
 
+  /**
+   * Task 落点收口（08 §3.1 failed 行「已确定失败且无活跃写 run」）。
+   *
+   * 修复依据（15 §R3）：`taskStatusAfterRunEnd` 此前只被 domain 测试引用，生产代码从未
+   * 调用——run 确定失败（create/readiness 失败、ready run 不可恢复）后 Task 永远停在
+   * active，用户看不到失败原因也没有 failed → reopen 的显式入口。
+   *
+   * 并发/幂等边界：
+   * - 以 `activeOfTask` 的持久事实判定「仍有活动 run」；有则保持 Task 不动；
+   * - 只在 Task 仍为 active 时写 failed（completed/archived/draft 不改变）；
+   * - `transitionStatus` 的 revision 是**新值**（当前 + 1），`from=["active"]` 承担状态
+   *   CAS；重复收口（Task 已 failed/已迁移）返回 null，不报错；
+   * - 终态是 provider 事实，收口失败不回滚终态，只记 error 留待下一次幂等重试。
+   */
+  async function settleTaskAfterRunEnd(taskId: string, runStatus: CloudRunStatus): Promise<void> {
+    try {
+      const task = await storage.tasks.get(taskId);
+      if (!task) return;
+      const remainingActiveRun = await storage.runs.activeOfTask(taskId);
+      const target = taskStatusAfterRunEnd({ task, runStatus, remainingActiveRun });
+      if (target !== "failed") return;
+      const latest = await storage.tasks.get(taskId);
+      // taskStatusAfterRunEnd 只对 active 返回 failed；重新读取后再确认一次，
+      // 避免把并发完成的 archived/completed 任务按过期快照改写。
+      if (!latest || latest.status !== "active") return;
+      await storage.tasks.transitionStatus({
+        taskId: latest.taskId,
+        from: ["active"],
+        to: "failed",
+        revision: latest.revision + 1,
+        now: clock.now(),
+      });
+    } catch (error) {
+      cloudCoreLogger.error(undefined, "cloud task settlement after run end failed", {
+        taskId,
+        runStatus,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   return {
     async markReady(input) {
       const run = await currentRun(input.runId);
@@ -119,8 +161,9 @@ export function createRunOrchestrator(
         // 旧 ready 不得复活终态 run 或覆盖 activeRunId（08 §10 故障矩阵）。
         return fail("stale", fence.reason);
       }
-      if (run.stopRequested) {
-        // 08 §8.1：stop 受理后不再发布 ready；迟到 ready 只用于对账/补偿。
+      if (run.stopRequested && run.status !== "draining") {
+        // 08 §8.1：stop 受理后不再把 run 发布/迁回 ready；迟到 ready 只用于对账/补偿。
+        // provisioning 等停止态维持拒绝，避免为已停止的创建重新拉起 Agent。
         return fail("recovery_required", "stop-requested");
       }
       if (
@@ -133,6 +176,12 @@ export function createRunOrchestrator(
         // 02 §5.3：运行配置/凭据/策略快照安装是 ready 的必要条件；未下发不得发布 ready。
         // 补救路径是「标记 + 下次连接重装」，不在此处补发或放宽。
         return fail("recovery_required", "bootstrap-config-not-sent");
+      }
+      if (run.stopRequested) {
+        // 修复依据（2026-10-18 停止无响应实测）：draining 期间 supervisor 仍必须能重连并
+        // 完成保存（配置重装 → ready → checkpoint）。这里的 ready 只确认连接可用，
+        // **不迁移 run 状态**（保持 draining），否则停止意图会被复活。
+        return ok(run);
       }
       if (run.status === "ready") {
         // 幂等发布（2026-10-09 生命周期 v2）：控制面自驱 resume 已把 paused CAS 为 ready，
@@ -211,7 +260,12 @@ export function createRunOrchestrator(
       const run = await currentRun(input.runId);
       if (!run) return fail("not_found", "run-not-found");
       if (run.runGeneration !== input.runGeneration) return fail("stale", "stale-generation");
-      if (isTerminalRunStatus(run.status)) return ok(run);
+      if (isTerminalRunStatus(run.status)) {
+        // 幂等收口：重复 settle 不报错；同时补做可能在上次「run 终态已落库、Task 收口
+        // 未执行」崩溃窗口中丢失的 Task 落点（15 §R3，收口自身幂等）。
+        await settleTaskAfterRunEnd(run.taskId, run.status);
+        return ok(run);
+      }
       if (!canTransitionRun(run.status, input.to)) {
         return fail("stale", "invalid-run-transition", { from: run.status, to: input.to });
       }
@@ -249,6 +303,8 @@ export function createRunOrchestrator(
       }
       // 终态扫尾：残留 deliverable 输入确定性收口（08 §8.1、审计 D4-3）。
       await settleInputsOfEndedRun(run.taskId, run.runId);
+      // Task 落点（08 §3.1 failed 行）：只有确定失败的 run 才把 active Task CAS 为 failed。
+      await settleTaskAfterRunEnd(run.taskId, updated.status);
       return ok(updated);
     },
 
@@ -286,6 +342,9 @@ export function createRunOrchestrator(
       // 终态扫尾：创建失败/停止的 provisioning run 同样收口残留输入（08 §8.1 首命令
       // 取消/拒绝清理、审计 D4-3）。
       await settleInputsOfEndedRun(run.taskId, run.runId);
+      // 目标 stopped（stopRequested）不改变 Task 委托状态；目标 failed 时按 08 §3.1
+      // 把 active Task CAS 为 failed（15 §R3）。
+      await settleTaskAfterRunEnd(run.taskId, updated.status);
       return ok(updated);
     },
   };

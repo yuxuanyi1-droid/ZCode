@@ -12,7 +12,6 @@
 import { resolveCloudCoreConfig, type CloudCoreConfig } from "./config.js";
 import type { CloudCoreDeps } from "./deps.js";
 import type { SandboxDriverCapabilities } from "./ports/sandboxDriverPort.js";
-import type { SandboxRuntimeSettingsPort } from "./ports/sandboxRuntimeSettingsPort.js";
 import { createAttachmentRegistry, type AttachmentRegistry } from "./attachments/registry.js";
 import { createCloudCommandRouter, type CloudCommandRouter } from "./attachments/router.js";
 import { createHeartbeatWatchdog, type HeartbeatWatchdog } from "./attachments/watchdog.js";
@@ -168,6 +167,8 @@ export function assembleCloudControlPlane(
     ...(input.gitGrantStore ? { gitGrantStore: input.gitGrantStore } : {}),
     ...(input.gitGrantBroker ? { gitGrantBroker: input.gitGrantBroker } : {}),
     ...(input.userProfile ? { userProfile: input.userProfile } : {}),
+    // R4（14 §5）：profile 凭据加密器按原样透传；未注入时由 profile 服务用部署密钥构造。
+    ...(input.credentialCipher ? { credentialCipher: input.credentialCipher } : {}),
     ...(input.userPreferences ? { userPreferences: input.userPreferences } : {}),
   };
 
@@ -182,7 +183,7 @@ export function assembleCloudControlPlane(
   const compensation = createRunCompensation(deps, runs);
   const create = createCreateOperationRunner(deps, runs, compensation, gitGrants);
   const bootstrapConfig = createBootstrapConfigSender(deps, registry);
-  const readiness = createReadinessWatchdog(deps, runs, compensation);
+  const readiness = createReadinessWatchdog(deps, runs, compensation, gitGrants);
   const drain = createDrainLoop(deps, gitGrants);
   // 暂停中停止推进（pausedStop.ts 共享实现）：keepalive 的崩溃窗口兜底认领直接复用同一
   // 工厂（stop 受理路径经 pauseResume 内部使用同一实现）——一个实现，多处复用，不写两份。
@@ -190,9 +191,15 @@ export function assembleCloudControlPlane(
   const keepalive = createKeepaliveLoop(deps, runs, compensation, pausedStopAdvance);
   const pauseResume = createPauseResumeControl(deps, runs, compensation, registry, gateway, drain);
   const checkpoints = createCheckpointPipeline(deps, gitGrants);
-  // 归档 on paused run（08 §3.2 修订 2026-10-10）：归档驱动的暂停中停止与 stop 受理路径
-  // 复用 pauseResume 暴露的同一推进实现（pausedStop.ts，一个实现多处复用）。
-  const taskLifecycle = createTaskLifecycleCommands(deps, taskDetail, drain, pauseResume);
+  // 归档停止（08 §3.2/§8.2 修订 2026-10-18）：归档驱动停止复用 pauseResume 的暂停推进
+  // 实现，并直接注入 compensation 在 provider SDK 层 terminate（不等待 checkpoint）。
+  const taskLifecycle = createTaskLifecycleCommands(
+    deps,
+    taskDetail,
+    drain,
+    pauseResume,
+    compensation,
+  );
   // stop 受理路径与 pauseResume 拍共用「暂停中停止推进」同一实现（第 2 批遗留 1 去重）。
   const stop = createStopOperations(deps, runs, compensation, drain, taskDetail, pauseResume);
   const interactions = createInteractionCommands(deps, registry);
@@ -201,7 +208,7 @@ export function assembleCloudControlPlane(
   const watchdog = createHeartbeatWatchdog(deps, registry, runs);
   const ingest = createProjectionIngestService(deps, registry, inputControl, gitGrants);
   const history = createProjectionHistoryService(deps);
-  const reconciler = createStartupReconciler(deps, runs);
+  const reconciler = createStartupReconciler(deps, runs, compensation, gitGrants);
   const credentials = createRunAuthorizationPolicy(deps);
   const userProfile = createUserProfileService(deps);
   const userProfileSync = createProfileSyncService(deps, registry);

@@ -90,6 +90,62 @@ export function selectCloudAttachmentForTask(
   return attachment.taskId === taskId ? attachment : null;
 }
 
+/**
+ * 云 attachment 上禁止直发的 agent 命令类型（spec 15 §R6；UI 侧防御，**非安全边界**）。
+ *
+ * `createSession` / `sendText` 是任务输入，云模式已由 durable HTTP composer 覆盖；
+ * 直发会让控制面无法持久记录。其余命令（editUserQuery/retryTurn/setAssistantFeedback、
+ * 队列操作等）仍走既有 agent 通道，保持云端既有按钮可用。
+ *
+ * 这只是防误用：真正的边界在服务端（rpcRelay 拦截审批决定），不能依赖本函数兜底。
+ */
+export function shouldBlockCloudAgentCommand(type: string | null | undefined): boolean {
+  return type === "createSession" || type === "sendText";
+}
+
+export const CLOUD_DURABLE_INPUT_REQUIRED_REASON = "durable-input-required" as const;
+
+interface CloudAgentCommandEnvelopeLike {
+  readonly type?: string;
+}
+
+interface CloudAgentConversationCommandParamsLike {
+  readonly envelope?: CloudAgentCommandEnvelopeLike;
+}
+
+function durableInputRequiredError(commandType: string): Error {
+  return Object.assign(new Error(`${commandType} requires durable cloud input`), {
+    code: "unauthorized",
+    details: { reason: CLOUD_DURABLE_INPUT_REQUIRED_REASON, commandType },
+  });
+}
+
+/**
+ * 包装 `sendConversationCommandV4`：只拒绝任务输入命令，其余原样转发。
+ *
+ * 放在 accessor 合成层而不是组件里，所有执行域调用（含未来新增调用点）都经过同一判定；
+ * 本地/桌面/SSH 不经过本包装，行为不变。
+ */
+function guardCloudAgentCommands(service: IZCodeAgentService): IZCodeAgentService {
+  return new Proxy(service, {
+    get(target, property, receiver) {
+      if (property !== "sendConversationCommandV4") {
+        return Reflect.get(target, property, receiver);
+      }
+      return (params: CloudAgentConversationCommandParamsLike): Promise<unknown> => {
+        const type = params?.envelope?.type;
+        if (shouldBlockCloudAgentCommand(type)) {
+          return Promise.reject(durableInputRequiredError(type ?? "unknown"));
+        }
+        const send = Reflect.get(target, property, receiver) as (
+          p: CloudAgentConversationCommandParamsLike,
+        ) => Promise<unknown>;
+        return send.call(target, params);
+      };
+    },
+  }) as IZCodeAgentService;
+}
+
 const EXECUTION_ACCESSOR_KEYS: ReadonlySet<string> = new Set(
   CLOUD_EXECUTION_SERVICE_BINDINGS.map((binding) => binding.accessorKey as string),
 );
@@ -282,14 +338,15 @@ function createCloudAttachmentAgentService(
   // UI 不 import SDK，按结构面探测，缺失时退化为原行为。
   const hub = createAttachmentReconnectHub(channelClient as ReconnectAwareAttachmentChannel);
   if (hub === null) {
-    return new Proxy(service, {
+    const patched = new Proxy(service, {
       get(target, property, receiver) {
         if (property === "initializeConversationV4") {
           return async () => {};
         }
         return Reflect.get(target, property, receiver);
       },
-    });
+    }) as IZCodeAgentService;
+    return guardCloudAgentCommands(patched);
   }
   /** 重挂式事件：每次订阅/重连边沿都向**当前连接**重新取底层事件再挂监听。 */
   const resilientEvent = <T>(underlying: () => Event<T>): Event<T> => {
@@ -310,7 +367,7 @@ function createCloudAttachmentAgentService(
       };
     };
   };
-  return new Proxy(service, {
+  const patched = new Proxy(service, {
     get(target, property, receiver) {
       if (property === "initializeConversationV4") {
         return async () => {};
@@ -362,6 +419,7 @@ function createCloudAttachmentAgentService(
       return Reflect.get(target, property, receiver);
     },
   }) as IZCodeAgentService;
+  return guardCloudAgentCommands(patched);
 }
 
 function createAttachmentExecutionServices(attachment: CloudAttachmentAccessor): IServiceAccessor {

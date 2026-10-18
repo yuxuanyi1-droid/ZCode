@@ -44,6 +44,11 @@ export function createTaskDetailService(deps: CloudCoreDeps): TaskDetailService 
         return fail("not_found", "task-not-found");
       }
       const activeRun = await storage.runs.activeOfTask(task.taskId);
+      // run=ready 不代表 attachment ready（resume 窗口：driver.resume 已确认、bridge 尚未
+      // 重连）。该字段是 UI 延迟绑定实时会话的唯一依据；不得据此改写 run 状态。
+      const attachmentReady = activeRun
+        ? await deps.attachments.isReady(activeRun.runId)
+        : undefined;
       const checkpoints = await storage.projections.listCheckpoints(task.taskId);
       const latestCheckpoint = pickLatestCheckpoint(checkpoints);
       // 执行投影优先取当前 run 的（更精确），回退到 Task 级 last-known。
@@ -66,6 +71,7 @@ export function createTaskDetailService(deps: CloudCoreDeps): TaskDetailService 
         task,
         actions,
         ...(activeRun ? { activeRun } : {}),
+        ...(attachmentReady === undefined ? {} : { attachmentReady }),
         ...(execution ? { execution } : {}),
         ...(latestCheckpoint ? { latestCheckpoint } : {}),
         ...(artifact ? { artifact } : {}),

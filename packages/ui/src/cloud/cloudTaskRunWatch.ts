@@ -12,8 +12,15 @@
  * - run 处于 `paused` → 继续（2026-10-09 paused 呈现修订）：paused append 202 后由控制面
  *   自驱 resume（或预算耗尽收口停+重开），轮询把 paused→ready/终态的详情翻转带回来，
  *   pane 才能恢复绑定/翻横幅；60s 上限兜底，不无限空转；
- * - run 进入 `ready` 或终态（failed/stopped/expired/draining/disconnected）→ 停：
- *   ready 由 attachment 生命周期接管，终态由任务面板呈现。
+ * - run 进入 `ready` 但 `attachmentReady === false` → 继续（2026-10-18 resume 窗口修订）：
+ *   控制面已 CAS ready、bridge 尚未回连，pane 必须保持历史/草稿视图；若此时停止轮询，
+ *   恢复后没有任何通道刷新详情，pane 永远不会绑定。轮询直到 attachment 回连（true）或
+ *   60s 上限；
+ * - run 进入 `disconnected` → 继续（2026-10-18 断连可见性修订）：只要 bridge 仍在自动
+ *   重连，服务端 status 还停在 disconnected；停止轮询会让横幅永远挂着、pane 无法在回连后
+ *   重新绑定。有界 60s 兜底，回连后 status 转 ready 自然停止；
+ * - run 进入 `ready`（attachment 已回连或未知）或终态（failed/stopped/expired/draining）
+ *   → 停：ready 由 attachment 生命周期接管，终态由任务面板呈现。
  * - 单次刷新失败不中断轮询（网络抖动等下一轮），上限兜底。
  *
  * 状态所有者不变：轮询只调用 `refresh()`（即控制器的 quiet reload），把最新
@@ -27,6 +34,8 @@ export const CLOUD_TASK_RUN_WATCH_TIMEOUT_MS = 60_000;
 
 /** 测试与调用方共用的最小详情形状（不依赖完整 schema）。 */
 export interface CloudTaskRunWatchDetail {
+  /** 当前 run 的 bridge attachment 是否已回连（瞬态连接事实；undefined=旧服务端/未知）。 */
+  readonly attachmentReady?: boolean | undefined;
   readonly activeRun?: { readonly status: string } | undefined;
   /** 服务端 actions 投影（2026-10-08 终态 run 发送行为修订）：含 `reopen` 即停止。 */
   readonly actions?: readonly string[] | undefined;
@@ -44,6 +53,15 @@ export interface CloudTaskRunWatchDetail {
  * 2026-10-09 paused 呈现修订：`paused` 从「停止条件」改为「继续条件」——paused append
  * （发消息即恢复，03 §6 修订）提交后，自驱 resume / 预算耗尽收口都由服务端异步推进，
  * 客户端只有靠这轮有界轮询把 ready（恢复绑定）/ 终态（reopenable 投影）翻回详情投影。
+ *
+ * 2026-10-18 resume 窗口修订：`ready` 不再无条件停止。`attachmentReady === false` 表示
+ * 控制面已 CAS ready 但 bridge 尚未回连，pane 此刻不能绑定会话；继续轮询直到 attachment
+ * 回连（`true`/缺省）或 60s 上限，否则恢复后没人刷新详情、pane 永远停在未绑定状态。
+ * `undefined` 按旧服务端兼容处理（无该事实，维持 ready 即停）。
+ *
+ * 2026-10-18 断连修订：`disconnected` 也继续轮询。断连是连接瞬态而不是终态；bridge
+ * 回连后服务端把 run 翻回 ready，客户端只有靠这轮有界观察把新详情带回唯一投影。
+ * 面板同时显示「连接已断开，正在自动重连」，轮询到期即停（不用无限轮询掩盖同步缺失）。
  */
 export function shouldContinueCloudTaskRunWatch(detail: CloudTaskRunWatchDetail | null): boolean {
   if (detail?.actions?.includes("reopen")) {
@@ -55,7 +73,11 @@ export function shouldContinueCloudTaskRunWatch(detail: CloudTaskRunWatchDetail 
     // run 还没出现在投影里：首发 202 后的事务窗口，继续等。
     return true;
   }
-  return status === "provisioning" || status === "paused";
+  if (status === "ready" && detail?.attachmentReady === false) {
+    // resume 窗口：run ready 但 bridge 未回连，继续等详情刷新直到 attachment ready。
+    return true;
+  }
+  return status === "provisioning" || status === "paused" || status === "disconnected";
 }
 
 export interface CloudTaskRunWatchHandle {

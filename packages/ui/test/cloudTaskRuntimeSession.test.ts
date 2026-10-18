@@ -30,12 +30,14 @@ function detail(input: {
   runtimeSessionId?: string;
   workspacePath?: string;
   withRun?: boolean;
+  attachmentReady?: boolean;
 }): CloudTaskRuntimeSessionDetail {
   const taskId = input.taskId ?? TASK_ID;
   if (input.withRun === false) {
     return { task: { taskId } };
   }
   return {
+    ...(input.attachmentReady === undefined ? {} : { attachmentReady: input.attachmentReady }),
     task: { taskId },
     activeRun: {
       ...(input.runtimeSessionId ? { runtimeSessionId: input.runtimeSessionId } : {}),
@@ -187,6 +189,48 @@ test("a paused run stays unbound so the pane keeps banner + history + composer",
     }),
   });
   assert.equal(legacy.runtimeSessionId, RUNTIME_SESSION_ID);
+});
+
+// 2026-10-18 resume 窗口修订（实测缺陷）：paused→resume 时控制面已 CAS ready，但执行域
+// bridge 尚未回连。此时绑定 sess_… 订阅只会得到 `cloud task … has no ready run attachment`
+// 的全屏连接错误；pane 应停在历史/草稿视图，等 attachment 回连后的详情刷新再绑定。
+test("a ready run whose attachment has not reconnected stays unbound", () => {
+  const resuming = resolveCloudTaskRuntimeSession({
+    workspaceIdentity: CLOUD_IDENTITY,
+    taskDetail: detail({
+      runtimeSessionId: RUNTIME_SESSION_ID,
+      workspacePath: RUN_WORKSPACE_PATH,
+      attachmentReady: false,
+    }),
+  });
+  assert.deepEqual(resuming, {
+    isCloudTaskWorkspace: true,
+    runtimeSessionId: null,
+    // 路径事实保留：tab 的 checkout 路径同步不受 attachment 未回连影响。
+    runWorkspacePath: RUN_WORKSPACE_PATH,
+  });
+
+  // attachment 回连：同一 detail 流上恢复绑定（轮询刷新详情，不要求重进页面）。
+  const attached = resolveCloudTaskRuntimeSession({
+    workspaceIdentity: CLOUD_IDENTITY,
+    taskDetail: detail({
+      runtimeSessionId: RUNTIME_SESSION_ID,
+      workspacePath: RUN_WORKSPACE_PATH,
+      attachmentReady: true,
+    }),
+  });
+  assert.equal(attached.runtimeSessionId, RUNTIME_SESSION_ID);
+  assert.equal(attached.runWorkspacePath, RUN_WORKSPACE_PATH);
+
+  // undefined（旧服务端/未知）：维持原绑定语义。
+  const unknown = resolveCloudTaskRuntimeSession({
+    workspaceIdentity: CLOUD_IDENTITY,
+    taskDetail: detail({
+      runtimeSessionId: RUNTIME_SESSION_ID,
+      workspacePath: RUN_WORKSPACE_PATH,
+    }),
+  });
+  assert.equal(unknown.runtimeSessionId, RUNTIME_SESSION_ID);
 });
 
 test("never borrows the runtime session of another cloud task", () => {

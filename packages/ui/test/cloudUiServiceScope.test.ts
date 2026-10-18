@@ -19,8 +19,10 @@ import {
   isCloudExecutionServiceKey,
 } from "../src/cloud/cloudServiceScope.js";
 import {
+  CLOUD_DURABLE_INPUT_REQUIRED_REASON,
   createCloudBrowserServices,
   selectCloudAttachmentForTask,
+  shouldBlockCloudAgentCommand,
   type CloudAttachmentAccessor,
 } from "../src/cloud/cloudBrowserServices.js";
 import {
@@ -176,6 +178,63 @@ test("spreading the accessor keeps the execution override", async () => {
   const spread = { ...services } as IServiceAccessor;
   await (spread.gitService as unknown as { getStatus(): Promise<unknown> }).getStatus();
   assert.ok(attachmentCalls.some((call) => call.channel === ServiceChannels.Git));
+});
+
+test("cloud agent guard blocks only task-input commands, keeping edit/retry/feedback", async () => {
+  // 纯判定：只有任务输入（createSession/sendText）被拦；其余命令原样放行。
+  for (const type of ["createSession", "sendText"]) {
+    assert.equal(shouldBlockCloudAgentCommand(type), true, `${type} 必须被拦截`);
+  }
+  for (const type of [
+    "editUserQuery",
+    "retryTurn",
+    "setAssistantFeedback",
+    "setAutoDrain",
+    "deleteQueueItem",
+    "unknownCommand",
+    undefined,
+  ]) {
+    assert.equal(shouldBlockCloudAgentCommand(type), false, `${String(type)} 必须放行`);
+  }
+
+  const attachmentCalls: RecordedCall[] = [];
+  const { services } = createCloudBrowserServices({
+    hostAccessor: createHostAccessor([]),
+    attachment: {
+      taskId: "8f14e45f-ceea-467a-9a1e-1f0d3b2a4c51",
+      channelClient: createRecordingChannelClient(attachmentCalls),
+    },
+  });
+  const agent = services.zcodeAgentService as unknown as {
+    sendConversationCommandV4(params: { envelope: { type: string } }): Promise<unknown>;
+  };
+
+  // 任务输入直发：结构化拒绝，且不会到达 attachment 通道。
+  for (const type of ["createSession", "sendText"]) {
+    const error = await agent
+      .sendConversationCommandV4({ envelope: { type } })
+      .then(() => undefined)
+      .catch((thrown: unknown) => thrown);
+    assert.ok(error instanceof Error);
+    const structured = error as Error & { code?: string; details?: Record<string, unknown> };
+    assert.equal(structured.code, "unauthorized");
+    assert.equal(structured.details?.reason, CLOUD_DURABLE_INPUT_REQUIRED_REASON);
+    assert.equal(structured.details?.commandType, type);
+  }
+  assert.deepEqual(attachmentCalls, [], "被拦截的任务输入不得到达执行域");
+
+  // 编辑/重试/反馈/队列命令保持既有行为（真经 attachment 通道转发）。
+  for (const type of ["editUserQuery", "retryTurn", "setAssistantFeedback", "setAutoDrain"]) {
+    await agent.sendConversationCommandV4({ envelope: { type } });
+  }
+  assert.deepEqual(
+    attachmentCalls.map((call) => call.command),
+    Array.from({ length: 4 }, () => "sendConversationCommandV4"),
+  );
+  assert.ok(
+    attachmentCalls.every((call) => call.channel === ServiceChannels.ZCodeAgent),
+    "放行的命令必须打到 attachment 的 zcode-agent 通道",
+  );
 });
 
 test("an attachment belonging to another task is not reused", () => {

@@ -45,6 +45,10 @@ export const commandPayloadSchemas = {
   // firstInput 缺省 → phase=draft 空会话；携带 → 直接 turnHeader+userInput rows。
   createSession: z.object({
     workspaceId: z.string(),
+    // 控制面/可信发送端携带真实工作区路径：`cloud-task:<taskId>` 等不透明 identity
+    // 不是本地目录，不能按路径执行（02 §2）。additive——旧 CLI 的 z.object 会静默
+    // 丢弃该键，本地/远程旧发送端行为不变（与 offPeakToolEnabled 同一先例）。
+    workspacePath: z.string().startsWith("/").optional(),
     firstInput: z
       .object({
         text: z.string(),

@@ -528,24 +528,12 @@ test("driver 装配：未知 provider / 缺实现 / 版本不兼容都在创建 
   );
 });
 
-test("driver 装配：未解禁 provider 拒绝，显式 allowUnverified 后可用并列出能力", async () => {
-  await assert.rejects(
-    () =>
-      createCloudDriverRegistry({
-        providers: ["e2b"],
-        bindings: [binding()],
-        readSecret: () => undefined,
-        logger: silentLogger,
-      }),
-    (error: unknown) =>
-      error instanceof CloudEntryStartupError && error.code === "validation_failed",
-  );
-
+test("driver 装配：已解禁 provider 无需豁免直接可用并列出能力", async () => {
+  // e2b 于 2026-10-13 按真机证据解禁（specs/cloud-agent/10 §10）：不再要求 allowUnverified。
   const registry = await createCloudDriverRegistry({
     providers: ["e2b"],
     bindings: [binding()],
     readSecret: () => undefined,
-    allowUnverified: ["e2b"],
     logger: silentLogger,
   });
   assert.equal(await registry.resolve("modal"), null, "未启用 provider 不得回落到其它 provider");

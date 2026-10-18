@@ -22,12 +22,15 @@ import {
   type CloudUserProfileSnapshot,
   type CloudUserProfileVersionResponse,
 } from "@zcode/shared";
+import { createCredentialCipherProvider } from "@zcode/services/node";
 import {
   isUserProfileArchiveCategory,
   isUserProfileMarkdownCategory,
+  userProfileAgentsMdEntryIdReason,
   userProfileArchiveGzipPrefixOk,
   userProfileContentKindOf,
   userProfileEntryPayloadFromContent,
+  userProfileMcpConfigByteLength,
   userProfileUploadOversizeReason,
 } from "../../domain/userProfile.js";
 import type { CloudCoreDeps } from "../deps.js";
@@ -78,7 +81,11 @@ function reject(
 }
 
 export function createUserProfileService(deps: CloudCoreDeps): UserProfileService {
-  const { clock, userProfile } = deps;
+  const { clock, userProfile, hash } = deps;
+  // R4（14 §5）：mcp-config 承载 token/headers/env，写入前整体加密、回显前解密。
+  // 密钥来源与 host 凭据一致（`ZCODE_CREDENTIAL_SECRET`，缺省机器派生 secret），
+  // 见 `createCredentialCipherProvider`；测试可经 deps 注入固定密钥实例。
+  const cipher = deps.credentialCipher ?? createCredentialCipherProvider();
 
   function storeMissing(): CloudAppFailure {
     // 未接线 profile store（测试/嵌入装配）：503，不伪装空 profile（03 §6 分阶段语义）。
@@ -107,6 +114,12 @@ export function createUserProfileService(deps: CloudCoreDeps): UserProfileServic
         return reject("invalid_entry", "invalid-entry-path", input.category, input.entryId);
       }
       const { category, entryId } = params.data;
+
+      // 单例约束（2026-10-17 收口，14 §4.3/§4.5）：agents-md 只有 `user-agents` 一个落点；
+      // 第二条会与第一条争抢 `~/.zcode/AGENTS.md`，必须在入口拒绝而不是推迟到同步期。
+      // 先于超限前置：非法 entryId 一律 400（不因正文大小改变结论）。
+      const entryIdReason = userProfileAgentsMdEntryIdReason(category, entryId);
+      if (entryIdReason) return reject("invalid_entry", entryIdReason, category, entryId);
 
       // 单条超限前置：明显超限直接 413（不截断、不落盘），形状错误才归 400。
       const oversize = userProfileUploadOversizeReason(category, input.body);
@@ -138,13 +151,25 @@ export function createUserProfileService(deps: CloudCoreDeps): UserProfileServic
         content = JSON.stringify((body.data as { config: unknown }).config);
       }
 
+      // R4（14 §5）：mcp 正文（token/headers/env）加密落库；sha256/bytes 必须按**明文**派生，
+      // 否则随机 IV 让同一明文每次密文不同、sha 漂移：幂等整条替换失效且版本无限递增。
+      const contentFacts =
+        category === "mcp"
+          ? {
+              sha256: await hash.sha256Hex(content),
+              bytes: userProfileMcpConfigByteLength(content),
+            }
+          : undefined;
+      const storedContent = category === "mcp" ? cipher.encrypt(content) : content;
+
       const result = await userProfile.upsertEntry({
         category,
         entryId,
         ...(body.data.displayName === undefined ? {} : { displayName: body.data.displayName }),
         enabled: body.data.enabled,
         contentKind: userProfileContentKindOf(category),
-        content,
+        content: storedContent,
+        ...(contentFacts ? { contentFacts } : {}),
         now: clock.now(),
       });
       if (result.status === "rejected") {
@@ -188,10 +213,20 @@ export function createUserProfileService(deps: CloudCoreDeps): UserProfileServic
         // 键不在当前版本：404 not_found（不泄漏"曾经存在过"这种版本历史细节）。
         return reject("not_found", "profile-entry-not-found", category, entryId);
       }
+      let content = record.content;
+      if (record.category === "mcp") {
+        try {
+          // R4（14 §5）：mcp 落库为 `enc:v1:` 密文；无前缀旧明文由 decrypt 原样返回（兼容读）。
+          content = cipher.decrypt(record.content);
+        } catch {
+          // 密文损坏/密钥不匹配：fail-closed，不回半份正文、不把密文当正文下发（日志不含正文）。
+          return reject("invalid_entry", "profile-entry-unreadable", category, entryId);
+        }
+      }
       const payload = userProfileEntryPayloadFromContent(
         record.contentKind,
         record.category,
-        record.content,
+        content,
       );
       if (!payload) {
         // 持久正文与类别不符/不可解析（写事务保证不该发生）：fail-closed，不回半份。

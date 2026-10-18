@@ -231,6 +231,11 @@ export interface V4CommandCoreHost {
    */
   createSessionRecord?(params: {
     workspaceId: string;
+    /**
+     * 可信发送端（控制面）携带的真实工作区绝对路径；`cloud-task:<taskId>` 等不透明
+     * identity 不是本地目录，必须靠它建立 workspace ref（02 §2）。旧发送端缺省。
+     */
+    workspacePath?: string;
     mcpServers?: CommandPayloadMap["createSession"]["mcpServers"];
     /** host 判定的 Off-Peak 工具面门禁；缺省不注册工具。 */
     offPeakToolEnabled?: boolean;

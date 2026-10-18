@@ -91,6 +91,11 @@ export {
   createSettingServiceWithMigrations,
 } from "./setting/settingService.js";
 export { createCredentialService } from "./credential/credentialService.js";
+// 凭据信封加密（AES-256-GCM，`enc:v1:`）：云控制面 mcp-config 落库加密复用同一实现与部署密钥
+// （specs/cloud-agent 14 §5）。只能从 Node 入口导出：实现依赖 `node:crypto`/`node:os`，
+// 根入口必须保持 browser-safe。
+export { createCredentialCipherProvider } from "./credential/providers/credentialCipherProvider.js";
+export type { CredentialCipherProvider } from "./credential/providers/credentialCipherProvider.js";
 export { createBroadcastService } from "./broadcast/broadcastService.js";
 export { createZCodeAgentService } from "./zcode-agent/zcodeAgentService.js";
 export { createZCodeTaskServiceAdapter } from "./zcode-agent/zcodeTaskServiceAdapter.js";

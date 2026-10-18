@@ -121,7 +121,10 @@ export function createProjectionFake(): ProjectionFake {
 }
 
 export interface BootstrapFake extends BootstrapPort {
+  /** `run` 收到的 config（首次自举；正常最多一次）。 */
   readonly configs: BootstrapConfigFrame[];
+  /** `refresh` 收到的 config（重连重推；按连接追加）。 */
+  readonly refreshes: BootstrapConfigFrame[];
   readonly phases: string[];
   readonly pid: number;
   stopped: boolean;
@@ -133,9 +136,11 @@ export function createBootstrapFake(
   },
 ): BootstrapFake {
   const configs: BootstrapConfigFrame[] = [];
+  const refreshes: BootstrapConfigFrame[] = [];
   const phases: string[] = [];
   const fake: BootstrapFake = {
     configs,
+    refreshes,
     phases,
     pid: runtime.facts().pid ?? 4321,
     stopped: false,
@@ -147,6 +152,10 @@ export function createBootstrapFake(
         runtimeIncarnation: runtime.facts().incarnation ?? "runtime-unknown",
         executionCapabilities: ["stdio-rpc"],
       };
+    },
+    async refresh(config) {
+      refreshes.push(config);
+      return { configVersion: config.preferences?.configVersion ?? config.policyVersion };
     },
     onPhase(listener) {
       listener({ phase: "registering" });

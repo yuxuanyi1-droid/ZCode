@@ -54,6 +54,7 @@ interface SessionFixture {
   clock: TestClock;
   projection: ProjectionFake;
   runtime: RuntimeFake;
+  bootstrap: ReturnType<typeof createBootstrapFake>;
   released: string[];
   checkpoints: ReturnType<typeof createCheckpointRecorder>;
   store: ReturnType<typeof createCredentialStore>;
@@ -71,6 +72,7 @@ function buildSession(options: {
   const runtime = options.runtime ?? createRuntimeFake();
   const checkpoints = createCheckpointRecorder();
   const released: string[] = [];
+  const bootstrap = createBootstrapFake(runtime);
   const session = createBridgeSession({
     address: {
       taskId: TASK_ID,
@@ -86,7 +88,7 @@ function buildSession(options: {
     credentials: options.store.port,
     projection,
     rpcRelay: { handle: () => undefined, releaseAll: (reason) => released.push(reason) },
-    bootstrap: createBootstrapFake(runtime),
+    bootstrap,
     checkpoint: checkpoints,
     drain: { onDrain: async () => undefined },
     clock,
@@ -96,7 +98,16 @@ function buildSession(options: {
     jitter: () => 0,
     timings: { heartbeatIntervalMs: 1, welcomeTimeoutMs: 2, bootstrapConfigTimeoutMs: 3 },
   });
-  return { session, clock, projection, runtime, released, checkpoints, store: options.store };
+  return {
+    session,
+    clock,
+    projection,
+    runtime,
+    bootstrap,
+    released,
+    checkpoints,
+    store: options.store,
+  };
 }
 
 function seed(store: ReturnType<typeof createCredentialStore>, nextResumeToken: string): void {
@@ -383,6 +394,58 @@ test("本地事实源写不进去：终态上报而不是无限重连（E2B EACC
   assert.equal(control.hellos.length, 0, "候选未落盘前不得发 hello（02 §5.1 第 2 条）");
 });
 
+// ── A-08：重连重推凭据代际 / policy（12 §6；2026-10-17 review R5）──
+test("A-08：重连收到更高代际与新 policy 时 refresh 并更新 ready.configVersion，不重复自举", async () => {
+  const control = new FakeControlPlane({
+    taskId: TASK_ID,
+    runId: RUN_ID,
+    runGeneration: 1,
+    initialToken: TOKEN,
+  });
+  const store = createCredentialStore();
+  seed(store, "resume-B");
+  const fixture = buildSession({ transport: control.transport(), store });
+  const readyFrames = () =>
+    control.frames.filter(
+      (frame): frame is { type: string; configVersion: string } =>
+        (frame as { type?: string }).type === "bridge.ready",
+    );
+  fixture.session.start();
+  try {
+    await waitFor(() => readyFrames().length === 1, "first ready");
+    assert.equal(readyFrames()[0]!.configVersion, "policy-1");
+    assert.equal(fixture.bootstrap.configs.length, 1, "首次连接执行一次自举");
+
+    // 控制面在 token 刷新后重推更高代际 + 新 policy；旧 socket 断线重连。
+    control.credentialGeneration = 2;
+    control.policyVersion = "policy-2";
+    control.sockets[0]!.close("network-reset");
+    await waitFor(
+      () => readyFrames().length === 2 && fixture.bootstrap.refreshes.length === 1,
+      "second ready after refresh",
+    );
+    assert.equal(
+      fixture.bootstrap.configs.length,
+      1,
+      "重连不得重复执行首次自举（clone/runtime/exporter）",
+    );
+    assert.equal(fixture.bootstrap.refreshes[0]!.credentialGeneration, 2);
+    assert.equal(fixture.bootstrap.refreshes[0]!.policyVersion, "policy-2");
+    assert.equal(readyFrames()[1]!.configVersion, "policy-2", "ready 必须反映新已应用版本");
+
+    // 同代际同 policy 再重连：仍经 refresh（无变化即 no-op），ready 版本不变。
+    control.sockets[1]!.close("network-reset-2");
+    await waitFor(
+      () => readyFrames().length === 3 && fixture.bootstrap.refreshes.length === 2,
+      "third ready",
+    );
+    assert.equal(fixture.bootstrap.configs.length, 1);
+    assert.equal(readyFrames()[2]!.configVersion, "policy-2");
+  } finally {
+    await fixture.session.stop("test");
+  }
+});
+
 test("B-02：断网超过 2 分钟 runtime PID 不变、WAL 保留、无终态上报、只释放网络 facade", async () => {
   const control = new FakeControlPlane({
     taskId: TASK_ID,
@@ -438,4 +501,34 @@ test("B-02：断网超过 2 分钟 runtime PID 不变、WAL 保留、无终态�
   assert.equal(fixture.projection.store.present().length, 0, "WAL 内容不被断网清空或丢写");
   // 断网不是终态：Run 是否 expired 由控制面裁决（03 §2）。
   assert.notEqual(outageState, "failed-closed");
+});
+
+test("bridge.drain 不关闭连接：保存结果仍需在同一连接回传（2026-10-18 停止死锁回归）", async () => {
+  const { handleControlFrame } = await import("../src/cloud/execution/app/bridgeInbound.js");
+  const { createBridgeRuntimeState } = await import("../src/cloud/execution/app/bridgeState.js");
+  const state = createBridgeRuntimeState();
+  const drained: string[] = [];
+  const closes: string[] = [];
+  const connection = { send: () => undefined, close: (reason: string) => closes.push(reason) };
+  await handleControlFrame(
+    state,
+    {
+      logger: testLogger(),
+      drain: {
+        onDrain: async ({ operationId }: { operationId: string }) => {
+          drained.push(operationId);
+        },
+      },
+    } as never,
+    {
+      protocolVersion: 1,
+      type: "bridge.drain",
+      operationId: "stop-op-1",
+      reason: "user-stop",
+      connectionEpoch: 1,
+    } as never,
+    connection as never,
+  );
+  assert.deepEqual(drained, ["stop-op-1"]);
+  assert.deepEqual(closes, [], "drain 后关闭连接会丢掉紧随其后的 checkpoint.result");
 });

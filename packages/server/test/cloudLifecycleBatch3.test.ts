@@ -17,6 +17,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { CloudProjectionRecord } from "@zcode/shared";
 import { decideIdlePause } from "../src/cloud/app/lifecycle/idlePolicy.js";
 import { CLOUD_CORE_DEFAULTS, resolveCloudCoreConfig } from "../src/cloud/app/config.js";
 import { canTransitionRun } from "../src/cloud/domain/taskRunState.js";
@@ -37,6 +38,7 @@ function idleFacts(overrides: Partial<Parameters<typeof decideIdlePause>[0]> = {
     lastBusinessActivityAt: now - DEFAULT_IDLE_MS,
     hasBrowserWatcher: false,
     pendingInputCount: 0,
+    pendingInteractionCount: 0,
     checkpointInFlight: false,
     now,
     thresholdMs: DEFAULT_IDLE_MS,
@@ -119,6 +121,18 @@ test("idlePolicy：工作面保护——pending input、checkpoint 在途、无�
   assert.deepEqual(decideIdlePause(idleFacts({ lastBusinessActivityAt: undefined })), {
     action: "skip",
     reason: "no-activity-fact",
+  });
+});
+
+test("idlePolicy：等待审批（pendingInteractionCount>0）不是业务空闲（08 §7）", () => {
+  assert.deepEqual(decideIdlePause(idleFacts({ pendingInteractionCount: 1 })), {
+    action: "skip",
+    reason: "pending-interaction",
+  });
+  // 空数组 = 交互已清空：不阻塞，按阈值正常 pause。
+  assert.deepEqual(decideIdlePause(idleFacts({ pendingInteractionCount: 0 })), {
+    action: "pause",
+    reason: "idle-threshold-met",
   });
 });
 
@@ -234,6 +248,45 @@ async function idleReadyRun(
   return { taskId: task.value.taskId, runId: run.runId, runGeneration: run.runGeneration };
 }
 
+/** 真实导出形态的 conversation delta（payload.payload.deltas），声明 pendingInteractions。 */
+function pendingInteractionProjection(
+  session: { taskId: string; runId: string; runGeneration: number },
+  sourceSeq: number,
+  count: number,
+): CloudProjectionRecord {
+  return {
+    schemaVersion: 1,
+    taskId: session.taskId,
+    runId: session.runId,
+    runGeneration: session.runGeneration,
+    runtimeIncarnation: "incarnation-idle",
+    topic: "conversation/sess-idle",
+    logEpoch: "epoch-idle",
+    sourceSeq,
+    kind: "delta",
+    payload: {
+      topic: "conversation/sess-idle",
+      fromSeq: sourceSeq,
+      toSeq: sourceSeq,
+      sentAt: 0,
+      payload: {
+        kind: "deltas",
+        deltas: [
+          {
+            op: "state.updated",
+            patch: {
+              pendingInteractions: Array.from({ length: count }, (_unused, index) => ({
+                interactionId: `pi-${index}`,
+              })),
+            },
+          },
+        ],
+      },
+    },
+    contentHash: String(sourceSeq).repeat(64),
+  };
+}
+
 test("空闲触发 pauseRun（D3）：无活动 ≥ 阈值 + 无浏览器观看 + memory 能力 → ready→paused", async () => {
   const context = buildTestPlane({ config: { idlePauseMs: 60_000 } });
   context.driver.pauseResume = "memory";
@@ -253,6 +306,33 @@ test("空闲触发 pauseRun（D3）：无活动 ≥ 阈值 + 无浏览器观看 
     null,
     "B-4：CAS 前 detach registry",
   );
+});
+
+test("空闲 pause：最新投影待审批（pendingInteractions=1）→ skip；清空后按阈值 pause（08 §7）", async () => {
+  const context = buildTestPlane({ config: { idlePauseMs: 60_000 } });
+  context.driver.pauseResume = "memory";
+  const session = await idleReadyRun(context, { index: 11, idleForMs: 60_000 });
+  await context.storage.projections.appendBatch([pendingInteractionProjection(session, 0, 1)]);
+
+  // 复现路径：等待工具权限审批，pending 输入为 0、业务活动已停止；旧实现会 idle pause，
+  // 审批之后无法投递。最新持久投影声明 1 条交互 → 不算空闲。
+  const waiting = await context.plane.lifecycle.pauseResume.idleSweep();
+  assert.equal(waiting.paused, 0);
+  assert.equal(waiting.skipped, 1);
+  assert.equal(context.driver.pauseCalls, 0);
+  assert.equal((await context.storage.runs.get(session.runId))?.status, "ready");
+
+  // 审批完成后的 state.updated 携带空数组（键级整体替换）：最新事实=0 条，恢复正常 pause。
+  await context.storage.projections.appendBatch([pendingInteractionProjection(session, 1, 0)]);
+  const cleared = await context.plane.lifecycle.pauseResume.idleSweep();
+  assert.equal(cleared.paused, 1);
+  assert.equal((await context.storage.runs.get(session.runId))?.status, "paused");
+
+  // 无任何投影事件：count=0，不阻塞（与旧行为一致）。
+  const noEventsContext = buildTestPlane({ config: { idlePauseMs: 60_000 } });
+  noEventsContext.driver.pauseResume = "memory";
+  await idleReadyRun(noEventsContext, { index: 12, idleForMs: 60_000 });
+  assert.equal((await noEventsContext.plane.lifecycle.pauseResume.idleSweep()).paused, 1);
 });
 
 test("浏览器观看中顺延：bridge 在线 + 观看连接打开 → 同一拍 skip；关闭后恢复 pause", async () => {
@@ -336,6 +416,28 @@ test("lifecycleTick 集成：空闲拍先于 drain，报告计数 idlePausedRuns
   const runs = await context.storage.runs.listNonTerminal();
   assert.equal(runs.length, 1);
   assert.equal(runs[0]?.status, "paused", "单轨：pause 落地，同拍未被 idle drain");
+  await loops.stop();
+});
+
+test("R2 deliveryTick：先对账再投递（15 §3、02 §6.3）", async () => {
+  const context = buildTestPlane();
+  const order: string[] = [];
+  const originalReconcile = context.plane.inputControl.reconcileOnce.bind(
+    context.plane.inputControl,
+  );
+  context.plane.inputControl.reconcileOnce = async () => {
+    order.push("reconcile");
+    return originalReconcile();
+  };
+  const originalDispatch = context.plane.delivery.dispatchOnce.bind(context.plane.delivery);
+  context.plane.delivery.dispatchOnce = async () => {
+    order.push("dispatch");
+    return originalDispatch();
+  };
+  const harness = manualScheduler();
+  const loops = startCloudLifecycleLoops(context.plane, { scheduler: harness.scheduler });
+  await loops.runOnce();
+  assert.deepEqual(order, ["reconcile", "dispatch"], "delivering/uncertain 必须先对账再决定重投");
   await loops.stop();
 });
 

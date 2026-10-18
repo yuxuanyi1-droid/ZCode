@@ -14,8 +14,9 @@
  *   意图闭环停旧 run + checkpoint 重开（08 §7 修订 2026-10-09 第二批，串联失败降级）；
  *   能力 none 跳过（fail-closed）；暂停中停止推进（屏障复用 → draining → stopped）；
  * - keepalive liveness：paused→保持不收口；notFound→expired+释放槽；startup paused→保持；
- * - 行为表（08 §3.2 修订 2026-10-10）：complete=拒绝、archive=自动推进停止后归档
- *   （dataAtRisk 如实落库；terminate 未确认 → 409 重试）、reopen=recovery_required；
+ * - 行为表（08 §3.2 修订 2026-10-10 / 2026-10-18）：complete=拒绝、archive=自动推进停止后归档
+ *   （dataAtRisk 如实落库；terminate 未确认仍归档、run 留 draining 由 sweep 收口）、
+ *   reopen=recovery_required；
  *   markReady 幂等 ready；
  * - pause 助手（B-4 顺序冻结）：provider 未确认不写 paused；确认后 detach→CAS；
  * - 凭据续展（B-6）：extendForRun 只外推不内缩、已撤销不复活。
@@ -169,8 +170,8 @@ test("0007 表重建：fresh 与增量（0006 前缀）同构，paused CHECK 与
     try {
       runCloudMigrations(fresh, { now: 1 });
       const facts = readCloudMigrationFacts(fresh);
-      // 链头随 0008_user_profile（M8）推进；本用例只关心 0007 的 paused 语义。
-      assert.equal(facts.schemaVersion, 8);
+      // 链头随 0009_project_archive（15 §R3）推进；本用例只关心 0007 的 paused 语义。
+      assert.equal(facts.schemaVersion, 9);
       assert.deepEqual(facts.pendingMigrationIds, []);
       const runsDdl = String(
         fresh.db.prepare("SELECT sql FROM sqlite_master WHERE name = 'runs'").get()?.["sql"],
@@ -407,6 +408,7 @@ async function pausedRun(
   });
   assert.ok(ready.ok);
 
+  let pausedViaControl = false;
   if (options.viaHelper === false) {
     // 直接 CAS（绕过助手，用于能力门禁关闭场景：none provider 不该走 pause 助手）。
     const paused = await context.storage.runs.transitionStatus({
@@ -419,6 +421,7 @@ async function pausedRun(
     });
     assert.ok(paused);
   } else {
+    pausedViaControl = true;
     assert.equal(
       context.driver.pauseResume,
       "none",
@@ -434,6 +437,12 @@ async function pausedRun(
   }
   const after = await context.storage.runs.get(runId);
   assert.equal(after?.status, "paused");
+  if (pausedViaControl) {
+    assert.ok(
+      context.attachmentPort.closedConnections.includes(run.runId),
+      "暂停后必须主动关闭 bridge socket（否则恢复时要等暂停前累计的退避档）",
+    );
+  }
   return { taskId: task.value.taskId, runId: run.runId, runGeneration: run.runGeneration };
 }
 
@@ -786,7 +795,35 @@ test("行为表（08 §3.2 修订 2026-10-10）：paused 的 complete=拒绝；a
   assert.equal(detail.ok === true && detail.value.actions.includes("archive"), false);
 });
 
-test("行为表（08 §3.2 修订 2026-10-10）：paused 归档时 terminate 未确认 → 409 让 UI 重试，run 留 draining", async () => {
+test("R3：paused complete 被拒后不残留 completeRequested，stop 后不会被后台自动 completed", async () => {
+  const context = buildTestPlane();
+  const session = await pausedRun(context, { index: 2 });
+  const rejected = await context.plane.commands.taskLifecycle.completeTask({
+    principalId: PRINCIPAL,
+    taskId: session.taskId,
+  });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.ok === false && rejected.code, "not_ready");
+  assert.equal(rejected.ok === false && rejected.reason, "run-paused-resume-or-stop-required");
+  // 15 §R3：拒绝发生在持久验收意图之前——被拒绝不得残留 completeRequested。
+  const afterReject = await context.storage.tasks.get(session.taskId);
+  assert.notEqual(afterReject?.completeRequested, true, "被拒绝不得残留验收意图");
+  assert.deepEqual(await context.storage.tasks.listCompleteRequested(), []);
+
+  // 随后停止（paused 停止推进）：run 终态后后台 sweep 不得把任务自动 completed。
+  const stopped = await context.plane.commands.stop.stopTask({
+    principalId: PRINCIPAL,
+    taskId: session.taskId,
+  });
+  assert.ok(stopped.ok);
+  assert.equal((await context.storage.runs.get(session.runId))?.status, "stopped");
+  const swept = await context.plane.commands.taskLifecycle.settleCompleteRequests();
+  assert.equal(swept, 0, "没有验收意图：后台不得自动收口");
+  const task = await context.storage.tasks.get(session.taskId);
+  assert.equal(task?.status, "active", "任务保持 active，而不是 completed");
+});
+
+test("行为表（08 §3.2 修订 2026-10-18）：paused 归档时 terminate 未确认仍归档，run 留 draining 由 sweep 收口", async () => {
   const context = buildTestPlane();
   const session = await pausedRun(context);
   // provider 明确拒绝终止（如 403/402）：advancePausedStop 拿不到 terminated 确认。
@@ -795,14 +832,20 @@ test("行为表（08 §3.2 修订 2026-10-10）：paused 归档时 terminate 未
     principalId: PRINCIPAL,
     taskId: session.taskId,
   });
-  assert.equal(archived.ok, false, "terminate 未确认：归档不完成");
-  assert.equal(archived.ok === false && archived.code, "not_ready");
-  assert.equal(archived.ok === false && archived.reason, "task-has-active-run");
+  // 2026-10-18 用户决议：终止结果未知不阻塞归档——停止屏障与 terminate operation 已持久化，
+  // run 留 draining 由既有 stop/compensation sweep 继续重试清理。
+  assert.ok(
+    archived.ok,
+    `terminate 未确认仍应完成归档：${archived.ok === false ? `${archived.code}/${archived.reason}` : ""}`,
+  );
+  assert.equal(archived.ok === true && archived.value.task.status, "archived");
   const run = await context.storage.runs.get(session.runId);
   assert.equal(run?.status, "draining", "run 留 draining 占槽，由 stop/compensation sweep 收口");
   assert.equal(run?.stopRequested, true, "屏障已写（重试时复用同一 stopOperationId）");
+  assert.ok(run?.stopOperationId, "停止屏障指针持久化");
   const task = await context.storage.tasks.get(session.taskId);
-  assert.equal(task?.status, "active", "task 未被归档（UI 重试路径）");
+  assert.equal(task?.status, "archived", "task 已归档（不再 409 task-has-active-run）");
+  assert.equal(task?.archivedFromStatus, "active");
 });
 
 test("markReady 幂等 ready（resume 后 bridge.ready 重发不回 fault）：直接 ok 且 registry ready", async () => {

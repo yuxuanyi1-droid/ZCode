@@ -10,6 +10,23 @@ import type {
   CloudTaskArtifactRecord,
 } from "@zcode/shared";
 
+/**
+ * 历史回放记录：投影记录 + 控制面持久 ingest 时间（`projection_events.ingested_at`）。
+ * 时间戳必须来自持久列，不能每次读取时用 `clock.now()` 重新生成（否则同一行两次
+ * 读取得到不同 ts，客户端无法稳定比较）。
+ */
+export type ProjectionHistoryRecord = CloudProjectionRecord & { readonly ingestedAt: number };
+
+/** 已持久快照：createdAt 取 `projection_snapshots.created_at`，同样是持久时间。 */
+export type StoredProjectionSnapshot = {
+  /** 快照实际所属话题（`conversation/<sessionId>`）；族名查询也必须回实际话题。 */
+  topic: string;
+  logEpoch: string;
+  coveredSourceSeq: number;
+  snapshot: unknown;
+  createdAt: number;
+};
+
 export interface ProjectionAppendResult {
   /** 已连续持久水位（用于 projection.ack）。 */
   cursors: CloudStreamCursor[];
@@ -31,12 +48,12 @@ export interface ProjectionRepo {
     topic?: string;
     cursor?: string;
     limit: number;
-  }): Promise<{ items: CloudProjectionRecord[]; nextCursor?: string; resyncRequired?: boolean }>;
+  }): Promise<{ items: ProjectionHistoryRecord[]; nextCursor?: string; resyncRequired?: boolean }>;
   readSnapshot(request: {
     taskId: string;
     topic: string;
     logEpoch?: string;
-  }): Promise<{ logEpoch: string; coveredSourceSeq: number; snapshot: unknown } | null>;
+  }): Promise<StoredProjectionSnapshot | null>;
   /** 快照必须声明所覆盖的 sourceSeq 范围（03 §4 projection_snapshots 约束）。 */
   writeSnapshot(request: {
     taskId: string;
@@ -52,6 +69,12 @@ export interface ProjectionRepo {
   listCheckpoints(taskId: string): Promise<CloudCheckpointRecord[]>;
   /** 写 checkpoint 事实（W2 口径确认）：**不接受 `now`**，审计时间用 worker 真实时钟。 */
   recordCheckpoint(checkpoint: CloudCheckpointRecord): Promise<void>;
+  /**
+   * 该 run 最近一次持久投影里 `pendingInteractions` 的数量（08 §7「审批等待不是业务
+   * 空闲」）。只读：按 run_id 取最新包含该事实的 projection_events；没有事实、解析失败
+   * 或事件损坏都返回 0（不猜、不抛），不跨 run。
+   */
+  readLatestPendingInteractionCount(runId: string): Promise<number>;
 }
 
 // ── 只读投影（W1 CR-4：task detail 的 execution/artifact 面）──

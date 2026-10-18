@@ -232,8 +232,18 @@ export function useCloudWorkspaceController(
     setRunWatchEpoch((epoch) => epoch + 1);
   }, []);
 
+  // resume/断连窗口（2026-10-18 修订）：刷新页面落在「run=ready 但 bridge 未回连」或
+  // 已运行中的 run 变为 `disconnected` 时，没有 send/reopen 路径触发
+  // `beginTaskRunWatch()`，首屏会永远停在「正在恢复运行环境」/「连接已断开」。
+  // 让同一个有界 watch 以详情事实接管：attachment 回连后（ready + attachmentReady=true）
+  // `shouldContinueCloudTaskRunWatch` 自然返回停止，effect 依赖翻转会清理旧 watch；
+  // 不新增第二套轮询或状态副本。
+  const runNeedsRecoveryWatch =
+    taskDetail?.activeRun?.status === "disconnected" ||
+    (taskDetail?.activeRun?.status === "ready" && taskDetail.attachmentReady === false);
+
   useEffect(() => {
-    if (runWatchEpoch === 0 || !controlPlane || !taskId) {
+    if ((runWatchEpoch === 0 && !runNeedsRecoveryWatch) || !controlPlane || !taskId) {
       return;
     }
     const refreshQuietly = async (): Promise<TaskDetailResponse | null> => {
@@ -261,7 +271,7 @@ export function useCloudWorkspaceController(
     return () => {
       watch.cancel();
     };
-  }, [controlPlane, principalId, runWatchEpoch, taskId]);
+  }, [controlPlane, principalId, runNeedsRecoveryWatch, runWatchEpoch, taskId]);
 
   // 恢复路径（04 §3.2.5）：选中任务后先 hydrate 本地草稿/attempt，再把未决 attempt
   // 按**原 commandId** 查询对账；查询失败保持 unknown，绝不重新组装 payload。

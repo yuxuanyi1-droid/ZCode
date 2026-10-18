@@ -12,7 +12,7 @@ import type { CloudCheckpointRecord, CloudStreamCursor } from "@zcode/shared";
 import { withWriteTransaction } from "../sqlite/database.js";
 import type { StorageContext } from "../sqlite/database.js";
 import { decodeHistoryCursor, encodeHistoryCursor, normalizeLimit } from "../sqlite/cursor.js";
-import { mapCheckpointRow, mapProjectionRow, readText } from "../sqlite/rowMapping.js";
+import { mapCheckpointRow, mapProjectionRow, readInt, readText } from "../sqlite/rowMapping.js";
 import type { SqlRow } from "../sqlite/rowMapping.js";
 import type { ProjectionAppendResult } from "../../../app/ports/storagePort.js";
 import {
@@ -234,7 +234,12 @@ export const projectionRepoHandlers = {
       bounds?.["high"] === null || bounds?.["high"] === undefined ? 0 : Number(bounds["high"]);
     const gapBelow = params.cursor !== undefined && afterSeq > 0 && low > afterSeq + 1;
     const aheadOfData = params.cursor !== undefined && high < afterSeq;
-    const items = rows.slice(0, limit).map(mapProjectionRow);
+    // 时间戳取持久 ingest 列的同一行值：同一条历史记录无论读多少次都得到相同 ts
+    // （读取时用 clock.now() 会让客户端看到的 ts 随读取时间漂移）。
+    const items = rows.slice(0, limit).map((row) => ({
+      ...mapProjectionRow(row),
+      ingestedAt: readInt(row, "ingested_at"),
+    }));
     // 复核缺陷 4：nextCursor 的语义是「下一页必有数据」（hasMore=true 当且仅当本次
     // 探测到了 limit+1 行）。空页（游标越界/越过保留范围）绝不携带 cursor，否则客户端
     // 会拿一个永远取不到数据的 hasMore 反复空翻页。
@@ -253,8 +258,16 @@ export const projectionRepoHandlers = {
   },
 
   "projections.readSnapshot": (context, params) => {
-    const conditions = ["task_id = ?", "topic = ?"];
-    const args: (string | number)[] = [params.taskId, params.topic];
+    // 族名语义同 readHistory：快照在 `conversation/<sessionId>`，缺省族名需前缀匹配。
+    const conditions = ["task_id = ?"];
+    const args: (string | number)[] = [params.taskId];
+    if (params.topic.includes("/")) {
+      conditions.push("topic = ?");
+      args.push(params.topic);
+    } else {
+      conditions.push("(topic = ? OR instr(topic, ? || '/') = 1)");
+      args.push(params.topic, params.topic);
+    }
     if (params.logEpoch !== undefined) {
       conditions.push("log_epoch = ?");
       args.push(params.logEpoch);
@@ -267,9 +280,14 @@ export const projectionRepoHandlers = {
       .get(...args);
     if (!row) return null;
     return {
+      // 响应必须回快照实际话题，不能回查询用的族名——客户端要用它续订/对齐 cursor。
+      topic: readText(row, "topic"),
       logEpoch: readText(row, "log_epoch"),
       coveredSourceSeq: Number(row["covered_source_seq"]),
       snapshot: JSON.parse(readText(row, "snapshot_json")) as unknown,
+      // 快照创建时间是持久事实（同一条快照重复读取不得漂移）；updated_at 只用于
+      // 覆盖排序，不参与响应时间戳。
+      createdAt: Number(row["created_at"]),
     };
   },
 
@@ -334,7 +352,11 @@ export const projectionRepoHandlers = {
              local_sha = excluded.local_sha,
              confirmed_remote_sha = excluded.confirmed_remote_sha,
              risk_summary = excluded.risk_summary,
-             updated_at = excluded.updated_at`,
+             updated_at = excluded.updated_at
+           -- 修复依据（2026-10-17 R2，spec 15 §3、08 §8.2）：saved 是 checkpoint 记录的
+           -- 终态证据——同一 operationId 的迟到 failed/unknown（重试、重投或伪造帧）不得
+           -- 把已确认保存改回风险状态；其余状态（pending/failed/saving）仍按最新结果覆盖。
+           WHERE checkpoints.state <> 'saved'`,
         )
         .run(
           checkpoint.operationId,

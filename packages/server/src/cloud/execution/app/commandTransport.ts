@@ -86,6 +86,11 @@ export interface CloudCommandTransport {
   /** 由 bridge 连接侧调用：把沙箱回投的 rpc.response 交回本传输的 ChannelClient。 */
   handleResponse(frame: CloudRpcFrame): void;
   /**
+   * 沙箱主动释放本传输的流（quiesce/releaseAll 回发的 rpc.close）：清 openedFor，
+   * 下一次 `ensureSession` 重发 rpc.open（02 §4）。`releasedFor` 保持不变。
+   */
+  handleClose(frame: CloudRpcFrame): void;
+  /**
    * 连接释放：丢弃在途请求（不重放），保留命令事实由控制面对账。
    * `releasedContext` 是**关闭的那条连接**的上下文（run/代际/epoch）；释放只作用于它，
    * 不影响其它 run 或后续新连接（单例传输，见 ensureSession 的修复说明）。
@@ -278,6 +283,35 @@ export function createCloudCommandTransport(
       if (frame.streamId !== options.streamId) return;
       const buffer = VSBuffer.wrap(new Uint8Array(Buffer.from(frame.payload, "base64")));
       for (const listener of Array.from(inbound.keys())) listener(buffer);
+    },
+
+    handleClose(frame) {
+      // 修复依据（2026-10-13 V4r 真机联调）：沙箱 checkpoint quiesce 的 releaseAll 会
+      // 撕掉命令投递流；原实现只在 bridge socket 关闭时清 openedFor，沙箱静默撕流后
+      // 控制面仍认为流可用，后续 sendText 全部超时（append uncertain/closed）。
+      // 只清 openedFor：下一次 ensureSession 按既有「新上下文重开流」语义重发 rpc.open；
+      // releasedFor 是连接级毒化标记，不因沙箱释放流而改变。
+      if (frame.type !== "rpc.close") return;
+      if (frame.streamId !== options.streamId) return;
+      if (!openedFor) return;
+      if (
+        frame.runId !== openedFor.runId ||
+        frame.runGeneration !== openedFor.runGeneration ||
+        frame.connectionEpoch !== openedFor.connectionEpoch
+      ) {
+        // 旧代际 close 不得作废当前流（02 §2 不变量 3）。
+        options.logger.warn(undefined, "command transport rpc close rejected: stale", {
+          runId: openedFor.runId,
+          streamId: frame.streamId,
+          frameEpoch: frame.connectionEpoch,
+        });
+        return;
+      }
+      openedFor = null;
+      options.logger.debug(undefined, "command transport stream closed by sandbox", {
+        runId: frame.runId,
+        streamId: frame.streamId,
+      });
     },
 
     release(reason, releasedContext) {

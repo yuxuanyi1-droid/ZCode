@@ -31,6 +31,11 @@ export interface ControlPlaneRpcChannel {
   /** 沙箱回投的 `rpc.response`：按 streamId 交回对应流的 ChannelClient。 */
   handleResponse(frame: CloudRpcFrame): void;
   /**
+   * 沙箱主动释放流（quiesce/releaseAll 回发的 `rpc.close`）：作废本侧流缓存，
+   * 下次调用按当前 attachment 重开新流（02 §4）。
+   */
+  handleClose(frame: CloudRpcFrame): void;
+  /**
    * bridge 连接释放：丢弃该连接的流（不重放；同步结论未知由调用方按条目记 failed）。
    * `released` = 关闭的那条连接（run/代际/epoch），只作用于它，不影响其它 Run 的流。
    */
@@ -235,6 +240,28 @@ export function createControlPlaneRpcChannel(input: {
       }
       const buffer = VSBuffer.wrap(new Uint8Array(Buffer.from(frame.payload, "base64")));
       for (const listener of Array.from(stream.inbound)) listener(buffer);
+    },
+    handleClose(frame) {
+      // 修复依据（2026-10-13 V4r 真机联调）：沙箱 checkpoint quiesce 会静默撕流；本侧
+      // 原先把流按 epoch 缓存复用，后续调用全部打在死流上 30s 超时。沙箱回发的
+      // rpc.close 必须作废缓存（teardown，不回 close 防回声循环），下次调用重开。
+      if (frame.type !== "rpc.close") return;
+      const stream = [...streams.values()].find((item) => item.streamId === frame.streamId);
+      if (!stream) return;
+      if (
+        frame.runId !== stream.runId ||
+        frame.runGeneration !== stream.runGeneration ||
+        frame.connectionEpoch !== stream.connectionEpoch
+      ) {
+        // 旧代际 close 不得作废当前流（02 §2 不变量 3）。
+        cloudCoreLogger.warn(undefined, "cloud control-plane rpc close rejected: stale", {
+          runId: stream.runId,
+          streamId: frame.streamId,
+          frameEpoch: frame.connectionEpoch,
+        });
+        return;
+      }
+      teardown(stream, "sandbox-close", false);
     },
     release(reason, released) {
       for (const stream of Array.from(streams.values())) {

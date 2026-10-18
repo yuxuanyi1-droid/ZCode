@@ -1,13 +1,16 @@
 /**
- * W8 云附件门控断言（specs/cloud-agent 04 §3.0.2/§3.4.1、11 §9、03 §2、W8 报告 CR③ 裁决）。
+ * R6 云附件门控断言（specs/cloud-agent/15 §2/§3 R6、04 §3.0.2/§3.4.1、11 §9）。
  *
- * 三条要证明的事实：
- * 1. 云模式 **draft 期**：`capabilities.taskOwnedAttachments === false` 时附件入口
- *    **不可用且带明确原因**——不静默停在 waitingSession、不伪造空附件；
- * 2. 云模式 **ready 期**：附件走 session-bound 上传，且**不会**进入「读本地路径」分支；
- * 3. 结论依据可复核：浏览器无本地文件系统（web 平台能力表）+ 服务不在 attachment 白名单。
+ * 本轮结论（fail-closed）：durable input 不承载附件引用，云模式任何阶段都不提供
+ * 附件入口——draft、有无 runtime session、各 task/run 状态、部署是否声明
+ * task-owned 上传，全部恒 disabled，且必须给出明确原因。
+ *
+ * 同时证明：
+ * - 非云模式 `useCloudAttachmentGate` 返回 null，既有本地 / SSH / 远控附件路径不变；
+ * - 「本地路径暂存」在云模式恒不可用（浏览器无本地文件系统 + 服务不在白名单）。
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   CLOUD_ATTACHMENT_MESSAGE_IDS,
@@ -15,101 +18,13 @@ import {
   resolveCloudAttachmentGate,
 } from "../src/cloud/cloudAttachmentGate.js";
 
-test("draft without task-owned upload support is explicitly unavailable, with a reason", () => {
-  const gate = resolveCloudAttachmentGate({
-    executionScope: "unavailable",
-    taskOwnedAttachments: false,
-    taskStatus: "draft",
-    hasRuntimeSession: false,
-  });
+const TASK_STATUSES = ["draft", "active", "completed", "failed", "archived"] as const;
+const EXECUTION_SCOPES = ["attachment-ready", "unavailable"] as const;
 
-  assert.equal(gate.enabled, false);
-  assert.equal(gate.reason, "task-owned-upload-unavailable");
-  // 必须解释原因：既有 waitingSession 是「等会话」，会把「这个部署根本不支持」显示成
-  // 「再等等」，用户永远等不到。
-  assert.equal(gate.disabledMessageId, CLOUD_ATTACHMENT_MESSAGE_IDS.taskOwnedUploadUnavailable);
-  assert.equal(gate.uploadChannel, "none");
-  // 不伪造空附件：不可用时通道是 none，而不是「上传成功但列表为空」。
-  assert.notEqual(gate.uploadChannel, "session");
-  assert.notEqual(gate.uploadChannel, "task-owned");
-});
-
-test("draft with task-owned upload support routes to the control-plane upload", () => {
-  const gate = resolveCloudAttachmentGate({
-    executionScope: "unavailable",
-    taskOwnedAttachments: true,
-    taskStatus: "draft",
-    hasRuntimeSession: false,
-  });
-  assert.equal(gate.enabled, true);
-  assert.equal(gate.reason, "task-owned-upload");
-  // draft 期没有沙箱，附件只能落在控制面 task-owned 存储（POST /api/cloud/attachments）。
-  assert.equal(gate.uploadChannel, "task-owned");
-  assert.equal(gate.disabledMessageId, null);
-});
-
-test("ready runs upload through the session, never through local-path staging", () => {
-  const gate = resolveCloudAttachmentGate({
-    executionScope: "attachment-ready",
-    taskOwnedAttachments: false,
-    taskStatus: "active",
-    hasRuntimeSession: true,
-  });
-  assert.equal(gate.enabled, true);
-  assert.equal(gate.reason, "session-upload");
-  // session-bound：经当前 Run attachment 落到沙箱（04 §3.0.2）。
-  assert.equal(gate.uploadChannel, "session");
-  assert.equal(gate.localPathStaging, false);
-});
-
-test("a disconnected attachment is unavailable rather than queued or rerouted", () => {
-  const gate = resolveCloudAttachmentGate({
-    executionScope: "unavailable",
-    taskOwnedAttachments: true,
-    taskStatus: "active",
-    hasRuntimeSession: true,
-  });
-  assert.equal(gate.enabled, false);
-  assert.equal(gate.reason, "attachment-unavailable");
-  assert.equal(gate.disabledMessageId, CLOUD_ATTACHMENT_MESSAGE_IDS.attachmentUnavailable);
-  // 不排队（没有第二条投递路径）、不回落本机执行域（03 §2 不变量 7）。
-  assert.equal(gate.uploadChannel, "none");
-});
-
-test("a run that has not reached a session waits for the environment", () => {
-  const gate = resolveCloudAttachmentGate({
-    executionScope: "unavailable",
-    taskOwnedAttachments: false,
-    taskStatus: "active",
-    hasRuntimeSession: false,
-  });
-  assert.equal(gate.enabled, false);
-  assert.equal(gate.reason, "session-pending");
-  assert.equal(gate.disabledMessageId, CLOUD_ATTACHMENT_MESSAGE_IDS.waitingEnvironment);
-});
-
-test("local-path staging is unavailable in cloud mode, and the blocking facts are named", () => {
-  // 云入口的 IPlatformService（packages/web/src/webPlatform.ts:45-50）：
-  // canSelectFilePath=false、selectFile→null、selectFiles→[]。
-  // 因此 `item.localPath && isRemoteAttachmentTarget(target)`（:315）永远拿不到 localPath。
-  // 注意：云任务 identity 恒非空，isRemoteAttachmentTarget 本身会返回 true ——
-  // 真正的拦截点是平台能力与白名单，不是 identity。
-  const blockedByPlatform = describeCloudLocalPathStaging({ platformCanSelectFilePath: false });
-  assert.equal(blockedByPlatform.available, false);
-  assert.deepEqual(blockedByPlatform.blockedBy, ["platform", "allowlist"]);
-
-  // 即便换成一个能返回本地路径的宿主，白名单仍拦住它：PromptAttachmentTransfer 不在
-  // CLOUD_ATTACHMENT_SERVICE_ALLOWLIST，且按 CR③ 裁决不加入。
-  const blockedByAllowlist = describeCloudLocalPathStaging({ platformCanSelectFilePath: true });
-  assert.equal(blockedByAllowlist.available, false);
-  assert.deepEqual(blockedByAllowlist.blockedBy, ["allowlist"]);
-});
-
-test("every cloud attachment channel reports local-path staging as unavailable", () => {
-  const taskStatuses = ["draft", "active", "completed", "failed", "archived"] as const;
-  for (const taskStatus of taskStatuses) {
+test("every cloud draft/ready/run state is disabled for the durable-input reason", () => {
+  for (const taskStatus of TASK_STATUSES) {
     for (const hasRuntimeSession of [true, false]) {
-      for (const executionScope of ["attachment-ready", "unavailable"] as const) {
+      for (const executionScope of EXECUTION_SCOPES) {
         for (const taskOwnedAttachments of [true, false]) {
           const gate = resolveCloudAttachmentGate({
             executionScope,
@@ -117,21 +32,73 @@ test("every cloud attachment channel reports local-path staging as unavailable",
             taskStatus,
             hasRuntimeSession,
           });
+          const scenario = `${taskStatus}/session=${hasRuntimeSession}/${executionScope}/taskOwned=${taskOwnedAttachments}`;
+
+          // R6 决策：不再存在 session-upload / task-owned-upload 的可用分支。
+          assert.equal(gate.enabled, false, `cloud gate must stay disabled for ${scenario}`);
           assert.equal(
-            gate.localPathStaging,
-            false,
-            `local-path staging must stay unavailable for ${taskStatus}/${executionScope}`,
+            gate.reason,
+            "durable-input-unsupported",
+            `cloud gate must report the durable-input reason for ${scenario}`,
           );
-          // 不可用一定带原因，绝不允许「不可用但不说为什么」。
-          if (!gate.enabled) {
-            assert.ok(
-              gate.disabledMessageId !== null,
-              `disabled gate for ${taskStatus}/${executionScope} must explain itself`,
-            );
-            assert.equal(gate.uploadChannel, "none");
-          }
+          assert.equal(
+            gate.disabledMessageId,
+            CLOUD_ATTACHMENT_MESSAGE_IDS.durableInputUnsupported,
+            `disabled gate must explain itself for ${scenario}`,
+          );
+          // 不伪造通道：不可用时既没有 session 上传，也没有 task-owned 上传。
+          assert.equal(gate.uploadChannel, "none", `no upload channel for ${scenario}`);
+          assert.equal(gate.localPathStaging, false, `no local-path staging for ${scenario}`);
         }
       }
     }
   }
+});
+
+test("the durable-input reason has both zh-CN and en-US copy", () => {
+  for (const locale of ["zh-CN", "en-US"] as const) {
+    const text = readFileSync(new URL(`../src/i18n/locales/${locale}.ts`, import.meta.url), "utf8");
+    // 漏键运行时只会显示 id；中英必须成对新增。
+    assert.ok(
+      text.includes(`"${CLOUD_ATTACHMENT_MESSAGE_IDS.durableInputUnsupported}"`),
+      `${locale} is missing ${CLOUD_ATTACHMENT_MESSAGE_IDS.durableInputUnsupported}`,
+    );
+  }
+});
+
+test("non-cloud workspaces keep the existing attachment path: the hook returns null", async (t) => {
+  let createElement: typeof import("react").createElement;
+  let renderToStaticMarkup: (element: unknown) => string;
+  try {
+    ({ createElement } = await import("react"));
+    ({ renderToStaticMarkup } = await import("react-dom/server"));
+  } catch {
+    t.skip("react-dom/server 不可用");
+    return;
+  }
+
+  const module = await import("../src/hooks/cloud/useCloudAttachmentGate.js");
+
+  function Probe() {
+    const gate = module.useCloudAttachmentGate();
+    return createElement("span", null, gate === null ? "no-cloud-gate" : gate.reason);
+  }
+
+  // 没有 CloudWorkspaceProvider / CloudServicesProvider 时 context 为 null：
+  // hook 必须返回 null，让 composer 沿用既有本地 / SSH / 远控附件分支。
+  assert.equal(renderToStaticMarkup(createElement(Probe)), "<span>no-cloud-gate</span>");
+});
+
+test("local-path staging is unavailable in cloud mode, and the blocking facts are named", () => {
+  // 云入口的 IPlatformService（packages/web/src/webPlatform.ts）：canSelectFilePath=false、
+  // selectFile→null、selectFiles→[]，因此拿不到 localPath。
+  const blockedByPlatform = describeCloudLocalPathStaging({ platformCanSelectFilePath: false });
+  assert.equal(blockedByPlatform.available, false);
+  assert.deepEqual(blockedByPlatform.blockedBy, ["platform", "allowlist"]);
+
+  // 即便换成一个能返回本地路径的宿主，白名单仍拦住它：PromptAttachmentTransfer 不在
+  // CLOUD_ATTACHMENT_SERVICE_ALLOWLIST，且按 spec 不加入。
+  const blockedByAllowlist = describeCloudLocalPathStaging({ platformCanSelectFilePath: true });
+  assert.equal(blockedByAllowlist.available, false);
+  assert.deepEqual(blockedByAllowlist.blockedBy, ["allowlist"]);
 });

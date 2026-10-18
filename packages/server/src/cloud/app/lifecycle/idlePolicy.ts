@@ -24,6 +24,7 @@ export type IdlePauseSkipReason =
   | "capability-none" // A-7 门禁：pauseResume=none，路径不可达（fail-closed）
   | "browser-watching" // v1 简化：有浏览器观看连接即不算空闲（无「即将暂停」广播面）
   | "pending-input" // 有待投递输入：工作将恢复，不算空闲（08 §7 闲置条件）
+  | "pending-interaction" // 等待审批/交互不是业务空闲（08 §7，2026-10-17 修复）
   | "checkpoint-in-flight" // 保存通道占用：不与保存竞争（结果未落即视为占用）
   | "no-activity-fact" // 无业务活动事实：不猜空闲（与 isIdleArchiveEligible 同口径）
   | "below-threshold"; // 有事实但未持续达到阈值
@@ -40,6 +41,8 @@ export interface IdlePauseFacts {
   readonly hasBrowserWatcher: boolean;
   /** 待投递输入数（accepted/delivering）。 */
   readonly pendingInputCount: number;
+  /** 最近持久投影里的待处理交互数（审批/提问等待；08 §7「审批等待不是业务空闲」）。 */
+  readonly pendingInteractionCount: number;
   /** 保存中的 checkpoint（saving/pending 都算占用）。 */
   readonly checkpointInFlight: boolean;
   readonly now: number;
@@ -63,6 +66,12 @@ export function decideIdlePause(facts: IdlePauseFacts): IdlePauseDecision {
   if (facts.pauseResume === "none") return { action: "skip", reason: "capability-none" };
   if (facts.hasBrowserWatcher) return { action: "skip", reason: "browser-watching" };
   if (facts.pendingInputCount > 0) return { action: "skip", reason: "pending-input" };
+  // 修复依据（08 §7「审批等待不是业务空闲」）：run 正在等待工具权限审批时，pending
+  // 输入为 0、业务活动也已停止，旧口径会把它判成 idle 并暂停，审批随后无法投递。
+  // 最近持久投影仍有 pendingInteractions 就代表工作面未完成，必须顺延。
+  if (facts.pendingInteractionCount > 0) {
+    return { action: "skip", reason: "pending-interaction" };
+  }
   if (facts.checkpointInFlight) return { action: "skip", reason: "checkpoint-in-flight" };
   if (facts.lastBusinessActivityAt === undefined) {
     return { action: "skip", reason: "no-activity-fact" };

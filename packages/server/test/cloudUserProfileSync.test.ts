@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { createCredentialCipherProvider } from "@zcode/services/node";
 import { USER_ARCHIVE_IMPORT_CHUNK_MAX_BYTES } from "@zcode/shared";
 import { buildTestPlane, attachReadySession } from "./cloudCoreFakes.js";
 import type { TestPlane } from "./cloudCoreFakes.js";
@@ -239,18 +240,22 @@ test("逐类别调用形状：mcp / skills / plugins / commands / subagents / ag
   const skillBytes = Buffer.from("skill-archive-bytes");
   const pluginBytes = Buffer.alloc(USER_ARCHIVE_IMPORT_CHUNK_MAX_BYTES * 2 + 5, 7);
   const commandText = "---\ndescription: 审查\n---\n请审查这个变更";
-  const subagentText = '---\nname: "helper"\ndescription: "帮助者"\n---\n你是助手。';
+  // 单引号、未知键、CRLF 与行尾空格：serializer 会规范化掉这些格式，原样写入必须逐字节保留。
+  const subagentText =
+    "---\nname: 'helper'\ndescription: '帮助者：保留原样'\ncustom-key: keep-me\ntools: [Read,Grep]\n---\n你是助手。\r\n第二行保留空格   ";
+  const newSubagentText = '---\nname: "new-helper"\ncustom: 1\n---\n新条目正文\n';
   store.versions.set(7, [
     mcpEntry("primary", { command: "npx", args: ["-y", "server"] }),
     archiveEntry("skills", "demo", skillBytes),
     archiveEntry("plugins", "tool", pluginBytes),
     markdownEntry("commands", "review.md", commandText),
     markdownEntry("subagents", "helper.md", subagentText),
+    markdownEntry("subagents", "new-helper.md", newSubagentText),
     agentsMd("# AGENTS"),
   ]);
   store.current = 7;
 
-  // 既有列表回投（create-or-update 判定来源）。
+  // 既有列表回投（commands 的 create-or-update 判定来源；subagents 仅用于判断存在）。
   rpc.respond("commands", "list", {
     commands: [
       {
@@ -307,6 +312,7 @@ test("逐类别调用形状：mcp / skills / plugins / commands / subagents / ag
       "plugins/tool:synced",
       "skills/demo:synced",
       "subagents/helper.md:synced",
+      "subagents/new-helper.md:synced",
     ],
   );
 
@@ -389,28 +395,103 @@ test("逐类别调用形状：mcp / skills / plugins / commands / subagents / ag
     },
   ]);
 
-  // subagents：markdown front-matter → 既有 create/update 的 SubAgentConfig（覆盖语义）。
+  // subagents：list 判断存在后走原生 markdown 整文件覆盖写（14 §4.5，2026-10-17 收口）。
   const subagentList = rpc.callsOf("subagents", "list");
   assert.equal(subagentList.length, 1);
   const subagentListArg = subagentList[0]?.args[0] as { mode?: string } | undefined;
   assert.equal(subagentListArg?.mode, "settingsUserOnly", "只读用户级列表");
-  assert.equal(rpc.callsOf("subagents", "createAgent").length, 0);
-  const subagentUpdate = rpc.callsOf("subagents", "updateAgent");
-  assert.equal(subagentUpdate.length, 1);
-  assert.deepEqual(subagentUpdate[0]?.args, [
-    {
-      agentId: "agent:user:helper",
-      config: { name: "helper", description: "帮助者", systemPrompt: "你是助手。" },
-      oldFilePath: "/root/.zcode/agents/helper.md",
-      provider: "glm",
-      scope: "user",
-    },
-  ]);
+  assert.equal(rpc.callsOf("subagents", "createAgent").length, 0, "不再走 createAgent");
+  assert.equal(rpc.callsOf("subagents", "updateAgent").length, 0, "不再走 updateAgent");
+  const subagentWrites = rpc.callsOf("subagents", "writeUserAgentMarkdownFile");
+  assert.equal(subagentWrites.length, 2, "已存在与新增条目都走同一覆盖写");
+  const subagentWriteByFile = new Map(
+    subagentWrites.map((call) => {
+      const args = call.args[0] as { fileName: string; content: string };
+      return [args.fileName, args] as const;
+    }),
+  );
+  assert.deepEqual(subagentWriteByFile.get("helper.md"), {
+    fileName: "helper.md",
+    content: subagentText,
+  });
+  assert.deepEqual(subagentWriteByFile.get("new-helper.md"), {
+    fileName: "new-helper.md",
+    content: newSubagentText,
+  });
+  // 条目正文逐字节落盘：单引号/键序/未知键/CRLF/行尾空格都必须原样保留（serializer 会改）。
+  for (const [fileName, expected] of [
+    ["helper.md", subagentText],
+    ["new-helper.md", newSubagentText],
+  ] as const) {
+    const written = subagentWriteByFile.get(fileName)?.content ?? "";
+    assert.equal(
+      Buffer.from(written, "utf8").equals(Buffer.from(expected, "utf8")),
+      true,
+      `${fileName} 必须与条目正文逐字节一致`,
+    );
+  }
 
   // agents-md：settings-sync 的最小写入方法（整文件覆盖）。
   assert.deepEqual(rpc.callsOf("settings-sync", "writeUserAgentsFile")[0]?.args, [
     { content: "# AGENTS" },
   ]);
+});
+
+test("R4 mcp 加密正文：同步前解密下发；损坏密文按条 failed 且不下发密文（14 §5）", async () => {
+  const cipher = createCredentialCipherProvider({
+    env: { ZCODE_CREDENTIAL_SECRET: "profile-sync-r4" },
+  });
+  const store = createFakeUserProfileStore();
+  const context = buildTestPlane({ userProfile: store, credentialCipher: cipher });
+  const rpc = context.fakeControlPlaneRpc;
+  assert.ok(rpc);
+  const { taskId, runId, runGeneration } = await draftWithRun(context);
+  await attachReadySession(context, { taskId, runId, runGeneration });
+
+  const config = { command: "npx", args: ["-y", "server"], env: { TOKEN: "secret-token" } };
+  const encrypted = cipher.encrypt(JSON.stringify(config));
+  // 密文被篡改（auth tag 校验失败）与被错误密钥加密（现密钥不可解）同属 fail-closed 场景。
+  const corruptIndex = "enc:v1:".length + 4;
+  const corrupted = `${encrypted.slice(0, corruptIndex)}${
+    encrypted[corruptIndex] === "A" ? "B" : "A"
+  }${encrypted.slice(corruptIndex + 1)}`;
+  assert.notEqual(corrupted, encrypted);
+  store.versions.set(2, [
+    { ...mcpEntry("encrypted", config), content: encrypted },
+    { ...mcpEntry("corrupt", { command: "broken" }), content: corrupted },
+    agentsMd("# AGENTS"),
+  ]);
+  store.current = 2;
+  rpc.handle("mcp-sync", "importMcpServers", (call) => {
+    const args = call.args[0] as { servers: { name: string }[] };
+    return {
+      status: "ok",
+      result: { results: args.servers.map((server) => ({ name: server.name, status: "synced" })) },
+    };
+  });
+
+  const synced = await context.plane.userProfileSync.syncTaskProfile({ taskId, trigger: "manual" });
+  assert.equal(synced.ok, true, synced.ok ? "" : `${synced.code}/${synced.reason}`);
+  if (!synced.ok) return;
+  assert.deepEqual(synced.value.results, [
+    {
+      category: "mcp",
+      entryId: "corrupt",
+      status: "failed",
+      error: "mcp entry content is not readable",
+    },
+    { category: "mcp", entryId: "encrypted", status: "synced" },
+    { category: "agents-md", entryId: "user-agents", status: "synced" },
+  ]);
+
+  // 可解密条目以**明文** config 下发；损坏条目不进批、密文绝不外泄到控制面 RPC。
+  const calls = rpc.callsOf("mcp-sync", "importMcpServers");
+  assert.equal(calls.length, 1, "损坏条目不进批，其余条目照常同步");
+  const firstCall = calls[0];
+  assert.ok(firstCall);
+  const servers = (firstCall.args[0] as { servers: { name: string; config: unknown }[] }).servers;
+  assert.deepEqual(servers, [{ name: "encrypted", config, enabled: true }]);
+  assert.ok(!JSON.stringify(calls).includes("enc:v1:"), "RPC 参数不得携带密文");
 });
 
 test("mcp 分批：序列化后 ≤2MiB/批，批内按 entryId 升序、批间串行", async () => {

@@ -1,6 +1,6 @@
 # Spec 02 — 云执行节点 Bridge 协议与可靠投递
 
-状态：目标设计（2026-10-06 云端实现代码已整体回退，按本 spec 组重新实施）；基于原有代码重新制定。
+状态：**已实现（2026-10-17 回写；验证状态见 [10 §10](./10-implementation-plan.md)）**。2026-10-06“云端实现代码已整体回退，按本 spec 组重新实施”为历史记录；当前 `feat/cloud-agent` 分支已落地本文的握手、投递、投影与背压路径。
 父文档：[00-overview.md](./00-overview.md)
 关联：[01-provisioning.md](./01-provisioning.md)、[03-control-plane.md](./03-control-plane.md)、[07-connection-architecture.md](./07-connection-architecture.md)、[08-project-task-model.md](./08-project-task-model.md)
 
@@ -44,7 +44,7 @@
 
 必须保持：
 
-1. 仓库任务 `workspaceIdentity = cloud-task:<taskId>`，由服务端生成并固定，不含 provider、workspacePath、runId 或 connectionEpoch。`workspacePath` 用于 IO、cwd、Git 和显示；两者同时传递，禁止从身份猜执行路径。2026-10-08 修订（无头巡检，P1）：「同时传递」意味着 workspace 未就绪时**不得下发空串路径**——客户端在 run 的 checkout 路径落定前不发起携带 workspace 描述的 v4 订阅（等路径落定再 ready，见 04 §3.3 修订）；协议侧维持 `zcodeWorkspaceRefSchema.workspacePath` 的非空约束不变，不做 optional 化。
+1. 仓库任务 `workspaceIdentity = cloud-task:<taskId>`，由服务端生成并固定，不含 provider、workspacePath、runId 或 connectionEpoch。`workspacePath` 用于 IO、cwd、Git 和显示；两者同时传递，禁止从身份猜执行路径。2026-10-08 修订（无头巡检，P1）：「同时传递」意味着 workspace 未就绪时**不得下发空串路径**——客户端在 run 的 checkout 路径落定前不发起携带 workspace 描述的 v4 订阅（等路径落定再 ready，见 04 §3.3 修订）；协议侧维持 `zcodeWorkspaceRefSchema.workspacePath` 的非空约束不变，不做 optional 化。2026-10-13 修订（A-1）：V4 `createSession` payload 可选携带 `workspacePath`（POSIX 绝对路径，来源必须是控制面可信事实＝当前 ready attachment 的 `address.workspacePath`）；携带时 CLI 以 identity+path 建 workspace ref，`cloud-task:` 身份缺该字段时 CLI fail-closed，不得按本地目录执行。
 2. （2026-10-06 决议移除）：原 SSH 云 attachment 条款作废，见 07 §11；`remote:ssh` 身份仅用于 Desktop 本机/远控，云 Task 只落在独占沙箱。
 3. 每个新 Run 在 Task 内事务性递增 `runGeneration`；同 Run 每次 attachment 接管递增 `connectionEpoch`。旧 generation 不得修改新 Run；旧 epoch 不得继续投递或发布在线状态。
 4. 网络断连只改变 connectivity，不把 Run 自动变为 expired/failed，也不授权另建 Run。终态必须有 provider 终止确认、受控停止结果或执行节点退出事实。
@@ -117,6 +117,14 @@ interface CloudAttachmentAddress extends CloudRunAddress {
 
 RPC 和控制帧需要版本化 discriminator；校验类型/尺寸后分别路由。二进制 RPC 帧不是事件日志，stderr 是限流脱敏诊断，不进入会话投影。`checkpoint.request/result` 只承载 [01 §8](./01-provisioning.md) 的保存/停止通路结果，不替代 outbox operation 事实：result 未确认时按 operationId 对账，不重做 commit、不伪造 saved。
 
+2026-10-13 修订（A-2）：执行节点释放 relay 流（checkpoint quiesce / `releaseAll`）时必须逐流回发 `rpc.close`；控制面据此作废流缓存并在下次调用重开（发出新的 `rpc.open`），回声/幂等由双方既有 no-op 路径承担（控制面 teardown 不再回 close，执行节点对未知流 close 为 no-op）。
+
+2026-10-18 修订（用户实测缺陷：点击停止生成后 run 永久 draining）：
+
+- **`bridge.drain` 不关闭连接**：drain 只表示进入 quiesce/保存阶段；控制面的停止顺序是 drain → `checkpoint.request` → terminate，保存结果必须在同一连接回传，连接由控制面确认 terminate 后自然关闭。执行节点收到 drain 后若立即 close，紧随其后的 `checkpoint.result` 无处可回（静默丢失）。
+- **draining 期间连接装配仍可用**：停止屏障不阻断 `bootstrap.config` 与 `bridge.ready` 的重装——supervisor 断线重连后仍需完成「配置安装 → ready → checkpoint」。此处的 ready 只确认连接可用，**不得把 run 从 draining 迁回 ready**；`provisioning + stopRequested` 仍拒绝配置，避免为已停止的创建拉起 Agent。
+- **同 operationId 的 drain 保存与 `checkpoint.request` 并发**：执行节点必须把同 op 的并发调用收敛为一次执行（共享 in-flight promise），不得重复 commit/push。
+
 ## 5. 握手、token 旋转与 Ready 门控
 
 ### 5.1 初始认证与持久恢复
@@ -126,6 +134,8 @@ RPC 和控制帧需要版本化 discriminator；校验类型/尺寸后分别路�
 3. 控制面事务校验 hash/时效、activeRunId/generation、Run 非终态，消费初始凭据、保存候选 resume hash、helloAttemptId、rotationId；新的网络 socket 绑定同时递增 connectionEpoch。
 4. 提交后发 welcome。控制面只持久 hash，重启后从 DB 恢复认证/路由，不依赖内存 Map 或重新使用原 token。
 5. 相同 attemptId 仅在 Run、候选 hash 等内容完全一致时复用 rotationId，不重复旋转凭据；相同 attemptId 不同内容拒绝。同 socket 重复 hello 返回原 epoch；新的 socket 接管总是递增 epoch，旧 socket 不能因 attempt 相同而保留写权。
+
+**实施回写（2026-10-17，R5）**：同 socket 重复 hello 的幂等分支已落地（`packages/server/src/cloud/adapters/ws/handshake.ts:88-121`）：已认证连接只接受同一 attemptId + 同一地址的 hello，重发**原 `connectionEpoch`/`rotationId`/ingestCursors**，不再消费凭据、不再递增 epoch、不重绑注册表；不同 attemptId 或地址不一致按 `duplicate-hello-mismatch` 1008 关闭。新 socket 的 epoch 由数据库 CAS 递增（`handshake.ts:164-187`），旧 socket 由连接表替换关闭（`bridgeChannel.ts:74-85`）。
 
 ### 5.2 旋转响应丢失的恢复算法
 
@@ -201,7 +211,7 @@ sequenceDiagram
 ### 6.2 保留既有 V4 语义
 
 - 沿用 commandId/clientId/sessionId/type/payload/baseRevision/baseLogEpoch；retry 不换 commandId。
-- 首输入优先复用已有 `createSession.firstInput`，一个稳定 commandId 绑定创建与首条工作；M2/M3 需验证其 ACK/query、持久 command facts 与恢复保证。控制面保存 receipt commandId 与 runtime query key/sessionId 的映射，不因重连重造会话。若能力缺口要求拆成 createSession + sendText，须先修订对应契约并验证两个持久投递步骤的部分成功恢复，不能偷偷增加第二条写入路径。
+- 首输入优先复用已有 `createSession.firstInput`，一个稳定 commandId 绑定创建与首条工作；M2/M3 需验证其 ACK/query、持久 command facts 与恢复保证。控制面保存 receipt commandId 与 runtime query key/sessionId 的映射，不因重连重造会话。若能力缺口要求拆成 createSession + sendText，须先修订对应契约并验证两个持久投递步骤的部分成功恢复，不能偷偷增加第二条写入路径。createSession payload 可选 `workspacePath`（绝对路径、控制面可信来源）；携带时 CLI 以 identity+path 建 workspace ref，`cloud-task:` 身份缺该字段时 CLI fail-closed。
 - 复用 `sendConversationCommandV4`、`queryConversationCommandsV4`，云 facade 注入可信 connection context；浏览器不能自报 trusted mode。
 - duplicate 检查原结果，不能一律当 admitted；rejected/stale/noop/failed 保持错误与原因。
 - 当前 `command.ts` 明确 accepted 不承诺跨 CLI 进程存活；admitted 只表示 runtime 曾准入，不表示任务完成或跨新 Run 自动执行。
@@ -210,6 +220,8 @@ sequenceDiagram
 ### 6.3 ACK 丢失与执行节点退出
 
 RPC timeout/断连不是 runtime rejected。先置 receipt `uncertain`，重连 query 同 command key；查到结果则持久保存，unknown 且确认同 Run/runtime 可安全去重才重发原信封。
+
+**实施回写（2026-10-17，R2）**：dispatcher 对 `delivering`/`uncertain` 输入**先 query 再决定是否重投**（`packages/server/src/cloud/app/inputDelivery/dispatcher.ts:93-159,206-215`）：`found` → 落地既有 ACK（不重发）；`unavailable` → 保持原状态等待；`unknown` → 只有当前 ready attachment 确认同 run/代际可安全去重时，CAS 回 `accepted` 后用**同一 commandId** 重投。`delivering` 不会被当作“未送达”直接重发。
 
 不把未确认命令自动移到新 Run；新 Run 只接受显式新输入。CLI 退出后先恢复持久 command facts/transcript 再 query；仍无证据则保留不确定状态、让用户决定，不承诺端到端 exactly once。
 
@@ -244,6 +256,8 @@ interface CloudProjectionRecord {
 
 网络 batch 另带 connectionEpoch；record 不含网络代际，可在新连接重投。去重键 `(runId,runtimeIncarnation,topic,logEpoch,sourceSeq)`；同键同内容幂等，同键不同内容报一致性 fault。
 
+**实施回写（2026-10-17，R2）**：归属校验是**逐记录**不变量，不能用首条代表整批——控制面对该 attachment 的 run 逐条校验 `record.runId === run.runId`、`record.taskId === run.taskId`、`record.runGeneration === run.runGeneration`；任一不符整批拒绝（不落库、不回 `projection.ack`，记录留在执行节点 WAL），见 `packages/server/src/cloud/app/projections/ingest.ts:54-84`。批次还要求 registry 中存在该 run 的已认证 session 且帧 epoch 匹配（`ingest.ts:39-52`）。
+
 projection.ack 显式携带当前 attachment epoch、源 stream key、已连续持久化 sourceSeq、对应 ingestCursor；Bridge 仅以匹配源 stream 的 sourceSeq 清 WAL，不能拿控制面全局 ingestCursor 当本地数组下标。每个新源 stream 先提供可验证 snapshot，再接连续 delta；收到缺口返回 expectedSourceSeq，不跳跃确认。
 
 sourceSeq 是执行节点 export cursor，控制面另外持久单调 ingest cursor，二者与 V4 fromSeq/toSeq 状态水位分别计量；若采用 V4 源序列，完整保存区间/snapshot 水位，不把 coalesced 区间压成假逐事件 seq。客户端 replay token 必须声明使用的 cursor 类型及 epoch，服务端提供两层 cursor 的一致映射；禁止仅 lastSeq。
@@ -256,6 +270,8 @@ sourceSeq 是执行节点 export cursor，控制面另外持久单调 ingest cur
 4. Bridge 持久 ACK cursor 后才清理 WAL；ACK 丢失重投，DB 幂等返原水位。
 5. Fan-out 读已提交记录。通知失败不撤销持久事实、不要求 Agent 重做；客户端恢复读取。
 
+**实施回写（2026-10-18）**：控制面 ingest 批次在 `appendBatch` 成功且无一致性冲突时，对本批 `kind=snapshot` 记录同步写 `projection_snapshots`（`coveredSourceSeq` = 记录 `sourceSeq`，`snapshot` = 完整 V4 快照帧载荷，`createdAt` = 落库时间）。快照是 ingest 派生事实、不是 runtime 第二事实源：写失败只告警，不阻断事件 ACK；本批有同键不同 `contentHash` 冲突时不写快照，避免冲突载荷覆盖已持久快照。同批多条按记录顺序写，唯一键 + `coveredSourceSeq` 单调守卫保留最新（`packages/server/src/cloud/app/projections/ingest.ts`）。
+
 若 runtime commit 与 WAL 不在同一事务，提供 `snapshot barrier → transcript/事实恢复 → 缺口对账`；保证限定为本地进程/磁盘完整时可重传，provider 强制回收前尚未 ingest 的输出可能丢失。无事务证据不能承诺任意崩溃下逐事件零丢失。
 
 ### 7.3 快照、历史与恢复
@@ -267,6 +283,8 @@ sourceSeq 是执行节点 export cursor，控制面另外持久单调 ingest cur
 - 已ingest历史在Run结束后只读保留，按03保留/清理策略处理；沙箱消失不等于删服务端投影。
 - 客户端展示路径只依赖控制面持久副本：会话内容在 runtime 生成时持续 ingest（与客户端在线与否无关）；任何端打开会话都从控制面读快照+增量恢复，不要求 Run 在线、不从沙盒拉取历史，沙箱已销毁亦然。与 SSH 模式（远端机器持久、可随时重读）机制不同，但用户可见语义一致。
 - 冷快照不恢复活终端、进程、未完成工具、完整文件系统；历史回放、runtime恢复、新Run分开。
+
+**实施回写（2026-10-18）**：历史与快照的时间戳使用持久时间——history 行的 `ts` 取 `projection_events.ingested_at`，snapshot 的 `createdAt` 取 `projection_snapshots.created_at`，读取时不再用 `clock.now()` 生成（同一行重复读取时间戳稳定）。快照由 ingest 的 `kind=snapshot` 记录派生落库，`GET /snapshot` 只在确实没有已持久快照时返回 `snapshot-not-available`。
 
 ### 7.4 continuous/replayable
 
@@ -293,6 +311,16 @@ PersistentProtocol默认未ACK缓冲8 MiB/45s，超限abandon；接收Regular也
 | runtime崩溃          | receipt=uncertain，等待事实恢复                  | 监督报告，恢复facts/投影     | 不自动重复工作                    |
 
 实施时给出并验证单帧/批次字节、WAL容量、未确认窗、客户端缓冲、保留窗、退避/jitter的数值/config schema。心跳可取30s、退避上限60s；timer只触发探测/恢复，不证明死亡。容量耗尽禁止无限内存和静默丢记录。
+
+**修订（2026-10-18 恢复慢实测）**：provider pause/resume 会冻结执行节点，暂停前积累的重连退避会在恢复后继续生效（实测 resume 确认到 attachment 回连 17–30s）。两条修正：
+
+- **退避上限降为 10s**（`MAX_RECONNECT_DELAY_MS=10_000`，1s→2s→4s→8s→10s 封顶 + 0..25% jitter）：交互式云任务不应等 60s 档；单沙箱场景下 10s 上限不会形成重连风暴。
+- **暂停时主动关闭 bridge socket**：控制面在 provider pause 确认后除 detach 注册表外还要关闭当前连接，执行节点在恢复时从退避起点（1s）重连，而不是等暂停前累计的档位。
+
+**实施回写（2026-10-17，R5）**：
+
+- **批次按字节切分**：执行节点按记录数上限（`CLOUD_PROJECTION_BATCH_MAX_RECORDS`=256）与**编码后 UTF-8 字节数**（安全阈值 6MiB，低于 transport 8MiB 上限）切分，一个 tick 可发多个 `projection.batch`；单条记录自身超限时发不可重试 `bridge.fault`（`payload_too_large`）并停止本连接投影投递，记录保留在 WAL，不整帧静默 drop（`packages/server/src/cloud/execution/app/bridgeHeartbeat.ts:30-122`）。
+- **入站串行**：每条 bridge 连接一条入站 promise 链，上一帧处理完成后才处理下一帧；连接关闭后置位并丢弃排队帧（`packages/server/src/cloud/adapters/ws/bridgeChannel.ts:237-266`）。修复前慢帧（projection.batch/checkpoint.result/hello 凭据 CAS）会让后到帧先处理，破坏 hello 与 ready 的鉴权顺序与批次顺序。
 
 ## 9. 安全与授权
 

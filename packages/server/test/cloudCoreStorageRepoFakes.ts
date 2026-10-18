@@ -6,7 +6,6 @@
 import type {
   CloudCheckpointRecord,
   CloudProjectRecord,
-  CloudProjectionRecord,
   CloudRunRecord,
   CloudStreamCursor,
   CloudTaskInputRecord,
@@ -17,11 +16,14 @@ import type {
   CursorPage,
   InputPayloadRead,
   InputRepo,
+  ProjectionHistoryRecord,
   ProjectionRepo,
   RunCredentialRepo,
 } from "../src/cloud/app/ports/storagePort.js";
+import type { ClockPort } from "../src/cloud/app/ports/clockPort.js";
 
 import { canAdvanceDeliveryStatus } from "../src/cloud/domain/deliveryStatus.js";
+import { pendingInteractionCountFromProjectionPayload } from "../src/cloud/domain/projectionInteractions.js";
 import {
   advanceContiguousWatermark,
   projectionCoveredInterval,
@@ -34,13 +36,22 @@ export interface StorageFakeState {
   inputsByKey: Map<string, CloudTaskInputRecord>;
   acceptanceSeq: Map<string, number>;
   checkpoints: CloudCheckpointRecord[];
-  projectionRecords: CloudProjectionRecord[];
+  projectionRecords: ProjectionHistoryRecord[];
   revokedRuns: string[];
   quotaReleases: string[];
   payloadText: Map<string, string>;
   credentials: Map<string, { credentialHash: string; rotationId: string; expiresAt?: number }>;
   cursors: Map<string, CloudStreamCursor>;
-  snapshots: Map<string, { logEpoch: string; coveredSourceSeq: number; snapshot: unknown }>;
+  snapshots: Map<
+    string,
+    {
+      topic: string;
+      logEpoch: string;
+      coveredSourceSeq: number;
+      snapshot: unknown;
+      createdAt: number;
+    }
+  >;
   taskRevisionBumps: { value: number };
 }
 
@@ -144,7 +155,7 @@ export function createInputsRepo(state: StorageFakeState): InputRepo {
   };
 }
 
-export function createProjectionsRepo(state: StorageFakeState): ProjectionRepo {
+export function createProjectionsRepo(state: StorageFakeState, clock: ClockPort): ProjectionRepo {
   const { projectionRecords, cursors, snapshots, checkpoints } = state;
   return {
     async appendBatch(records) {
@@ -175,7 +186,7 @@ export function createProjectionsRepo(state: StorageFakeState): ProjectionRepo {
           }
           continue;
         }
-        projectionRecords.push(record);
+        projectionRecords.push({ ...record, ingestedAt: clock.now() });
         appended += 1;
         appendedRunIds.add(record.runId);
         // 与真实 SQLite 仓库同一水位口径（domain/projectionSequence.ts 的区间链）：
@@ -217,13 +228,31 @@ export function createProjectionsRepo(state: StorageFakeState): ProjectionRepo {
       return { items, nextCursor: undefined, resyncRequired: false };
     },
     async readSnapshot(request) {
-      return snapshots.get(`${request.taskId}|${request.topic}`) ?? null;
+      // 与真实仓库同一族名语义：含 "/" 精确匹配；族名匹配该前缀下 covered 最大的快照。
+      if (request.topic.includes("/")) {
+        return snapshots.get(`${request.taskId}|${request.topic}`) ?? null;
+      }
+      const candidates = [...snapshots.entries()]
+        .filter(([key]) => key.startsWith(`${request.taskId}|`))
+        .map(([, value]) => value)
+        .filter(
+          (value) => value.topic === request.topic || value.topic.startsWith(`${request.topic}/`),
+        )
+        .sort((left, right) => right.coveredSourceSeq - left.coveredSourceSeq);
+      return candidates[0] ?? null;
     },
     async writeSnapshot(request) {
-      snapshots.set(`${request.taskId}|${request.topic}`, {
+      const key = `${request.taskId}|${request.topic}`;
+      const current = snapshots.get(key);
+      // 与真实仓库同一单调守卫（covered_source_seq 只增不减）；created_at 只在首次插入
+      // 时写入，后续覆盖沿用原值。
+      if (current && current.coveredSourceSeq > request.coveredSourceSeq) return;
+      snapshots.set(key, {
+        topic: request.topic,
         logEpoch: request.logEpoch,
         coveredSourceSeq: request.coveredSourceSeq,
         snapshot: request.snapshot,
+        createdAt: current?.createdAt ?? request.now,
       });
     },
     async ingestCursors(runId) {
@@ -236,10 +265,24 @@ export function createProjectionsRepo(state: StorageFakeState): ProjectionRepo {
     },
     async recordCheckpoint(checkpoint) {
       // 与真实 repo 同一语义（projections.recordCheckpoint 按 operation_id UPSERT）：
-      // 同一 operationId 的重试结果覆盖旧记录（C-1/D4-4 重试成功读最新状态的前提）。
+      // 同一 operationId 的重试结果覆盖旧记录（C-1/D4-4 重试成功读最新状态的前提）；
+      // 但 saved 是终态（R2，spec 15 §3）——迟到 failed/unknown 不得覆盖已确认保存。
       const index = checkpoints.findIndex((item) => item.operationId === checkpoint.operationId);
-      if (index >= 0) checkpoints[index] = checkpoint;
-      else checkpoints.push(checkpoint);
+      if (index >= 0) {
+        if (checkpoints[index]?.state === "saved") return;
+        checkpoints[index] = checkpoint;
+      } else checkpoints.push(checkpoint);
+    },
+    async readLatestPendingInteractionCount(runId) {
+      // 与真实 SQLite repo 同口径：按 run 过滤，倒序取最近一条声明 pendingInteractions
+      // 的投影（fake 的插入顺序即 event_seq 顺序），解析复用 domain 唯一解析器。
+      for (let index = projectionRecords.length - 1; index >= 0; index -= 1) {
+        const record = projectionRecords[index];
+        if (!record || record.runId !== runId) continue;
+        const count = pendingInteractionCountFromProjectionPayload(record.payload);
+        if (count !== null) return count;
+      }
+      return 0;
     },
   };
 }

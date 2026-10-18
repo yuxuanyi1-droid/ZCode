@@ -22,6 +22,11 @@ import {
   type StartCloudServerOptions,
 } from "../src/cloud/adapters/entry-cloud-server.js";
 import { buildCloudTaskWorkspacePath } from "../src/cloud/domain/workspacePath.js";
+import {
+  isAllowedBridgeChannelOrigin,
+  isAllowedTaskChannelOrigin,
+  isLoopbackDevOrigin,
+} from "../src/cloud/adapters/http/wsRoutes.js";
 import type { CloudAuthMode, CloudEntryConfig } from "../src/cloud/adapters/entry-cloud-config.js";
 import type { CloudDeploymentSecrets } from "../src/cloud/adapters/entry-cloud-secrets.js";
 import type { LoopSchedulerPort } from "../src/cloud/app/ports/loopSchedulerPort.js";
@@ -121,8 +126,11 @@ interface WsClient {
   closed(): { code: number; reason: string } | undefined;
 }
 
-function connectCloudWs(url: string): Promise<WsClient> {
-  const socket = new WebSocket(url);
+function connectCloudWs(url: string, options: { origin?: string } = {}): Promise<WsClient> {
+  const socket = new WebSocket(
+    url,
+    options.origin === undefined ? undefined : { headers: { origin: options.origin } },
+  );
   const frames: string[] = [];
   let closed: { code: number; reason: string } | undefined;
   const waiters: { type: string; resolve: (frame: Record<string, unknown>) => void }[] = [];
@@ -437,6 +445,52 @@ test("cloud bridge 通道：真 WebSocket 握手建立 attachment，任务通道
   });
 });
 
+test("cloud bridge：同 socket 重复 hello 返回原 epoch/rotationId，不重复消费票（02 §5.1）", async () => {
+  await withAssembledServer(async ({ wsUrl, seedTask }) => {
+    await seedTask({ taskId: TASK_ID, ownerPrincipalId: PRINCIPAL, runId: RUN_ID });
+
+    const hello = (): string =>
+      JSON.stringify({
+        protocolVersion: 1,
+        type: "bridge.hello",
+        address: {
+          taskId: TASK_ID,
+          runId: RUN_ID,
+          runGeneration: 1,
+          workspaceIdentity: `cloud-task:${TASK_ID}`,
+          workspacePath: WORKSPACE_PATH,
+          remoteSessionId: `remote-${RUN_ID}`,
+        },
+        helloAttemptId: HELLO_ATTEMPT_ID,
+        credentialToken: TICKET,
+        candidateNextResumeToken: "candidate-1",
+        runtimeIncarnation: "incarnation-1",
+      });
+    const bridge = await connectCloudWs(`${wsUrl}/ws/cloud/bridge/${RUN_ID}`);
+    const frames = (): Record<string, unknown>[] =>
+      bridge.frames
+        .map((item) => safeParse(item))
+        .filter((frame): frame is Record<string, unknown> => frame !== undefined);
+    const welcomes = () => frames().filter((frame) => frame["type"] === "bridge.welcome");
+    try {
+      bridge.socket.send(hello());
+      const first = await bridge.waitForFrame("bridge.welcome");
+      await bridge.waitForFrame("bootstrap.config");
+
+      // 同一 socket 重放同一 hello：必须返回原 welcome 事实（不再次 consume，否则票已切
+      // 到候选 hash，会以 unauthenticated 关闭）。
+      bridge.socket.send(hello());
+      await waitUntil(() => welcomes().length >= 2, "duplicate welcome");
+      const second = welcomes()[1]!;
+      assert.equal(second["connectionEpoch"], first["connectionEpoch"], "同 socket 不递增 epoch");
+      assert.equal(second["rotationId"], first["rotationId"], "重发原 rotationId");
+      assert.equal(bridge.closed(), undefined, "幂等重放不得关闭连接");
+    } finally {
+      bridge.socket.close();
+    }
+  });
+});
+
 test("lite-token 豁免只作用于 bridge：其余通道与 API 行为不变", async () => {
   await withAssembledServer(async ({ baseUrl, wsUrl, seedTask }) => {
     await seedTask({ taskId: TASK_ID, ownerPrincipalId: PRINCIPAL });
@@ -569,4 +623,103 @@ test("anonymous 不波及 bridge：无票/错票 hello 仍被 run-scoped 鉴权�
     },
     { authMode: "anonymous" },
   );
+});
+
+test("WS Origin 白名单（03 §3）：publicOrigin / 回环开发源放行，跨站源 403 且不 upgrade", async () => {
+  await withAssembledServer(async ({ wsUrl, seedTask }) => {
+    await seedTask({ taskId: TASK_ID, ownerPrincipalId: PRINCIPAL });
+
+    // 精确等于部署 publicOrigin：放行，进入控制面判定（draft 无 run → 4404 no-active-run）。
+    const sameOrigin = await connectCloudWs(
+      `${wsUrl}/ws/cloud/tasks/${TASK_ID}?token=${AUTH_TOKEN}`,
+      {
+        origin: "http://127.0.0.1:1",
+      },
+    );
+    const sameOriginClose = await sameOrigin.waitForClose();
+    assert.equal(sameOriginClose.code, 4404);
+    assert.match(sameOriginClose.reason, /no-active-run/);
+
+    // 回环开发源（localhost/127.0.0.1/[::1] 任意端口）：放行。
+    for (const origin of ["http://localhost:5173", "https://127.0.0.1:8443", "http://[::1]:3000"]) {
+      const taskChannel = await connectCloudWs(
+        `${wsUrl}/ws/cloud/tasks/${TASK_ID}?token=${AUTH_TOKEN}`,
+        { origin },
+      );
+      const closed = await taskChannel.waitForClose();
+      assert.equal(closed.code, 4404, `${origin} 应通过 Origin 白名单进入控制面判定`);
+      assert.match(closed.reason, /no-active-run/);
+    }
+
+    // 跨站 Origin：403 拒绝，连接未升级（不会进入控制面，更不会建 bridge 流）。
+    await assert.rejects(
+      () =>
+        connectCloudWs(`${wsUrl}/ws/cloud/tasks/${TASK_ID}?token=${AUTH_TOKEN}`, {
+          origin: "https://evil.example",
+        }),
+      (error: unknown) => error instanceof Error && /403/.test(error.message),
+    );
+  });
+});
+
+test("bridge 通道只接受无 Origin 的执行节点连接（03 §3 防跨站 WebSocket）", async () => {
+  await withAssembledServer(async ({ wsUrl, seedTask }) => {
+    await seedTask({ taskId: TASK_ID, ownerPrincipalId: PRINCIPAL, runId: RUN_ID });
+
+    // 浏览器 Origin（即使是部署自身的 publicOrigin）也不得升级执行节点通道。
+    for (const origin of ["http://127.0.0.1:1", "https://evil.example"]) {
+      await assert.rejects(
+        () => connectCloudWs(`${wsUrl}/ws/cloud/bridge/${RUN_ID}`, { origin }),
+        (error: unknown) => error instanceof Error && /403/.test(error.message),
+        `${origin} 不得升级 bridge 通道`,
+      );
+    }
+
+    // 无 Origin（执行节点出站连接）仍可升级：hello 前的连接可用性不变。
+    const bridge = await connectCloudWs(`${wsUrl}/ws/cloud/bridge/${RUN_ID}`);
+    bridge.socket.close();
+  });
+});
+
+test("Origin 判定纯逻辑：无 Origin / publicOrigin / 回环开发源放行，其余拒绝", () => {
+  const publicOrigin = "https://cloud.example.com";
+  // 无 Origin（原生客户端）放行。
+  assert.equal(isAllowedTaskChannelOrigin(undefined, publicOrigin), true);
+  assert.equal(isAllowedTaskChannelOrigin("", publicOrigin), true);
+  // 精确等于部署 origin（默认端口/主机大小写按 URL 规范归一后等价）。
+  assert.equal(isAllowedTaskChannelOrigin(publicOrigin, publicOrigin), true);
+  assert.equal(isAllowedTaskChannelOrigin("https://cloud.example.com:443", publicOrigin), true);
+  assert.equal(isAllowedTaskChannelOrigin("https://CLOUD.example.com", publicOrigin), true);
+  // 不同源（协议/主机/端口任一不同）拒绝。
+  assert.equal(isAllowedTaskChannelOrigin("http://cloud.example.com", publicOrigin), false);
+  assert.equal(isAllowedTaskChannelOrigin("https://cloud.example.com:8443", publicOrigin), false);
+  // 回环开发源：localhost/127.0.0.1/[::1] 的 http 与 https、任意端口。
+  for (const origin of [
+    "http://localhost:5173",
+    "http://localhost",
+    "https://localhost:8443",
+    "http://127.0.0.1:3000",
+    "https://127.0.0.1",
+    "http://[::1]:8080",
+    "https://[::1]",
+  ]) {
+    assert.equal(isLoopbackDevOrigin(origin), true, `${origin} 是回环开发源`);
+    assert.equal(isAllowedTaskChannelOrigin(origin, publicOrigin), true, `${origin} 应放行`);
+  }
+  // 非回环源、伪装成回环的域名、非法 origin、非 http(s) 协议：拒绝。
+  for (const origin of [
+    "https://evil.example",
+    "https://localhost.evil.example",
+    "http://127.0.0.2:3000",
+    "http://192.168.1.10:3000",
+    "file://localhost",
+    "not-an-origin",
+  ]) {
+    assert.equal(isAllowedTaskChannelOrigin(origin, publicOrigin), false, `${origin} 应拒绝`);
+  }
+  // bridge 通道只接受无 Origin 的执行节点连接。
+  assert.equal(isAllowedBridgeChannelOrigin(undefined), true);
+  assert.equal(isAllowedBridgeChannelOrigin(""), true);
+  assert.equal(isAllowedBridgeChannelOrigin(publicOrigin), false);
+  assert.equal(isAllowedBridgeChannelOrigin("http://localhost:5173"), false);
 });

@@ -42,6 +42,7 @@ function buildApp(overrides: Partial<CloudHttpRouteDeps> = {}) {
     router: context.plane.router,
     bridge: bridgeStub,
     principalId: TEST_PRINCIPAL_ID,
+    publicOrigin: "https://cloud.example.test",
     githubConfigured: true,
     ...overrides,
   });

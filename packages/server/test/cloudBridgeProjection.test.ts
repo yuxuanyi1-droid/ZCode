@@ -16,7 +16,15 @@ import type {
 } from "../src/cloud/execution/app/projectionExporter.js";
 import { createRpcRelay } from "../src/cloud/execution/app/rpcRelay.js";
 import { createCloudCommandTransport } from "../src/cloud/execution/app/commandTransport.js";
-import type { AttachmentContext } from "../src/cloud/execution/app/ports.js";
+import {
+  PROJECTION_BATCH_MAX_BYTES,
+  startBridgeHeartbeat,
+} from "../src/cloud/execution/app/bridgeHeartbeat.js";
+import type {
+  AttachmentContext,
+  BridgeConnectionPort,
+  ExecutionClock,
+} from "../src/cloud/execution/app/ports.js";
 import { testLogger } from "./cloudBridgeFakes.js";
 import { createProjectionFake } from "./cloudExecutionFakes.js";
 
@@ -345,11 +353,13 @@ test("rpcRelay：浏览器 ChannelClient 经 rpc.* 帧往返，旧代际帧不�
   relay.handle({ ...frameFor("rpc.request", ""), connectionEpoch: 6 } as CloudRpcFrame, context);
   assert.equal(responses.length, before, "旧代际帧不得转发到本地 runtime");
   // 连接释放：清网络侧会话，保留 stdio（本地 channel 仍在，不重启 runtime）。
+  // releaseAll 现在逐流回发 rpc.close（checkpoint quiesce 必须通知控制面，02 §4）；
+  // 真实 socket 断连路径由 outbound holder 先行解绑，帧自然丢弃，不会误发。
   relay.releaseAll("disconnect");
   assert.deepEqual(
     responses.filter((frame) => frame.type === "rpc.close").length,
-    0,
-    "释放按设计不向浏览器回 close（连接已断）",
+    1,
+    "每条被释放的流回发 rpc.close",
   );
   browser.dispose();
 });
@@ -580,4 +590,199 @@ test("命令传输释放只作用于关闭的那条连接：其它 run / 新 epo
     );
   }
   transport.dispose();
+});
+
+// ── 02 §4：沙箱释放命令流后控制面必须重开 ──
+// 2026-10-13 V4r 真机：checkpoint quiesce 撕流后，控制面仍按 epoch 复用死流，append 超时。
+test("命令流被沙箱 rpc.close 后：下一次 ensureSession 重发 rpc.open（02 §4）", async () => {
+  const sent: CloudRpcFrame[] = [];
+  const context = {
+    runId: RUN_ID,
+    runGeneration: 1,
+    connectionEpoch: 21,
+    workspacePath: "/workspace/demo",
+    workspaceIdentity: `cloud-task:${TASK_ID}`,
+  };
+  const transport = createCloudCommandTransport({
+    logger: testLogger(),
+    streamId: "stream-command-close",
+    send: (frame) => {
+      sent.push(frame);
+      return true;
+    },
+    resolveContext: () => context,
+    timeoutMs: 20,
+  });
+  const run = () =>
+    transport.sendCommand({
+      taskId: TASK_ID,
+      runId: RUN_ID,
+      runGeneration: 1,
+      commandId: "5f14e45f-ceea-467a-9a1e-1f0d3b2a4c60",
+      envelope: {},
+    });
+  const opens = () => sent.filter((frame) => frame.type === "rpc.open").length;
+  try {
+    // 无应答方：开流成功后按超时收口（network_unknown），不伪装 sent。
+    assert.equal((await run()).status, "rejected");
+    assert.equal(opens(), 1, "第一次投递先开流");
+
+    transport.handleClose({
+      protocolVersion: 1,
+      type: "rpc.close",
+      runId: RUN_ID,
+      runGeneration: 1,
+      connectionEpoch: 21,
+      streamId: "stream-command-close",
+    });
+    assert.equal((await run()).status, "rejected");
+    assert.equal(opens(), 2, "沙箱释放流后下一次投递必须重发 rpc.open");
+
+    // stale close（旧 epoch）不得作废当前流。
+    transport.handleClose({
+      protocolVersion: 1,
+      type: "rpc.close",
+      runId: RUN_ID,
+      runGeneration: 1,
+      connectionEpoch: 20,
+      streamId: "stream-command-close",
+    });
+    assert.equal((await run()).status, "rejected");
+    assert.equal(opens(), 2, "stale close 不得触发重开");
+  } finally {
+    transport.dispose();
+  }
+});
+
+// ── P2：projection 批次按编码后字节数切分（2026-10-17 review R5）──
+const HEARTBEAT_TOPIC = "conversation/heartbeat-big";
+
+function bigRecord(seq: number, payloadChars: number) {
+  return {
+    schemaVersion: 1,
+    taskId: TASK_ID,
+    runId: RUN_ID,
+    runGeneration: 1,
+    runtimeIncarnation: "runtime-1",
+    topic: HEARTBEAT_TOPIC,
+    logEpoch: "epoch-1",
+    sourceSeq: seq,
+    kind: seq === 0 ? ("snapshot" as const) : ("delta" as const),
+    payload: {
+      kind: seq === 0 ? "snapshot" : "deltas",
+      text: "x".repeat(payloadChars),
+    },
+    contentHash: seq.toString(16).padStart(64, "0"),
+  };
+}
+
+/** 按 WAL 连续规则写入记录：首条 snapshot(0)，后续 delta 紧接上一 sourceSeq。 */
+function seedRecords(
+  projection: ReturnType<typeof createProjectionFake>,
+  count: number,
+  payloadChars: number,
+): void {
+  for (let seq = 0; seq < count; seq += 1) {
+    const result = projection.wal.accept(bigRecord(seq, payloadChars), seq === 0 ? 0 : seq - 1);
+    assert.equal(result.kind, "accepted", `record ${seq} 必须被 WAL 接受`);
+  }
+}
+
+function buildHeartbeat(
+  projection: ReturnType<typeof createProjectionFake>,
+  maxBytes?: number,
+): {
+  handle: ReturnType<typeof startBridgeHeartbeat>;
+  sent: string[];
+  frames(): Record<string, unknown>[];
+} {
+  const sent: string[] = [];
+  const connection: BridgeConnectionPort = {
+    send: (text) => sent.push(text),
+    onText: () => ({ dispose: () => undefined }),
+    onClose: () => ({ dispose: () => undefined }),
+    close: () => undefined,
+  };
+  // 手动时钟：tick 完成后不自动续拍，测试用 flush() 精确驱动每一拍。
+  const clock: ExecutionClock = {
+    now: () => 1_700_000_000_000,
+    wait: () => new Promise<void>(() => undefined),
+  };
+  const handle = startBridgeHeartbeat({
+    connection,
+    clock,
+    logger: testLogger(),
+    projection,
+    intervalMs: 1000,
+    batchSize: 128,
+    epoch: () => 7,
+    isReady: () => true,
+    runtimeFacts: () => ({ pid: 1234, incarnation: "runtime-1" }),
+    ...(maxBytes === undefined ? {} : { projectionMaxBytes: maxBytes }),
+  });
+  return {
+    handle,
+    sent,
+    frames: () => sent.map((text) => JSON.parse(text) as Record<string, unknown>),
+  };
+}
+
+test("projection 批次按 6MiB 字节上限切分：多条 512KiB 记录全部发送，每帧不超限", async () => {
+  const projection = createProjectionFake();
+  const heartbeat = buildHeartbeat(projection);
+  // 先让 start() 的自动 tick 跑完（WAL 为空），再用 flush 精确驱动含记录的批次。
+  await new Promise((resolve) => setImmediate(resolve));
+  seedRecords(projection, 20, 512 * 1024 - 64);
+  await heartbeat.handle.flush();
+  heartbeat.handle.dispose();
+
+  const batches = heartbeat.frames().filter((frame) => frame["type"] === "projection.batch");
+  assert.ok(batches.length >= 2, `20 条 512KiB 记录必须切分为多帧，实际 ${batches.length}`);
+  assert.equal(
+    batches.reduce((sum, batch) => sum + (batch["records"] as unknown[]).length, 0),
+    20,
+    "所有记录都必须发送，不得因整帧超限被 drop",
+  );
+  const batchTexts = heartbeat.sent.filter((text) => JSON.parse(text).type === "projection.batch");
+  for (const text of batchTexts) {
+    assert.ok(
+      Buffer.byteLength(text, "utf8") <= PROJECTION_BATCH_MAX_BYTES,
+      `单帧编码后必须 ≤ ${PROJECTION_BATCH_MAX_BYTES} 字节`,
+    );
+  }
+  // WAL 清理仍只由 ACK 驱动：发送后记录仍在，ACK 覆盖连续水位后才清空。
+  assert.equal(projection.wal.pending(100).length, 20, "发送后 ACK 前不得清空 WAL");
+  await projection.onAck({
+    topic: HEARTBEAT_TOPIC,
+    logEpoch: "epoch-1",
+    lastContiguousSourceSeq: 19,
+  });
+  assert.equal(projection.wal.pending(100).length, 0, "ACK 后才清理 WAL");
+});
+
+test("projection 单条记录超出发送预算：发不可重试 fault 并停止该流，不静默丢记录", async () => {
+  const projection = createProjectionFake();
+  const heartbeat = buildHeartbeat(projection, 1024);
+  await new Promise((resolve) => setImmediate(resolve));
+  seedRecords(projection, 1, 4096);
+  await heartbeat.handle.flush();
+  // 第二次 tick：流已停止，只发心跳，不重复 fault、不重试同一超限记录。
+  await heartbeat.handle.flush();
+  heartbeat.handle.dispose();
+
+  const frames = heartbeat.frames();
+  assert.equal(
+    frames.filter((frame) => frame["type"] === "projection.batch").length,
+    0,
+    "超限记录不得被静默组装成帧",
+  );
+  const faults = frames.filter((frame) => frame["type"] === "bridge.fault");
+  assert.equal(faults.length, 1, "同一超限记录只上报一次 fault（随后停止该流）");
+  assert.equal(faults[0]!["faultCode"], "payload_too_large");
+  assert.equal(faults[0]!["retryable"], false);
+  assert.ok(
+    frames.filter((frame) => frame["type"] === "bridge.heartbeat").length >= 2,
+    "fault 后心跳继续（连接保持可用）",
+  );
+  assert.equal(projection.wal.pending(10).length, 1, "记录保留在 WAL，等 ACK/人工处理");
 });

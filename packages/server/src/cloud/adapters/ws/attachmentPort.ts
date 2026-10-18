@@ -136,5 +136,17 @@ export function createBridgeAttachmentPort(deps: BridgeAttachmentPortDeps): Atta
     async currentAddress(runId) {
       return registry.current(runId)?.address ?? null;
     },
+
+    async isReady(runId) {
+      // 高频只读的连接事实，不加日志。
+      return registry.current(runId)?.ready === true;
+    },
+
+    async closeConnection(runId, reason) {
+      // 暂停后主动断开：让执行节点从退避起点重连，而不是把半开连接当网络故障一路退避。
+      const connection = connections.get(runId);
+      if (!connection) return;
+      connection.socket.close(1000, reason.slice(0, 120));
+    },
   };
 }

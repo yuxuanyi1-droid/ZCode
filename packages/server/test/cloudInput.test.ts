@@ -4,7 +4,11 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Hono } from "hono";
 import { attachReadySession, buildTestPlane } from "./cloudCoreFakes.js";
+import { buildCloudCommandEnvelope } from "../src/cloud/app/inputDelivery/envelope.js";
+import { registerCloudHttpRoutes } from "../src/cloud/adapters/http/routes.js";
+import type { CloudBridgeChannel } from "../src/cloud/adapters/ws/bridgeChannel.js";
 
 const PRINCIPAL = "00000000-0000-4000-8000-0000000000aa";
 
@@ -497,6 +501,124 @@ test("CP-06：ACK 丢失先置 uncertain，对账查到结果则落 admitted，�
   );
 });
 
+test("R2 dispatcher：delivering/uncertain 先 query，unknown 才用同 commandId 重投（15 §3、02 §6.3）", async () => {
+  const context = buildTestPlane();
+  const commandId = "00000000-0000-4000-8000-000000000111";
+  const { task, receipt } = await acceptedStart(context, commandId);
+  const runId = receipt.runId ?? "";
+  await context.plane.provisioning.create.runCreateOnce();
+  const run = await context.storage.runs.get(runId);
+  assert.ok(run);
+  await attachReadySession(context, {
+    taskId: task.taskId,
+    runId,
+    runGeneration: run.runGeneration,
+  });
+  await context.plane.runs.markReady({
+    taskId: task.taskId,
+    runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+
+  // 先制造 uncertain（传输结论未知），再对账：查询记录与结果由用例控制。
+  context.attachmentPort.sendResult = {
+    status: "rejected",
+    code: "bridge_disconnected",
+    reason: "closed",
+  };
+  const first = await context.plane.delivery.dispatchTask(task.taskId);
+  assert.equal(first.outcomes[0]?.result, "uncertain");
+  assert.equal(context.attachmentPort.sent.length, 1);
+  assert.equal(
+    (await context.storage.inputs.get(task.taskId, commandId))?.deliveryStatus,
+    "uncertain",
+  );
+
+  const queries: {
+    taskId: string;
+    runId: string;
+    runGeneration: number;
+    commandId: string;
+  }[] = [];
+  const originalQuery = context.runtimeCommands.queryCommand.bind(context.runtimeCommands);
+  context.runtimeCommands.queryCommand = async (request) => {
+    queries.push(request);
+    return originalQuery(request);
+  };
+
+  // ① unknown：确认 runtime 没有该命令事实 → 退回 accepted 并用**同一 commandId** 重投一次。
+  context.runtimeCommands.result = { status: "unknown" };
+  context.attachmentPort.sendResult = { status: "sent" };
+  const resent = await context.plane.delivery.dispatchTask(task.taskId);
+  assert.equal(resent.outcomes[0]?.result, "sent");
+  assert.equal(queries.length, 1, "重投前必须查询 runtime 命令事实");
+  assert.deepEqual(queries[0], {
+    taskId: task.taskId,
+    runId,
+    runGeneration: run.runGeneration,
+    commandId,
+  });
+  assert.equal(context.attachmentPort.sent.length, 2, "unknown 才重投一次");
+  assert.equal(context.attachmentPort.sent[1]?.commandId, commandId, "重投不得生成新 commandId");
+  assert.equal(
+    (await context.storage.inputs.get(task.taskId, commandId))?.deliveryStatus,
+    "delivering",
+  );
+
+  // ② found：直接按原 ACK 收口，不重发。
+  context.runtimeCommands.result = {
+    status: "found",
+    ack: {
+      commandId,
+      status: "accepted",
+      revisionAtDecision: 1,
+      result: { type: "createSession", sessionId: "runtime-session-r2" },
+    },
+  };
+  const found = await context.plane.delivery.dispatchTask(task.taskId);
+  assert.equal(found.outcomes[0]?.result, "skipped");
+  assert.equal(context.attachmentPort.sent.length, 2, "found 不得重发");
+  const admitted = await context.storage.inputs.get(task.taskId, commandId);
+  assert.equal(admitted?.deliveryStatus, "admitted");
+  assert.equal(admitted?.runtimeSessionId, "runtime-session-r2");
+
+  // ③ unavailable：保持 uncertain，不重投。
+  const appendCommandId = "00000000-0000-4000-8000-000000000112";
+  const append = await context.plane.inputs.submit({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+    source: "rpc",
+    request: {
+      intent: "append",
+      commandId: appendCommandId,
+      prompt: "next",
+      expectedRunGeneration: run.runGeneration,
+    },
+  });
+  assert.equal(append.ok, true);
+  await context.storage.inputs.markDelivery({
+    taskId: task.taskId,
+    commandId: appendCommandId,
+    to: "uncertain",
+    now: context.clock.now(),
+  });
+  context.runtimeCommands.result = { status: "unavailable", retryable: true };
+  const unavailable = await context.plane.delivery.dispatchTask(task.taskId);
+  assert.equal(unavailable.outcomes[0]?.result, "wait");
+  assert.equal(unavailable.outcomes[0]?.reason, "runtime-unavailable");
+  assert.equal(
+    context.attachmentPort.sent.filter((item) => item.commandId === appendCommandId).length,
+    0,
+    "运行时不可达不得重投",
+  );
+  assert.equal(
+    (await context.storage.inputs.get(task.taskId, appendCommandId))?.deliveryStatus,
+    "uncertain",
+    "unavailable 保持不确定",
+  );
+});
+
 test("API 旧代际 ACK 被拒绝（08 §4.2、CP-07）", async () => {
   const context = buildTestPlane();
   const { task, receipt } = await acceptedStart(context, "00000000-0000-4000-8000-00000000010f");
@@ -544,57 +666,154 @@ test("02 §6.2：duplicate/failed ACK 的投递状态映射", async () => {
   assert.equal(input?.lastError, "fault.test");
 });
 
-test("CP-14：cancel 不误报 cancelled；未开始投递的输入可幂等撤销", async () => {
+test("CP-14：cancel 不误报 cancelled；非首条 accepted 输入可幂等撤销", async () => {
   const context = buildTestPlane();
-  const { task } = await acceptedStart(context, "00000000-0000-4000-8000-000000000111");
+  const { task, receipt } = await acceptedStart(context, "00000000-0000-4000-8000-000000000111");
+  const runId = receipt.runId ?? "";
+  // 首条输入由 start 固定；先让 Run ready，后续 append 才能被接纳（11 §7）。
+  await context.plane.provisioning.create.runCreateOnce();
+  const run = await context.storage.runs.get(runId);
+  assert.ok(run);
+  await attachReadySession(context, {
+    taskId: task.taskId,
+    runId,
+    runGeneration: run.runGeneration,
+  });
+  await context.plane.runs.markReady({
+    taskId: task.taskId,
+    runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+  const append = (commandId: string) =>
+    context.plane.inputs.submit({
+      principalId: PRINCIPAL,
+      taskId: task.taskId,
+      source: "rpc",
+      request: {
+        intent: "append",
+        commandId,
+        prompt: "more",
+        expectedRunGeneration: run.runGeneration,
+      },
+    });
+
+  const appendId = "00000000-0000-4000-8000-00000000011b";
+  const acceptedAppend = await append(appendId);
+  assert.equal(acceptedAppend.ok, true, acceptedAppend.ok ? "" : `${acceptedAppend.code}`);
   const cancelled = await context.plane.inputControl.cancelInput({
     principalId: PRINCIPAL,
     taskId: task.taskId,
-    commandId: "00000000-0000-4000-8000-000000000111",
+    commandId: appendId,
   });
   assert.equal(cancelled.ok, true);
   assert.equal(cancelled.ok && cancelled.value.deliveryStatus, "cancelled");
   const again = await context.plane.inputControl.cancelInput({
     principalId: PRINCIPAL,
     taskId: task.taskId,
-    commandId: "00000000-0000-4000-8000-000000000111",
+    commandId: appendId,
   });
   assert.equal(again.ok && again.value.deliveryStatus, "cancelled", "幂等撤销");
 
   // 已投递但结果未知：运行时不可达时不报 cancelled（02 §6.3）。
-  const second = await acceptedStart(context, "00000000-0000-4000-8000-000000000112");
+  const uncertainId = "00000000-0000-4000-8000-00000000011c";
+  const uncertainAppend = await append(uncertainId);
+  assert.equal(uncertainAppend.ok, true);
   await context.storage.inputs.markDelivery({
-    taskId: second.task.taskId,
-    commandId: "00000000-0000-4000-8000-000000000112",
+    taskId: task.taskId,
+    commandId: uncertainId,
     to: "uncertain",
-    runId: second.receipt.runId,
+    runId,
     now: context.clock.now(),
   });
   context.runtimeCommands.result = { status: "unavailable", retryable: true };
   const unknown = await context.plane.inputControl.cancelInput({
     principalId: PRINCIPAL,
-    taskId: second.task.taskId,
-    commandId: "00000000-0000-4000-8000-000000000112",
+    taskId: task.taskId,
+    commandId: uncertainId,
   });
   assert.equal(unknown.ok, false);
   assert.equal(unknown.ok === false && unknown.reason, "input-ack-unknown");
 
   // 已 admitted：取消需要独立的幂等 runtime 命令（持久记录端口未冻结，见 CR-3）。
-  const admitted = await acceptedStart(context, "00000000-0000-4000-8000-000000000113");
+  const admittedId = "00000000-0000-4000-8000-00000000011d";
+  const admittedAppend = await append(admittedId);
+  assert.equal(admittedAppend.ok, true);
   await context.storage.inputs.markDelivery({
-    taskId: admitted.task.taskId,
-    commandId: "00000000-0000-4000-8000-000000000113",
+    taskId: task.taskId,
+    commandId: admittedId,
     to: "admitted",
-    runId: admitted.receipt.runId,
+    runId,
     now: context.clock.now(),
   });
   const requiresRuntimeCancel = await context.plane.inputControl.cancelInput({
     principalId: PRINCIPAL,
-    taskId: admitted.task.taskId,
-    commandId: "00000000-0000-4000-8000-000000000113",
+    taskId: task.taskId,
+    commandId: admittedId,
   });
   assert.equal(requiresRuntimeCancel.ok, false);
   assert.equal(requiresRuntimeCancel.ok === false && requiresRuntimeCancel.code, "not_implemented");
+});
+
+test("2026-10-18：首条输入在 runtime admission 前禁止取消（409 not_ready/first-input-not-cancellable）", async () => {
+  const context = buildTestPlane();
+  const firstCommandId = "00000000-0000-4000-8000-00000000011e";
+  const { task, receipt } = await acceptedStart(context, firstCommandId);
+
+  // draft start 的输入已 accepted：取消被拒绝，输入保持 accepted（不产生 cancelled 回执）。
+  const rejected = await context.plane.inputControl.cancelInput({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+    commandId: firstCommandId,
+  });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.ok === false && rejected.code, "not_ready");
+  assert.equal(rejected.ok === false && rejected.reason, "first-input-not-cancellable");
+  const stillAccepted = await context.storage.inputs.get(task.taskId, firstCommandId);
+  assert.equal(stillAccepted?.deliveryStatus, "accepted", "首条取消被拒后仍为 accepted");
+
+  // 同一服务的幂等分支不被首条保护改写：首条即使被环境收口为 rejected，重放取消仍回原 receipt。
+  await context.storage.inputs.markDelivery({
+    taskId: task.taskId,
+    commandId: firstCommandId,
+    to: "rejected",
+    runId: receipt.runId,
+    lastError: "environment-preparation-failed",
+    now: context.clock.now(),
+  });
+  const replay = await context.plane.inputControl.cancelInput({
+    principalId: PRINCIPAL,
+    taskId: task.taskId,
+    commandId: firstCommandId,
+  });
+  assert.equal(replay.ok, true);
+  assert.equal(replay.ok && replay.value.deliveryStatus, "rejected", "幂等返回原 receipt");
+
+  // HTTP 层：同一拒绝映射为 409 + 既有错误信封（not_ready → 409，03 §6）。
+  const context2 = buildTestPlane();
+  const started = await acceptedStart(context2, "00000000-0000-4000-8000-00000000011f");
+  const app = new Hono();
+  registerCloudHttpRoutes(app, {
+    plane: context2.plane,
+    router: context2.plane.router,
+    bridge: {} as unknown as CloudBridgeChannel,
+    principalId: PRINCIPAL,
+    publicOrigin: "https://cloud.example.test",
+    githubConfigured: true,
+  });
+  const response = await app.request(
+    `/api/cloud/tasks/${started.task.taskId}/inputs/00000000-0000-4000-8000-00000000011f/cancel`,
+    { method: "POST" },
+  );
+  assert.equal(response.status, 409);
+  const envelope = (await response.json()) as {
+    code: string;
+    message: string;
+    details?: { reason?: string };
+  };
+  assert.equal(envelope.code, "not_ready");
+  assert.equal(envelope.message, "first-input-not-cancellable");
+  assert.equal(envelope.details?.reason, "first-input-not-cancellable");
 });
 
 test("交互决定：持久记录 + 围栏 + 独立 cancelCommandId（03 §7.2、02 §6.3）", async () => {
@@ -993,7 +1212,7 @@ test("complete_requested 后台 sweep 在 run 终态且输入收口后自动 com
 
 test("start 接纳事务提交后 create worker 即可读硬期限（D4-7，无事务后补写窗口）", async () => {
   const context = buildTestPlane();
-  const { task, receipt } = await acceptedStart(context, "00000000-0000-4000-8000-00000000022a");
+  const { receipt } = await acceptedStart(context, "00000000-0000-4000-8000-00000000022a");
   const run = await context.storage.runs.get(receipt.runId ?? "");
   assert.ok(run);
   // fake driver：maxLifetimeSeconds=3600、deadlineSource=provider → 硬期限 = 接纳时刻 + 1h，
@@ -1001,4 +1220,56 @@ test("start 接纳事务提交后 create worker 即可读硬期限（D4-7，无�
   assert.equal(run.hardDeadlineAt, context.clock.now() + 3_600_000);
   assert.equal(run.deadlineEstimate, undefined);
   assert.equal(run.deadlineConfidence, undefined);
+});
+
+// ── 02 §2 / §6.2：createSession 必须携带控制面可信 workspacePath ──
+// 2026-10-13 V4r 真机：envelope 只带 cloud-task:<id>，CLI 把身份当本地目录，沙箱 cwd 被
+// 污染成 <cwd>/cloud-task:<id>（bash spawn ENOENT / Read 失败）。路径必须来自 attachment
+// 事实；拿不到时 createSession 构造 fail-closed，不降级发无路径信封。
+
+test("createSession envelope：payload 携带可信 workspacePath", () => {
+  const built = buildCloudCommandEnvelope({
+    taskId: "00000000-0000-4000-8000-0000000002a1",
+    commandId: "00000000-0000-4000-8000-0000000002a2",
+    kind: "createSession",
+    prompt: "go",
+    workspaceIdentity: "cloud-task:00000000-0000-4000-8000-0000000002a1",
+    workspacePath: "/workspace/demo",
+    now: 1_700_000_000_000,
+  });
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+  const payload = built.envelope.payload as { workspaceId: string; workspacePath?: string };
+  assert.equal(payload.workspaceId, "cloud-task:00000000-0000-4000-8000-0000000002a1");
+  assert.equal(payload.workspacePath, "/workspace/demo");
+});
+
+test("createSession envelope：attachment 缺 workspacePath 时构造失败（missing-workspace-path）", () => {
+  for (const workspacePath of [undefined, ""]) {
+    const built = buildCloudCommandEnvelope({
+      taskId: "00000000-0000-4000-8000-0000000002b1",
+      commandId: "00000000-0000-4000-8000-0000000002b2",
+      kind: "createSession",
+      prompt: "go",
+      workspaceIdentity: "cloud-task:00000000-0000-4000-8000-0000000002b1",
+      ...(workspacePath === undefined ? {} : { workspacePath }),
+      now: 1_700_000_000_000,
+    });
+    assert.deepEqual(built, { ok: false, reason: "missing-workspace-path" });
+  }
+});
+
+test("sendText envelope：不要求 workspacePath（既有语义不变）", () => {
+  const built = buildCloudCommandEnvelope({
+    taskId: "00000000-0000-4000-8000-0000000002c1",
+    commandId: "00000000-0000-4000-8000-0000000002c2",
+    kind: "sendText",
+    prompt: "next",
+    workspaceIdentity: "cloud-task:00000000-0000-4000-8000-0000000002c1",
+    runtimeSessionId: "runtime-session-1",
+    now: 1_700_000_000_000,
+  });
+  assert.equal(built.ok, true);
+  if (!built.ok) return;
+  assert.equal("workspacePath" in (built.envelope.payload as Record<string, unknown>), false);
 });

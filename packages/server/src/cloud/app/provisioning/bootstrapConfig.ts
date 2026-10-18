@@ -86,8 +86,13 @@ export function createBootstrapConfigSender(
       if (run.status === "stopped" || run.status === "expired" || run.status === "failed") {
         return fail("stale", "run-terminal");
       }
-      if (run.stopRequested) {
-        // 停止屏障：不再向该 run 下发配置（08 §8.1、CT-15）。
+      // 修复依据（2026-10-18 停止无响应实测）：停止屏障只禁止「启动新工作」，不能
+      // 拒绝正在停止的 run 重装自举配置。drain 会通知 supervisor 收口并触发保存；
+      // supervisor 连接断开重连后必须重新走 welcome → bootstrap.config → ready，否则
+      // `checkpoint.request` 被 `bootstrapConfigSent` 前置拒绝，保存永远发不出去，
+      // run 卡在 draining（旧实现在此自锁）。provisioning + stopRequested 仍拒绝：
+      // 那才是「不要再拉起 Agent」的语义（01 §5.1、08 §8.1）。
+      if (run.stopRequested && run.status === "provisioning") {
         return fail("recovery_required", "stop-requested");
       }
       const session = registry.current(run.runId);

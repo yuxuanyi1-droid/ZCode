@@ -17,8 +17,10 @@
  * - `reopen`：active/failed、无有效写 run、基线已冻结。
  * - `extend`：未终态 run、有 provider handle、且 provider 明确支持续期。
  * - `complete`：active（必要时先 drain，进行中显示进度；08 §9）。
- * - `archive`：未归档且无活动写 run；例外（08 §3.2 修订 2026-10-10）：paused run 放行——
- *   归档是用户结束任务的显式意图，服务端自动推进暂停中停止后完成归档。
+ * - `archive`：未归档即可（2026-10-18 用户决议：归档对任何非 archived 状态可用，不再要求
+ *   「无活动写 run」）。存在未终态 run 时服务端先持久停止意图并经 provider terminate 停止
+ *   运行环境（不等待 checkpoint），再立即归档；终止未确认仍归档，run 留 draining 由既有
+ *   stop/compensation sweep 收口。
  * - `reactivate`：completed、无活动 run、PR 未 merged（PR 事实不可得时不投影）。
  * - `restore`：archived 且有 archivedFromStatus。
  */
@@ -93,11 +95,10 @@ export function deriveTaskActions(facts: TaskActionFacts): CloudTaskAction[] {
   // 完成 stop 终态收口）——投影与执行同表，paused 时不给 complete 入口。
   if (task.status === "active" && run?.status !== "paused") actions.push("complete");
 
-  // 归档（08 §3.2/§8.2 修订 2026-10-10：archive on paused run）：归档是用户结束任务的
-  // 显式意图，paused run 由服务端自动推进暂停中停止（terminate，dataAtRisk 如实标注）
-  // 后完成归档，投影放行；其余未终态 run（ready/provisioning/draining/disconnected）
-  // 仍 409 引导先停止——投影与 archiveTask 执行同表。
-  if (task.status !== "archived" && (!run || run.status === "paused")) actions.push("archive");
+  // 归档（03 §6 / 08 §3.2 修订 2026-10-18：归档对任何非 archived 状态可用）：不再按
+  // 活动 run 或 run=paused 限制投影。服务端在存在未终态 run 时会先写停止屏障并 terminate
+  // 沙箱（不等待保存）再归档；投影与 archiveTask 执行同表。
+  if (task.status !== "archived") actions.push("archive");
 
   // 重新激活：completed、无活动 run，且 PR 未 merged（PR 事实不可得时不投影）。
   if (task.status === "completed" && !run && reactivateAllowed(task, facts.artifact)) {

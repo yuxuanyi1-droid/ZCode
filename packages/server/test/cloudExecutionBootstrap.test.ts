@@ -7,6 +7,7 @@ import test from "node:test";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { CloudBootstrapPreferences } from "@zcode/shared";
 import { createBootstrap, type Bootstrap } from "../src/cloud/execution/app/bootstrap.js";
 import { createCheckpoint } from "../src/cloud/execution/app/checkpoint.js";
 import { createProjectionExporter } from "../src/cloud/execution/app/projectionExporter.js";
@@ -67,7 +68,20 @@ function buildBootstrap(options: {
   appliedGeneration?: number | null;
   /** 启动后立即死亡：start 仍成功，但 facts() 已无 PID。 */
   deadAfterStart?: boolean;
-}): { bootstrap: Bootstrap; runner: ReturnType<typeof createGitRunnerFake>; runtime: RuntimeFake } {
+}): {
+  bootstrap: Bootstrap;
+  runner: ReturnType<typeof createGitRunnerFake>;
+  runtime: RuntimeFake;
+  provisioning: {
+    readonly installs: { envelope: string; generation: number }[];
+    appliedGeneration(): number | null;
+  };
+  policy: {
+    readonly installs: { policyVersion: string; preferences?: CloudBootstrapPreferences }[];
+    applied(): { configVersion: string } | null;
+  };
+  exporterStarts(): number;
+} {
   const baseRuntime = options.runtime ?? createRuntimeFake();
   const runtime: RuntimeFake = options.deadAfterStart
     ? { ...baseRuntime, facts: () => ({ pid: null, incarnation: "runtime-dead" }) }
@@ -97,25 +111,40 @@ function buildBootstrap(options: {
     ensure: async () => undefined,
     exists: async () => false,
   };
+  // A-08 用例需要观察到代际/policy 只按"更高代际或内容变化"重装，以及 exporter 不重启。
+  let appliedGeneration = options.appliedGeneration ?? null;
+  const provisioningInstalls: { envelope: string; generation: number }[] = [];
+  const policyInstalls: { policyVersion: string; preferences?: CloudBootstrapPreferences }[] = [];
+  let appliedPolicy: { configVersion: string } | null = null;
+  let exporterStarts = 0;
   const bootstrap = createBootstrap({
     git,
     runtime,
     localRpc: createLocalRpcFake(),
     provisioning: {
-      appliedGeneration: async () => options.appliedGeneration ?? null,
-      install: async () => undefined,
+      appliedGeneration: async () => appliedGeneration,
+      install: async (envelope, generation) => {
+        provisioningInstalls.push({ envelope, generation });
+        appliedGeneration = generation;
+      },
     },
     policy: {
-      install: async ({ policyVersion }: { policyVersion: string }) => ({
-        configVersion: policyVersion,
-      }),
-      applied: async () => null,
+      install: async (input) => {
+        policyInstalls.push(input);
+        appliedPolicy = {
+          configVersion: input.preferences?.configVersion ?? input.policyVersion,
+        };
+        return appliedPolicy;
+      },
+      applied: async () => appliedPolicy,
     },
     workspace,
     exporter: {
       ...exporter,
       // 直接复用真实 exporter，但把 start 换成可观察的空实现，避免测试依赖 V4 订阅假件。
-      start: async () => undefined,
+      start: async () => {
+        exporterStarts += 1;
+      },
       ready: () =>
         options.walWritable === false
           ? { exporterReady: true, walReady: false }
@@ -124,7 +153,20 @@ function buildBootstrap(options: {
     logger: testLogger(),
     workspaceRoot: "/workspace",
   });
-  return { bootstrap, runner, runtime };
+  return {
+    bootstrap,
+    runner,
+    runtime,
+    provisioning: {
+      installs: provisioningInstalls,
+      appliedGeneration: () => appliedGeneration,
+    },
+    policy: {
+      installs: policyInstalls,
+      applied: () => appliedPolicy,
+    },
+    exporterStarts: () => exporterStarts,
+  };
 }
 
 test("bootstrap：阶段顺序、clone 事实固定 baseSha/taskBranch、ready 门控不过不假 ready", async () => {
@@ -165,6 +207,84 @@ test("bootstrap：WAL 不可写与 runtime 死亡时明确失败，不进入 rea
   // runtime 启动后立即死亡（进程存在过但 facts().pid 已为 null）：reconcile 阶段拒绝 ready。
   const dead = buildBootstrap({ deadAfterStart: true });
   await assert.rejects(() => dead.bootstrap.run(configFrame()), /runtime-not-alive|not_ready/);
+});
+
+// ── A-08：重连重推凭据代际 / policy（12 §6；2026-10-17 review R5）──
+test("A-08：重连 refresh 只重装更高代际 envelope 与变化的 policy，不重新 clone/启动 runtime/exporter", async () => {
+  const fixture = buildBootstrap({ appliedGeneration: 3 });
+  const first = await fixture.bootstrap.run(configFrame());
+  assert.equal(first.configVersion, "policy-7");
+  assert.equal(fixture.provisioning.installs.length, 0, "同代际不重复安装 envelope");
+  assert.equal(fixture.policy.installs.length, 1, "首次自举安装一次 policy 快照");
+  const cloneCalls = fixture.runner.calls.length;
+  const runtimeStarts = fixture.runtime.startCalls;
+  const exporterStarts = fixture.exporterStarts();
+  assert.ok(cloneCalls > 0 && runtimeStarts === 1 && exporterStarts === 1);
+
+  // 同代际同 policy 的重连：refresh 是 no-op（不写盘、不重做进程级资源）。
+  const unchanged = await fixture.bootstrap.refresh(configFrame());
+  assert.deepEqual(unchanged, { configVersion: "policy-7" });
+  assert.equal(fixture.provisioning.installs.length, 0, "同代际不得重复 install");
+  assert.equal(fixture.policy.installs.length, 1, "内容未变化不得重复写 policy 快照");
+  assert.equal(fixture.runner.calls.length, cloneCalls, "重连不得重新 clone");
+  assert.equal(fixture.runtime.startCalls, runtimeStarts, "重连不得重启 runtime");
+  assert.equal(fixture.exporterStarts(), exporterStarts, "重连不得重新 start exporter");
+
+  // 更高代际 + policy/preferences 变化：只重装 envelope 与 policy 快照。
+  const preferences = { configVersion: "cfg-8", values: { memoryEnabled: true } };
+  const refreshed = await fixture.bootstrap.refresh({
+    ...configFrame(),
+    credentialGeneration: 4,
+    policyVersion: "policy-8",
+    preferences,
+  });
+  assert.deepEqual(refreshed, { configVersion: "cfg-8" });
+  assert.deepEqual(
+    fixture.provisioning.installs.map((entry) => entry.generation),
+    [4],
+    "只有更高代际才重装 envelope",
+  );
+  assert.equal(fixture.policy.installs.length, 2, "policy/preferences 变化必须更新快照");
+  assert.deepEqual(fixture.policy.installs.at(-1), {
+    policyVersion: "policy-8",
+    preferences,
+  });
+  assert.equal(fixture.provisioning.appliedGeneration(), 4, "新代际已持久（供后续核对）");
+  assert.equal(fixture.runner.calls.length, cloneCalls, "代际变化不得重新 clone");
+  assert.equal(fixture.runtime.startCalls, runtimeStarts, "代际变化不得重启 runtime");
+  assert.equal(fixture.exporterStarts(), exporterStarts, "代际变化不得重新 start exporter");
+
+  // 同一新配置再次重推：已应用状态一致，不得重复 install（幂等边界）。
+  const replay = await fixture.bootstrap.refresh({
+    ...configFrame(),
+    credentialGeneration: 4,
+    policyVersion: "policy-8",
+    preferences,
+  });
+  assert.deepEqual(replay, { configVersion: "cfg-8" });
+  assert.deepEqual(
+    fixture.provisioning.installs.map((entry) => entry.generation),
+    [4],
+    "同代际重放不得重复 install",
+  );
+  assert.equal(fixture.policy.installs.length, 2, "同内容重放不得重复写 policy 快照");
+});
+
+test("A-08：重连 config 代际低于已应用代际 → protocol_incompatible（不覆盖新凭据）", async () => {
+  const fixture = buildBootstrap({ appliedGeneration: 5 });
+  await fixture.bootstrap.run({ ...configFrame(), credentialGeneration: 5 });
+  const before = fixture.provisioning.installs.length;
+
+  await assert.rejects(
+    () => fixture.bootstrap.refresh({ ...configFrame(), credentialGeneration: 4 }),
+    (error: unknown) =>
+      error instanceof Error && (error as { code?: string }).code === "protocol_incompatible",
+  );
+  assert.equal(
+    fixture.provisioning.installs.length,
+    before,
+    "落后代际不得触发 install（不能用旧 envelope 覆盖新代际）",
+  );
 });
 
 test("git 凭据只经 env：token 不进 argv、不进 clone URL；helper 清空", async () => {
@@ -512,4 +632,39 @@ test("bootstrap 端口与假件保持接口一致（防止测试假件漂移）"
   assert.equal(typeof fake.run, "function");
   assert.equal(typeof fake.onPhase, "function");
   assert.equal(typeof fake.runtimeFacts, "function");
+});
+
+test("checkpoint：同 operationId 并发请求共享一次执行（drain 与 checkpoint.request 并发）", async () => {
+  const runner = createGitRunnerFake();
+  const git = createSandboxGit({ runner, grants: createGitGrantFake(), logger: testLogger() });
+  const checkpoint = createCheckpoint({
+    git,
+    quiesce: {
+      quiesce: async () => ({ ok: true as const }),
+      release: async () => undefined,
+    },
+    checkout: () => ({ workspacePath: "/workspace/demo", taskBranch: "zcode/task-1" }),
+    logger: testLogger(),
+    clock: { now: () => 0, wait: async () => undefined },
+  });
+  runner.responses = [
+    { code: 0, stdout: "", stderr: "" }, // status --porcelain
+    { code: 0, stdout: `${BASE_SHA}\n`, stderr: "" }, // rev-parse --verify HEAD
+    { code: 0, stdout: "", stderr: "" }, // push
+    { code: 0, stdout: `${BASE_SHA}\trefs/heads/zcode/task-1\n`, stderr: "" }, // ls-remote
+  ];
+  const request = {
+    protocolVersion: 1 as const,
+    type: "checkpoint.request" as const,
+    operationId: "7b14e45f-ceea-467a-9a1e-1f0d3b2a4c55",
+    runId: RUN_ID,
+    runGeneration: 1,
+    connectionEpoch: 4,
+    purpose: "stop" as const,
+  };
+  // 控制面 stop 会先发 bridge.drain 再发同 operationId 的 checkpoint.request，两个入站
+  // 处理器并发执行。并发调用必须复用同一次 git 执行，否则会重复 commit/push。
+  const [first, second] = await Promise.all([checkpoint.run(request), checkpoint.run(request)]);
+  assert.deepEqual(first, second);
+  assert.equal(runner.calls.length, 4, "同 operationId 并发不得重复执行保存命令");
 });

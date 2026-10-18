@@ -49,7 +49,7 @@ export interface ProjectionHistoryService {
 const DEFAULT_HISTORY_LIMIT = 100;
 
 export function createProjectionHistoryService(deps: CloudCoreDeps): ProjectionHistoryService {
-  const { storage, clock } = deps;
+  const { storage } = deps;
 
   async function ownedTask(principalId: string, taskId: string) {
     const task = await storage.tasks.get(taskId);
@@ -68,7 +68,9 @@ export function createProjectionHistoryService(deps: CloudCoreDeps): ProjectionH
         limit: input.limit ?? DEFAULT_HISTORY_LIMIT,
       });
       const response: CloudHistoryPage = {
-        items: page.items.map((record) => toHistoryItem(record, clock.now())),
+        // ts 取持久 ingest 时间（projection_events.ingested_at）：同一行重复读取必须得到
+        // 相同时间戳；读取时用 clock.now() 会让历史时间随读取时刻漂移。
+        items: page.items.map((record) => toHistoryItem(record, record.ingestedAt)),
         // 复核缺陷 4：空页不携带 cursor（hasMore=false 当且仅当下游确有下一页数据）。
         // 仓库层已保证，这里对客户端契约再收一道口，防未来分页实现漂移。
         ...(page.items.length > 0 && page.nextCursor ? { nextCursor: page.nextCursor } : {}),
@@ -90,12 +92,15 @@ export function createProjectionHistoryService(deps: CloudCoreDeps): ProjectionH
       // 快照必须声明覆盖到的 sourceSeq：后续 delta 必须从 seq+1 连续（02 §7.3）。
       const response: CloudProjectionSnapshot = {
         taskId: task.taskId,
-        topic: input.topic ?? CANONICAL_TOPIC,
+        // 族名查询（缺省 conversation）命中的是某个 `conversation/<sessionId>` 快照；
+        // 响应必须回实际话题，客户端才能按它续订/对齐 cursor。
+        topic: snapshot.topic,
         logEpoch: snapshot.logEpoch,
         coveredSourceSeq: snapshot.coveredSourceSeq,
         // snapshot payload 在 shared 侧是 z.json()（有界 JSON）：此处只做类型收窄。
         snapshot: snapshot.snapshot as CloudProjectionSnapshot["snapshot"],
-        createdAt: clock.now(),
+        // createdAt 是快照落库时的持久时间（projection_snapshots.created_at），不是读取时间。
+        createdAt: snapshot.createdAt,
       };
       return ok(response);
     },

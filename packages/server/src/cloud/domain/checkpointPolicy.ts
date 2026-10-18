@@ -66,3 +66,58 @@ export function consecutiveCheckpointFailures(records: readonly CheckpointStateF
   }
   return count;
 }
+
+/** checkpoint.result 归属校验所需的 operation 事实切片（domain 不依赖 app 端口）。 */
+export interface CheckpointOperationFact {
+  readonly kind: string;
+  readonly taskId?: string;
+  readonly runId?: string;
+  readonly runGeneration?: number;
+}
+
+export type CheckpointResultAdmission =
+  | { kind: "ok" }
+  /** 同一 operationId 已 saved：saved 是终态，迟到结果只忽略、不改记录与派生事实。 */
+  | { kind: "already-saved" }
+  | { kind: "operation-not-found" }
+  | { kind: "operation-mismatch" }
+  /** saved 声明不在 Task 的任务分支上：不得伪造保存成功（08 §8.1、R2）。 */
+  | { kind: "branch-rejected" };
+
+/**
+ * checkpoint.result 准入（2026-10-17 R2，15 §3）：
+ * - operationId 必须对应本 task/run/generation 上真实存在的 checkpoint 操作；
+ * - 已 saved 的记录为终态，迟到 failed/unknown 不覆盖（也不改 dataAtRisk/lastCheckpointSha）；
+ * - saved 仅在 branch 等于非空 taskBranch 时允许，否则按 failed 语义 fail-closed。
+ */
+export function evaluateCheckpointResultAdmission(input: {
+  operation: CheckpointOperationFact | null;
+  existingState?: string;
+  taskId: string;
+  runId: string;
+  runGeneration: number;
+  status: "saved" | "failed" | "unknown";
+  branch?: string;
+  taskBranch?: string;
+}): CheckpointResultAdmission {
+  const operation = input.operation;
+  if (!operation) return { kind: "operation-not-found" };
+  if (
+    operation.kind !== "checkpoint" ||
+    operation.taskId !== input.taskId ||
+    operation.runId !== input.runId ||
+    operation.runGeneration !== input.runGeneration
+  ) {
+    return { kind: "operation-mismatch" };
+  }
+  if (input.existingState === "saved") return { kind: "already-saved" };
+  if (
+    input.status === "saved" &&
+    (input.taskBranch === undefined ||
+      input.taskBranch.length === 0 ||
+      input.branch !== input.taskBranch)
+  ) {
+    return { kind: "branch-rejected" };
+  }
+  return { kind: "ok" };
+}

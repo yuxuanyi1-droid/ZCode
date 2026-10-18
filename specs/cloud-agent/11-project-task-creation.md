@@ -151,6 +151,8 @@ Run recipe 固定 provider、模板 revision/image digest、资源、baseSha/恢
 | 首命令取消或明确拒绝                 | 未执行部分按 03 收口；启动流程停止并清理                        | 不静默提拔其他命令           |
 | 创建途中 stop                        | 08 持久屏障阻断启动/ready/投递，迟到资源回收                    | 停止/清理中，不提前释放配额  |
 
+**修订（2026-10-18 用户决议，首条输入禁止取消）**：首条输入（Run 的 `firstInputCommandId`）在 runtime admission 前禁止经 `cancel` 端点取消。原因：首条被取消后 Run 仍会正常 provisioning→ready，但后续 append 没有 createSession 载体，会永久停在 `awaiting-runtime-session`；服务端没有安全的清理通路。`cancelInput` 对非终态的首条输入返回 409 `not_ready/first-input-not-cancellable`，输入保持 accepted/delivering/uncertain 原状；已 `cancelled`/`rejected` 的重放仍返回原 receipt。表内「首命令取消或明确拒绝」的收口路径（环境侧拒绝、终止流程）不变。
+
 “重试启动”通过 reopen 使用新执行意图/commandId，关联原失败输入，保留旧失败事实；原首次输入已接纳的 Task 不退回 draft，不再调用 start。固定基线和明确选择的 provider 不无声改变。恢复已有工作按 08 的 resumeSha/branch 规则，不自动 clone 最新 main 或重放 unknown 工具副作用。
 
 ## 9. UI 复用与能力范围

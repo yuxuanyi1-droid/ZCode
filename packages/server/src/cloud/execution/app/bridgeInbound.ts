@@ -141,7 +141,12 @@ export async function handleControlFrame(
         logBridgeState(state, options.logger, "draining", { operationId: drain.operationId });
         await options.drain.onDrain({ operationId: drain.operationId, reason: drain.reason });
       }
-      connection.close("drained");
+      // 修复依据（2026-10-18 停止无响应实测）：drain 后**不得关闭连接**。控制面的停止
+      // 顺序是 drain → checkpoint.request → terminate；同一次 beginDrain 会紧接着发
+      // checkpoint.request。旧实现先 close，保存结果帧无连接可回（静默丢失）；重连后
+      // 控制面又因停止屏障拒绝 bootstrap.config，checkpoint.request 被 not-ready 拒绝，
+      // run 永远卡在 draining。连接保留到控制面确认终止（provider terminate 关闭 socket）
+      // 为止；drain 的「不再接收新工作」由控制面投递屏障与 stopRequested 保证。
       return;
     }
     case "bridge.fault": {

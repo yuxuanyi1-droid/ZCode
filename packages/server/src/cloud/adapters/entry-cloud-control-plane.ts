@@ -59,8 +59,7 @@ import { CloudControlPlaneAssemblyError } from "./controlPlaneAssemblyError.js";
 import type { CloudGitGrantService } from "../app/gitGrants.js";
 import type { GitHubTokenService } from "./github/tokens.js";
 
-/** 原样转出（定义已移到独立模块）：沿用本模块的既有导入路径，避免调用方被迫改 import。 */
-export { CloudControlPlaneAssemblyError } from "./controlPlaneAssemblyError.js";
+export { CloudControlPlaneAssemblyError }; // 原样转出：沿用本模块既有导入路径，调用方不必改 import。
 import type { CloudDeploymentSecrets } from "./entry-cloud-secrets.js";
 import type { GitGrantStore } from "../app/ports/gitGrantPort.js";
 
@@ -90,7 +89,7 @@ export interface CloudControlPlaneContext {
   /** A-08 代际事件源（`generation` 即下发帧的 credentialGeneration）。 */
   readonly provisioningSourceChanges?: { readonly generation: number };
   /** 已就绪判定的存储入口（W5 注入时不再自持）。 */
-  readonly storage?: CloudStorageReadinessSource;
+  readonly storage?: CloudEntryStorageSource;
   readonly logger?: unknown;
   /** W1 追加注入缝（可选）：GitHub 端口、模板解析、交互决定、执行/产物投影、命令转接。 */
   readonly github?: GitHubPort;
@@ -134,6 +133,8 @@ export interface CloudEntryStorageSource extends CloudStorageReadinessSource {
   readonly grants?: GitGrantStore;
   /** W2 客户端的用户资源 profile store（M8；14 §9.2①）：上传用例与资源下发组装经它。 */
   readonly userProfile?: UserProfileStorePort;
+  /** 交互决定持久面（03 §4）：生产从存储客户端透传同一实例（显式 context 注入优先）。 */
+  readonly interactions?: InteractionDecisionRepo;
   close?(): Promise<void>;
 }
 
@@ -233,7 +234,9 @@ export async function assembleCloudControlPlane(
       ...(context.templates ? { templates: context.templates } : {}),
       ...(context.interactionDecisions
         ? { interactionDecisions: context.interactionDecisions }
-        : {}),
+        : storage.interactions
+          ? { interactionDecisions: storage.interactions }
+          : {}),
       ...(context.executionProjections
         ? { executionProjections: context.executionProjections }
         : {}),
@@ -267,6 +270,7 @@ export async function assembleCloudControlPlane(
         router: plane.router,
         bridge,
         principalId: context.secrets.principalId,
+        publicOrigin: context.config.publicOrigin,
         githubConfigured: github.configured,
         ...(github.catalog ? { repositoryCatalog: github.catalog } : {}),
         ...((context.githubBranchCatalog ?? github.branchCatalog)
@@ -295,9 +299,10 @@ async function resolveStorage(context: CloudControlPlaneContext): Promise<{
   operations: OperationOutboxPort;
   grants?: GitGrantStore;
   userProfile?: UserProfileStorePort;
+  interactions?: InteractionDecisionRepo;
   close?: () => Promise<void>;
 }> {
-  const injected = context.storage as CloudEntryStorageSource | undefined;
+  const injected = context.storage;
   if (injected?.storage && injected.operations) {
     // 注入方持有存储生命周期：控制面只复用，不在 close() 里替它关闭（避免双重关闭）。
     return {
@@ -305,6 +310,7 @@ async function resolveStorage(context: CloudControlPlaneContext): Promise<{
       operations: injected.operations,
       ...(injected.grants ? { grants: injected.grants } : {}),
       ...(injected.userProfile ? { userProfile: injected.userProfile } : {}),
+      ...(injected.interactions ? { interactions: injected.interactions } : {}),
     };
   }
   // 自持：worker 入口路径由入口显式给出（打包后是独立产物）。
@@ -319,6 +325,7 @@ async function resolveStorage(context: CloudControlPlaneContext): Promise<{
     operations: client.operations,
     grants: client.grants,
     userProfile: client.userProfile,
+    interactions: client.interactions,
     close: () => client.close(),
   };
 }

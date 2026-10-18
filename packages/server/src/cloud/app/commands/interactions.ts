@@ -24,42 +24,22 @@ import { CLOUD_INTERACTION_DECISION_PAYLOAD_MAX_CHARS } from "../ports/inputPort
 import type { AttachmentRegistry, AttachmentSession } from "../attachments/registry.js";
 import { buildInteractionCommandEnvelope } from "../inputDelivery/envelope.js";
 import { resolveRuntimeSession } from "../runSession.js";
+import {
+  currentDecisionReceipt,
+  receiptOf,
+  type CancelInteractionDecision,
+  type GetInteractionDecision,
+  type InteractionDecisionReceipt,
+  type SubmitInteractionDecision,
+} from "./interactionDecisionTypes.js";
 
-export interface InteractionAnswer {
-  optionId?: string;
-  freeText?: string;
-  action?: "accept" | "decline" | "cancel";
-  content?: Record<string, unknown>;
-}
-
-export interface SubmitInteractionDecision {
-  principalId: string;
-  taskId: string;
-  /** 投递命令键（客户端生成、重试不变）；决定本身按 interactionId 唯一。 */
-  commandId: string;
-  runId: string;
-  runGeneration: number;
-  interactionId: string;
-  /** 决定类别由入口按权威投影的 pendingInteractions[].kind 给出，不在此猜测。 */
-  kind: "permission" | "elicitation";
-  answer: InteractionAnswer;
-}
-
-export interface InteractionDecisionReceipt {
-  taskId: string;
-  interactionId: string;
-  deliveryStatus: CloudTaskInputRecord["deliveryStatus"];
-}
-
-export interface CancelInteractionDecision {
-  principalId: string;
-  taskId: string;
-  interactionId: string;
-  /** 原决定的投递命令键（决定记录本身不含它）；用于记录取消意图。 */
-  commandId: string;
-  /** 独立取消命令键：不删除 runtime 已接受的接受事实（02 §6.3）。 */
-  cancelCommandId: string;
-}
+export type {
+  CancelInteractionDecision,
+  GetInteractionDecision,
+  InteractionAnswer,
+  InteractionDecisionReceipt,
+  SubmitInteractionDecision,
+} from "./interactionDecisionTypes.js";
 
 export interface InteractionCommands {
   submitDecision(
@@ -68,6 +48,8 @@ export interface InteractionCommands {
   cancelDecision(
     input: CancelInteractionDecision,
   ): Promise<CloudAppResult<InteractionDecisionReceipt>>;
+  /** 只读回执查询（响应丢失/重启恢复）：从既有决定记录读取，不产生状态转移。 */
+  getDecision(input: GetInteractionDecision): Promise<CloudAppResult<InteractionDecisionReceipt>>;
 }
 
 export function createInteractionCommands(
@@ -187,13 +169,20 @@ export function createInteractionCommands(
       envelope: envelope.envelope,
     });
     if (!delivered.ok) return delivered;
-    await deps.interactionDecisions?.recordCancelIntent({
-      taskId: input.taskId,
-      commandId: input.commandId,
-      cancelCommandId: input.cancelCommandId,
-    });
-    // receipt 仍是原决定（deliveryStatus=admitted）：取消命令的落地由 ACK 通道投影，
-    // 不把原决定伪造成 cancelled（02 §6.3）。
+    const decisions = deps.interactionDecisions;
+    if (decisions) {
+      await decisions.recordCancelIntent({
+        taskId: input.taskId,
+        commandId: input.commandId,
+        cancelCommandId: input.cancelCommandId,
+      });
+      // 不把原决定伪造成 cancelled（02 §6.3）：receipt 取记录的最新事实，避免原决定的
+      // ACK 在投递取消命令期间落地时返回滞后状态（与上面的快速 ACK 兜底同口径）。
+      const current = await decisions.getDecision(input.taskId, input.interactionId);
+      if (current) {
+        return ok(receiptOf(current.taskId, current.interactionId, current.deliveryStatus));
+      }
+    }
     return ok(receiptOf(decision.taskId, decision.interactionId, decision.deliveryStatus));
   }
 
@@ -257,7 +246,11 @@ export function createInteractionCommands(
           status: "accepted",
           lastError: delivery.failure.reason,
         });
-        if (!pending) return fail("stale", "decision-record-missing");
+        if (!pending) {
+          // 写 accepted 也可能被快速 ACK 抢先（记录已推进到 admitted/rejected）：
+          // 读回真实状态返回，不把已落地的决定报告成 stale。
+          return currentDecisionReceipt(decisions, input.taskId, input.interactionId);
+        }
         return ok(receiptOf(pending.taskId, pending.interactionId, pending.deliveryStatus));
       }
 
@@ -289,7 +282,10 @@ export function createInteractionCommands(
         status,
         ...(delivered.ok ? {} : { lastError: delivered.reason }),
       });
-      if (!updated) return fail("stale", "decision-record-missing");
+      // ACK 可能先于本 CAS 到达：`recordRuntimeAck` 已把记录推进到 admitted/rejected，
+      // 从 delivering 回写会被状态机拒绝（02 §6.3）。重新读取记录返回真实 receipt，
+      // 而不是把已经成功的决定报告成 409 stale。
+      if (!updated) return currentDecisionReceipt(decisions, input.taskId, input.interactionId);
       cloudCoreLogger.debug(undefined, "cloud interaction decision delivered", {
         taskId: input.taskId,
         runId: context.run.runId,
@@ -308,43 +304,18 @@ export function createInteractionCommands(
       if (!task || task.ownerPrincipalId !== input.principalId) {
         return fail("not_found", "task-not-found");
       }
-      const decision = await decisions.getDecision(input.taskId, input.interactionId);
-      if (!decision) return fail("not_found", "interaction-decision-not-found");
-      if (decision.deliveryStatus === "cancelled" || decision.deliveryStatus === "rejected") {
-        return ok(receiptOf(decision.taskId, decision.interactionId, decision.deliveryStatus));
-      }
-      if (decision.deliveryStatus === "accepted") {
-        // 尚未开始投递：直接撤销投递意图（不构成副作用回滚承诺）。
-        const cancelled = await decisions.setDecisionDeliveryStatus({
-          taskId: input.taskId,
-          interactionId: input.interactionId,
-          status: "cancelled",
-        });
-        if (!cancelled) return fail("stale", "decision-cancel-race");
-        return ok(receiptOf(cancelled.taskId, cancelled.interactionId, cancelled.deliveryStatus));
-      }
-      if (decision.deliveryStatus === "delivering" || decision.deliveryStatus === "uncertain") {
-        // 已投递但 ACK 未知：**先对账**，不能声称 runtime 已停止（02 §6.3、CP-14）。
-        if (!decision.runId || decision.runGeneration === undefined) {
-          return fail("not_ready", "decision-ack-unknown");
+      // 快速 ACK 可能把 accepted 推进到 admitted，或把 delivering/uncertain 推进到终态，
+      // 使下面的 cancelled/uncertain CAS 返回 null（2026-10-17 修复）：这不是取消失败，
+      // 而是持久事实已前进（ACK 权威，02 §6.3）。重读记录后按最新状态重新裁决；
+      // 仍被并发推进时最多重试一次，最后才报告 cancel-race，不把已落地事实误报成成功/失败。
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const decision = await decisions.getDecision(input.taskId, input.interactionId);
+        if (!decision) return fail("not_found", "interaction-decision-not-found");
+        if (decision.deliveryStatus === "cancelled" || decision.deliveryStatus === "rejected") {
+          return ok(receiptOf(decision.taskId, decision.interactionId, decision.deliveryStatus));
         }
-        const query = await deps.runtimeCommands.queryCommand({
-          taskId: input.taskId,
-          runId: decision.runId,
-          runGeneration: decision.runGeneration,
-          commandId: decision.deliveryCommandId,
-        });
-        if (query.status === "unknown") {
-          // runtime 明确没有该命令事实：先把对账证据落成 uncertain（delivering 不可直接撤销），
-          // 再撤销投递意图——两步都是状态机内的前进（domain/deliveryStatus）。
-          if (decision.deliveryStatus === "delivering") {
-            await decisions.setDecisionDeliveryStatus({
-              taskId: input.taskId,
-              interactionId: input.interactionId,
-              status: "uncertain",
-              lastError: "reconciled-no-runtime-record",
-            });
-          }
+        if (decision.deliveryStatus === "accepted") {
+          // 尚未开始投递：直接撤销投递意图（不构成副作用回滚承诺）。
           const cancelled = await decisions.setDecisionDeliveryStatus({
             taskId: input.taskId,
             interactionId: input.interactionId,
@@ -355,19 +326,65 @@ export function createInteractionCommands(
               receiptOf(cancelled.taskId, cancelled.interactionId, cancelled.deliveryStatus),
             );
           }
+          continue;
         }
-        if (query.status !== "found") return fail("not_ready", "decision-ack-unknown");
-        // runtime 已裁决（admitted 事实）：走下面的独立 cancelCommandId。
+        if (decision.deliveryStatus === "delivering" || decision.deliveryStatus === "uncertain") {
+          // 已投递但 ACK 未知：**先对账**，不能声称 runtime 已停止（02 §6.3、CP-14）。
+          if (!decision.runId || decision.runGeneration === undefined) {
+            return fail("not_ready", "decision-ack-unknown");
+          }
+          const query = await deps.runtimeCommands.queryCommand({
+            taskId: input.taskId,
+            runId: decision.runId,
+            runGeneration: decision.runGeneration,
+            commandId: decision.deliveryCommandId,
+          });
+          if (query.status === "unknown") {
+            // runtime 明确没有该命令事实：先把对账证据落成 uncertain（delivering 不可直接撤销），
+            // 再撤销投递意图——两步都是状态机内的前进（domain/deliveryStatus）。
+            if (decision.deliveryStatus === "delivering") {
+              await decisions.setDecisionDeliveryStatus({
+                taskId: input.taskId,
+                interactionId: input.interactionId,
+                status: "uncertain",
+                lastError: "reconciled-no-runtime-record",
+              });
+            }
+            const cancelled = await decisions.setDecisionDeliveryStatus({
+              taskId: input.taskId,
+              interactionId: input.interactionId,
+              status: "cancelled",
+            });
+            if (cancelled) {
+              return ok(
+                receiptOf(cancelled.taskId, cancelled.interactionId, cancelled.deliveryStatus),
+              );
+            }
+            continue;
+          }
+          if (query.status !== "found") return fail("not_ready", "decision-ack-unknown");
+          // runtime 已裁决（admitted 事实）：走下面的独立 cancelCommandId。
+        }
+        return await cancelAdmittedDecision(decision, input);
       }
-      return await cancelAdmittedDecision(decision, input);
+      // 两次都被并发推进（ACK/并发取消）：只报告竞态，不伪造终态。
+      return fail("stale", "decision-cancel-race");
+    },
+
+    async getDecision(input) {
+      const decisions = deps.interactionDecisions;
+      if (!decisions) {
+        return fail("not_implemented", "interaction-decision-persistence-missing");
+      }
+      // 主体围栏与 submit/cancel 同口径：跨主体统一 not_found，不泄漏任务存在性。
+      const task = await storage.tasks.get(input.taskId);
+      if (!task || task.ownerPrincipalId !== input.principalId) {
+        return fail("not_found", "task-not-found");
+      }
+      const decision = await decisions.getDecision(input.taskId, input.interactionId);
+      if (!decision) return fail("not_found", "interaction-decision-not-found");
+      // 只读：不发命令、不改 deliveryStatus（重放/恢复由 submitDecision 的幂等路径负责）。
+      return ok(receiptOf(decision.taskId, decision.interactionId, decision.deliveryStatus));
     },
   };
-}
-
-function receiptOf(
-  taskId: string,
-  interactionId: string,
-  deliveryStatus: CloudTaskInputRecord["deliveryStatus"],
-): InteractionDecisionReceipt {
-  return { taskId, interactionId, deliveryStatus };
 }

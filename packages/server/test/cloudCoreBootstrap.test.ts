@@ -775,3 +775,104 @@ test("仓库名不安全（含路径分隔/穿越）时创建前明确失败，�
   assert.equal(attempt?.reason, "workspace-path-unresolved");
   assert.equal(context.driver.createCalls, 0, "不安全的仓库名不得触达 provider");
 });
+
+// ── 2026-10-18 停止无响应回归：停止屏障不得切断保存所需的连接装配 ──
+// 实测链路：stop → drain（旧实现随后关闭 bridge）→ supervisor 重连 → 控制面以
+// stop-requested 拒绝 bootstrap.config → checkpoint.request 被 bootstrapConfigSent
+// 前置拒绝 → run 永久 draining；stop sweep 又因操作 attempt 冻结而无限重试。
+
+test("draining + stopRequested 仍可重装 bootstrap.config（保存通路需要重连后的配置）", async () => {
+  const context = buildTestPlane();
+  const { taskId, run } = await draftWithRun(context);
+  await attachReadySession(context, {
+    taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+  const ready = await context.plane.runs.markReady({
+    taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+  assert.equal(ready.ok, true);
+
+  const drain = await context.plane.lifecycle.drain.beginDrain({
+    taskId,
+    runId: run.runId,
+    reason: "user-stop",
+  });
+  assert.equal(drain.ok, true);
+  const draining = await context.storage.runs.get(run.runId);
+  assert.equal(draining?.status, "draining");
+  assert.equal(draining?.stopRequested, true);
+
+  const before = context.attachmentPort.bootstrapConfigs.length;
+  const resent = await context.plane.provisioning.bootstrapConfig.send({
+    taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+  assert.equal(resent.ok, true, resent.ok ? "" : `${resent.code}/${resent.reason}`);
+  assert.equal(context.attachmentPort.bootstrapConfigs.length, before + 1);
+});
+
+test("draining + stopRequested 的 ready 只确认连接，不把 run 迁回 ready", async () => {
+  const context = buildTestPlane();
+  const { taskId, run } = await draftWithRun(context);
+  await attachReadySession(context, {
+    taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+  await context.plane.runs.markReady({
+    taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+  await context.plane.lifecycle.drain.beginDrain({
+    taskId,
+    runId: run.runId,
+    reason: "user-stop",
+  });
+
+  // 重连后重新下发配置（新 epoch 语义由同一 epoch 下的重发覆盖发送侧逻辑）。
+  const resend = await context.plane.provisioning.bootstrapConfig.send({
+    taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+  assert.equal(resend.ok, true);
+
+  const ready = await context.plane.runs.markReady({
+    taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+  assert.equal(ready.ok, true);
+  assert.equal((await context.storage.runs.get(run.runId))?.status, "draining", "不得复活停止意图");
+});
+
+test("provisioning + stopRequested 仍拒绝 bootstrap.config（不为已停止的创建拉起 Agent）", async () => {
+  const context = buildTestPlane();
+  const { taskId, run } = await draftWithRun(context);
+  await context.storage.runs.requestStop({
+    taskId,
+    operationId: "00000000-0000-4000-8000-0000000009f0",
+    now: context.clock.now(),
+  });
+  const sent = await context.plane.provisioning.bootstrapConfig.send({
+    taskId,
+    runId: run.runId,
+    runGeneration: run.runGeneration,
+    connectionEpoch: run.connectionEpoch,
+  });
+  assert.equal(sent.ok, false);
+  assert.equal(sent.ok === false && sent.reason, "stop-requested");
+});

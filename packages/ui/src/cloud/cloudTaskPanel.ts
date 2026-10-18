@@ -22,6 +22,8 @@ export interface CloudTaskPanelDetail {
     readonly revision: number;
     readonly draftStartConfig?: { readonly provider?: string | undefined } | undefined;
   };
+  /** 当前 run 的 bridge attachment 是否已回连（瞬态连接事实；undefined=旧服务端/未知）。 */
+  readonly attachmentReady?: boolean;
   readonly activeRun?:
     | {
         readonly status: string;
@@ -56,11 +58,24 @@ export type CloudTaskRunPanelView =
    */
   | { readonly kind: "paused" }
   /**
+   * resume 窗口（2026-10-18 修订，04 §3.3）：run 已被控制面 CAS 置为 `ready`，但执行域
+   * bridge 尚未回连（`attachmentReady === false`）。此时 pane 不绑定实时会话、保持历史/
+   * 草稿视图，横幅呈现「正在恢复运行环境」，attachment 回连后的详情刷新自动绑定。
+   */
+  | { readonly kind: "resuming" }
+  /**
    * run 正在受控停止（2026-10-08 巡检修订 P1：stop 端点受理后 run 进入 draining，
    * 此前面板对 draining 一律 hidden，用户只看到永远「Working for Ns」）。
    * 呈现「正在停止」，并提供 force-stop 入口（08 §8.2，actions 投影含 force-stop）。
    */
   | { readonly kind: "draining" }
+  /**
+   * 执行域连接断开（2026-10-18 修订）：控制面投影 `disconnected` 时不再 hidden。
+   * 此前面板把它当「工作区/attachment 语义」静默，用户只看到历史/草稿且毫无反馈。
+   * 呈现「连接已断开，正在自动重连」，由有界 run 观察等待 bridge 回连后刷新详情；
+   * 不提供重开入口（旧 run 未终态，重开会制造第二个执行载体）。
+   */
+  | { readonly kind: "disconnected" }
   /** run 已终止：failed 强调失败原因；stopped/expired 呈现中性说明。 */
   | {
       readonly kind: "ended";
@@ -100,6 +115,10 @@ export function projectCloudTaskRunPanel(
   if (run.status === "draining") {
     return { kind: "draining" };
   }
+  if (run.status === "disconnected") {
+    // 2026-10-18 修订：断连是可见状态，不是「工作区语义」的静默窗口。
+    return { kind: "disconnected" };
+  }
   if (ENDED_RUN_STATUSES.includes(run.status)) {
     return {
       kind: "ended",
@@ -108,8 +127,93 @@ export function projectCloudTaskRunPanel(
       endReason: run.endReason?.trim() ? run.endReason : null,
     };
   }
-  // ready/disconnected：工作区/attachment 语义，面板不重复呈现。
+  // resume 窗口（2026-10-18 修订）：ready 只说明控制面状态，bridge 可能尚未回连
+  // （attachmentReady === false）。此时不呈现全屏连接错误，也不当作 hidden——横幅明确
+  // 告知「正在恢复运行环境」；undefined（旧服务端/未知）维持原语义（hidden）。
+  if (run.status === "ready" && detail.attachmentReady === false) {
+    return { kind: "resuming" };
+  }
+  // ready（attachment 已回连或未知）：工作区/attachment 语义，面板不重复呈现。
   return { kind: "hidden" };
+}
+
+/**
+ * 云任务停止可用性（2026-10-18 用户决议：首条消息发送期间禁止停止）。
+ *
+ * 背景：首条消息尚未进入 runtime（run=provisioning，或控制面已 ready 但 bridge
+ * 尚未回连、`attachmentReady === false`）时，停止请求会直接终止正在进行的
+ * create/run——用户点击输入框旁的停止按钮本意只是放弃「生成」，不应把刚创建的
+ * 云环境一并销毁。用户决议：首条输入窗口置灰停止，不提供取消首条输入的入口。
+ *
+ * 只有控制面详情里存在当前 run 且处于 `ready`（attachment 未明确未就绪）、
+ * `paused`、`draining` 时才允许发起停止；其余状态（无 run、provisioning、
+ * disconnected、终态）一律 false。服务端仍独立按 run 状态裁决与幂等，本函数只
+ * 决定 UI 是否发出请求，不替代服务端事实。
+ */
+export function resolveCloudTaskStopAvailability(
+  detail: Pick<CloudTaskPanelDetail, "activeRun" | "attachmentReady"> | null,
+): boolean {
+  const run = detail?.activeRun;
+  if (!run) {
+    return false;
+  }
+  if (run.status === "paused" || run.status === "draining") {
+    return true;
+  }
+  // ready 但 attachmentReady === false 属于首条/恢复窗口：pane 尚未绑定运行时，
+  // 停止会打断 create/resume，置灰。undefined 是旧服务端/未知，维持可停止。
+  return run.status === "ready" && detail?.attachmentReady !== false;
+}
+
+/**
+ * Header 云连接状态点（2026-10-18 修订）：纯投影，返回 null 表示不渲染。
+ *
+ * 数据只来自控制面详情投影（Header 复用 `useCloudTask` 的既有 detail，不新增请求）：
+ * - draft/archived：任务没有可观察的运行环境，不显示（至少 archived 不显示）；
+ * - 无 activeRun / stopped / expired：灰色空心点（无活动环境）；
+ * - provisioning / ready + attachmentReady=false：琥珀色脉冲（准备/恢复中）；
+ * - ready：绿色；paused：灰色；draining：蓝色；disconnected / failed：红色。
+ * 颜色之外必须同时给出 `labelId`（title + aria-label），不能只靠颜色表达状态。
+ */
+export type CloudConnectionIndicatorTone = "green" | "amber" | "gray" | "blue" | "red";
+
+export interface CloudConnectionIndicator {
+  readonly tone: CloudConnectionIndicatorTone;
+  /** 琥珀色「准备/恢复中」需要脉冲，其余为静态点。 */
+  readonly pulse: boolean;
+  /** i18n 文案 key：调用方用于 title 与 aria-label。 */
+  readonly labelId: string;
+}
+
+export function resolveCloudConnectionIndicator(
+  detail: CloudTaskPanelDetail | null,
+): CloudConnectionIndicator | null {
+  if (!detail || detail.task.status === "draft" || detail.task.status === "archived") {
+    return null;
+  }
+  const status = detail.activeRun?.status;
+  if (!status) {
+    return { tone: "gray", pulse: false, labelId: "cloud.connection.idle" };
+  }
+  switch (status) {
+    case "ready":
+      return detail.attachmentReady === false
+        ? { tone: "amber", pulse: true, labelId: "cloud.connection.resuming" }
+        : { tone: "green", pulse: false, labelId: "cloud.connection.ready" };
+    case "provisioning":
+      return { tone: "amber", pulse: true, labelId: "cloud.connection.provisioning" };
+    case "paused":
+      return { tone: "gray", pulse: false, labelId: "cloud.connection.paused" };
+    case "draining":
+      return { tone: "blue", pulse: false, labelId: "cloud.connection.draining" };
+    case "disconnected":
+      return { tone: "red", pulse: false, labelId: "cloud.connection.disconnected" };
+    case "failed":
+      return { tone: "red", pulse: false, labelId: "cloud.connection.failed" };
+    default:
+      // stopped/expired：run 已终态，没有活动环境。
+      return { tone: "gray", pulse: false, labelId: "cloud.connection.idle" };
+  }
 }
 
 export interface CloudReopenPlan {
@@ -305,48 +409,6 @@ function reopenResumeByFact(
   return latestCheckpoint?.state === "saved"
     ? { mode: "checkpoint" }
     : { mode: "restart-from-base" };
-}
-
-/** 归档入口可用性：服务端 actions 投影说了算（04 §3.3，UI 不按状态猜）。 */
-export function isCloudTaskArchiveActionAvailable(
-  detail: Pick<CloudTaskPanelDetail, "actions"> | null,
-): boolean {
-  return (detail?.actions ?? []).includes("archive");
-}
-
-/**
- * 归档点击的准入裁决（2026-10-07 终验缺陷 E；2026-10-10 修订随服务端投影生效）。
- *
- * 背景：侧栏行不拉详情（autoLoad=false，避免整列 GET /tasks/:id），无缓存详情时
- * 归档入口保持可点、由服务端裁决；投影不含 archive 时服务端必然 409
- * `not_ready/task-has-active-run`，旧文案还误导用户「稍后再试」。规则：
- *
- * - 有缓存详情 → 直接按投影裁决（不发请求）；
- * - 无缓存详情 → 点击时拉一次详情，再按投影裁决（投影不含 archive = 存在未终态且
- *   非 paused 的 run——08 §3.2 修订 2026-10-10：paused run 投影 archive，服务端自动
- *   推进暂停中停止后完成归档；其余 run 先停止再归档）；这是唯一能在不发整列请求的
- *   前提下对齐服务端裁决的时机；
- * - 详情拉不到（网络/未接线）→ `unknown`：回落服务端裁决（旧行为），错误由
- *   `describeCloudTaskActionError` 归一呈现，不用本地猜测替代服务端事实。
- */
-export type CloudArchiveAdmission =
-  | { readonly kind: "allowed" }
-  | { readonly kind: "blocked-active-run" }
-  | { readonly kind: "unknown" };
-
-export async function resolveCloudTaskArchiveAdmission(params: {
-  /** 缓存详情（可为 null：该行从未打开过）。 */
-  readonly cachedDetail: Pick<CloudTaskPanelDetail, "actions"> | null;
-  /** 无缓存详情时按需拉取；拉不到返回 null（不得抛出）。 */
-  readonly loadDetail: () => Promise<Pick<CloudTaskPanelDetail, "actions"> | null>;
-}): Promise<CloudArchiveAdmission> {
-  const detail = params.cachedDetail ?? (await params.loadDetail());
-  if (detail === null) {
-    return { kind: "unknown" };
-  }
-  return isCloudTaskArchiveActionAvailable(detail)
-    ? { kind: "allowed" }
-    : { kind: "blocked-active-run" };
 }
 
 /**

@@ -15,8 +15,10 @@ import {
   CLOUD_SERVICE_CHANNEL_FACETS,
   CLOUD_WIRE_PROTOCOL_SUPPORTED_VERSIONS,
   CLOUD_WIRE_PROTOCOL_VERSION,
+  cancelCloudInteractionDecisionRequestSchema,
   capabilitiesResponseSchema,
   cloudCapabilitiesResponseSchema,
+  cloudInteractionDecisionReceiptSchema,
   cloudListQuerySchema,
   cloudRepositoriesQuerySchema,
   createCloudProjectRequestSchema,
@@ -29,9 +31,10 @@ import {
   localCapabilitiesResponseSchema,
   patchCloudTaskRequestSchema,
   reopenCloudTaskRequestSchema,
+  submitCloudInteractionDecisionRequestSchema,
   submitTaskInputSchema,
 } from "../src/index.js";
-import { COMMAND_ID, OPERATION_ID, PRINCIPAL_ID } from "./cloudFixtures.js";
+import { COMMAND_ID, OPERATION_ID, PRINCIPAL_ID, RUN_ID, TASK_ID } from "./cloudFixtures.js";
 
 const startInput = {
   intent: "start",
@@ -146,6 +149,90 @@ test("query schemas bound pagination and cursors", () => {
     true,
   );
   assert.equal(cloudRepositoriesQuerySchema.safeParse({ page: 1 }).success, false);
+});
+
+test("interaction decision schemas freeze answer/cancel shapes and receipt status vocabulary", () => {
+  const submit = {
+    commandId: COMMAND_ID,
+    runId: RUN_ID,
+    runGeneration: 1,
+    kind: "permission",
+    answer: { optionId: "allow" },
+  };
+  assert.deepEqual(
+    submitCloudInteractionDecisionRequestSchema.parse(JSON.parse(JSON.stringify(submit))),
+    submit,
+  );
+  // 未知字段、非正代际、未知 kind/action 一律拒绝（严格 schema，不忽略）。
+  assert.equal(
+    submitCloudInteractionDecisionRequestSchema.safeParse({ ...submit, principalId: PRINCIPAL_ID })
+      .success,
+    false,
+  );
+  assert.equal(
+    submitCloudInteractionDecisionRequestSchema.safeParse({ ...submit, runGeneration: 0 }).success,
+    false,
+  );
+  assert.equal(
+    submitCloudInteractionDecisionRequestSchema.safeParse({ ...submit, kind: "question" }).success,
+    false,
+  );
+  assert.equal(
+    submitCloudInteractionDecisionRequestSchema.safeParse({
+      ...submit,
+      answer: { action: "approve" },
+    }).success,
+    false,
+  );
+  assert.equal(
+    submitCloudInteractionDecisionRequestSchema.safeParse({
+      ...submit,
+      kind: "elicitation",
+      answer: { action: "accept", content: { question1: ["a"] } },
+    }).success,
+    true,
+  );
+
+  assert.equal(
+    cancelCloudInteractionDecisionRequestSchema.safeParse({
+      commandId: COMMAND_ID,
+      cancelCommandId: OPERATION_ID,
+    }).success,
+    true,
+  );
+  assert.equal(
+    cancelCloudInteractionDecisionRequestSchema.safeParse({ commandId: COMMAND_ID }).success,
+    false,
+  );
+
+  const receipt = { taskId: TASK_ID, interactionId: "interaction-1", deliveryStatus: "accepted" };
+  assert.deepEqual(
+    cloudInteractionDecisionReceiptSchema.parse(JSON.parse(JSON.stringify(receipt))),
+    receipt,
+  );
+  assert.equal(
+    cloudInteractionDecisionReceiptSchema.safeParse({ ...receipt, deliveryStatus: "sent" }).success,
+    false,
+  );
+});
+
+test("interaction endpoints are registered as POST submit/cancel and GET receipt", () => {
+  const submit = findCloudHttpEndpoint("submitInteractionDecision");
+  assert.equal(submit?.method, "POST");
+  assert.equal(submit?.path, "/api/cloud/tasks/:taskId/interactions/:interactionId");
+  assert.equal(submit?.request, "submitCloudInteractionDecisionRequestSchema");
+  assert.equal(submit?.response, "cloudInteractionDecisionReceiptSchema");
+
+  const cancel = findCloudHttpEndpoint("cancelInteractionDecision");
+  assert.equal(cancel?.method, "POST");
+  assert.equal(cancel?.path, "/api/cloud/tasks/:taskId/interactions/:interactionId/cancel");
+  assert.equal(cancel?.request, "cancelCloudInteractionDecisionRequestSchema");
+
+  const read = findCloudHttpEndpoint("getInteractionDecision");
+  assert.equal(read?.method, "GET");
+  assert.equal(read?.path, "/api/cloud/tasks/:taskId/interactions/:interactionId");
+  assert.equal(read?.request, null);
+  assert.equal(read?.response, "cloudInteractionDecisionReceiptSchema");
 });
 
 test("endpoint matrix is consistent and names resolvable schemas", () => {

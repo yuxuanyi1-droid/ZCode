@@ -29,7 +29,6 @@ import { launchE2bSupervisor } from "./e2bBootstrap.js";
 import {
   asRecord,
   asString,
-  mapE2bSandboxState,
   readProviderRejectionMessage,
   E2B_DEFAULT_BASE_URL,
   E2B_DEFAULT_REQUEST_TIMEOUT_MS,

@@ -2,7 +2,12 @@
  * bridge 通道的共享类型与帧编解码（specs/cloud-agent 02 §4 地址与网络帧、§5 握手、
  * §7 投影 ingest）。控制面这一侧与执行节点（W6）共用 frozen 的 shared 帧 schema。
  */
-import { cloudBridgeControlFrameSchema, type CloudBridgeControlFrame } from "@zcode/shared";
+import {
+  cloudBridgeControlFrameSchema,
+  type CloudBridgeControlFrame,
+  type CloudRunAddress,
+  type CloudStreamCursor,
+} from "@zcode/shared";
 import type { AttachmentPort, AttachmentSendResult } from "../../app/ports/attachmentPort.js";
 import type { ControlPlaneRpcPort } from "../../app/ports/controlPlaneRpcPort.js";
 import type { RuntimeCommandQueryPort } from "../../app/ports/runtimeCommandQueryPort.js";
@@ -64,6 +69,19 @@ export interface LiveConnection {
    * 关闭也不触发 registry/run 状态副作用。
    */
   authenticated: boolean;
+  /**
+   * 本连接已完成的 hello 事实（02 §5.1 第 5 条）：同 socket 重复 hello 必须返回原
+   * connectionEpoch/rotationId/ingestCursors，且不再消费凭据、不递增 epoch。
+   * 修复依据（2026-10-17 review R5）：此前重复 hello 会再次 consumeForHello——凭据已被
+   * 上一次 hello 切到候选 hash，重放同一 hello 会被误判为未认证并关闭连接。
+   */
+  hello?: {
+    attemptId: string;
+    rotationId: string;
+    /** 首次 hello 的地址事实（已用 run 持久事实校验/归一）。 */
+    address: CloudRunAddress;
+    ingestCursors: CloudStreamCursor[];
+  };
   /**
    * D4-2 中间步：bridge.heartbeat 的连续 `processAlive=false` 计数（连接级、可重建的
    * 事实，不是元数据事实源）。达到 RUNTIME_EXIT_DEAD_STREAK_LIMIT 即确认 runtime 退出。

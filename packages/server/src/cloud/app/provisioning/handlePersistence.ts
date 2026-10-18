@@ -1,23 +1,15 @@
 /**
- * create 成功后的 handle 持久化与 supervisor 启动（specs/cloud-agent 01 §5.1 第 3 条、§8、
- * 08 §8.1 停止屏障）。从 `createOperation.ts` 拆出以保持单文件职责与行数预算。
+ * create 尝试的 handle 持久化适配（specs/cloud-agent 15 §3 R1、01 §5.1 第 3 条、§8、
+ * 08 §8.1 停止屏障）。
  *
- * 顺序（01 §5.1 第 3 条）：create 成功**立即持久 handle/deadline** → 校验停止意图 →
- * 启动 supervisor → 结算 create 操作。启动放在结算之前：失败时本 operation 记
- * `failed(bootstrap_failed)`，不留"settled 却没人管的沙箱"（01 §9 补偿终止）。
- * 正常 create 路径与 `findCreateResult` 对账恢复路径**共用**本函数。
+ * 具体行为（workspacePath 持久化 → recordProviderHandle → 停止/迟到 handle 清理 →
+ * clone grant → startSupervisor → 结算操作）由 `recoverHandle.ts` 的单实现承担；
+ * 本文件只把统一结论映射成 create worker 的 `CreateAttemptOutcome`（01 §9 三分支）。
  */
-import { type CloudErrorCode, type CloudRunRecord } from "@zcode/shared";
-import { createOperationKey } from "../../domain/idempotency.js";
-import type { CloudCoreConfig } from "../config.js";
-import type { ClockPort } from "../ports/clockPort.js";
+import type { CloudErrorCode, CloudRunRecord } from "@zcode/shared";
 import type { LeasedOperation } from "../ports/operationOutboxPort.js";
 import type { ProviderSandboxHandle, SandboxDriverPort } from "../ports/sandboxDriverPort.js";
-import type { StoragePort } from "../ports/storagePort.js";
-import { cloudCoreLogger } from "../logger.js";
-import type { RunCompensation } from "./compensation.js";
-import { isRecoverableGitGrantFailure, type CloudGitGrantService } from "../gitGrants.js";
-import { SandboxBootstrapError, bootstrapSandboxWithCompensation } from "./bootstrapSandbox.js";
+import type { EstablishRunHandleResult, RunHandleEstablisher } from "./recoverHandle.js";
 
 /** create 尝试结论（01 §9 三分支 + 迟到 handle 跳过）。 */
 export type CreateAttemptOutcome =
@@ -26,137 +18,57 @@ export type CreateAttemptOutcome =
   | { operationId: string; outcome: "failed"; reason: string }
   | { operationId: string; outcome: "unknown"; reason: string };
 
+/** 统一 helper 的结论 → create 尝试结论（operation 结算已在 helper 内完成）。 */
+function toCreateAttemptOutcome(
+  operationId: string,
+  result: EstablishRunHandleResult,
+): CreateAttemptOutcome {
+  switch (result.status) {
+    case "established":
+      return { operationId, outcome: "created", runId: result.run.runId };
+    case "skipped":
+      return {
+        operationId,
+        outcome: "skipped",
+        // 与既有可读原因保持一致（测试与日志口径不变）。
+        reason: result.reason === "stop-requested" ? "stop-after-create" : "late-handle",
+      };
+    case "failed":
+      return {
+        operationId,
+        outcome: "failed",
+        reason: result.reason,
+      };
+  }
+}
+
+/** create worker 的持久化入口：带租约调用统一 helper 并映射结论。 */
 export async function persistRunHandle(input: {
+  establish: RunHandleEstablisher;
   driver: SandboxDriverPort;
   leased: LeasedOperation;
   run: CloudRunRecord;
   handle: ProviderSandboxHandle;
   deadlineSource: "provider" | "estimated";
-  workspacePath: string;
-  bootstrapTicket: string;
-  storage: StoragePort;
-  clock: ClockPort;
-  config: CloudCoreConfig;
-  compensation: RunCompensation;
-  /** git grant 签发（01 §7.2）：clone grant 必须在 supervisor 启动前签发。 */
-  gitGrants: CloudGitGrantService;
+  /** create 前算好的同一份路径（唯一计算点）；恢复路径可省略。 */
+  workspacePath?: string;
+  /** 本尝试已铸造的票据；恢复路径省略时由 helper 重新铸造。 */
+  bootstrapTicket?: string;
   /** 带租约的 operation 结算（由 create worker 提供）。 */
   settle: (
     outcome: "settled" | "ambiguous" | "failed",
     errorCode?: CloudErrorCode,
   ) => Promise<void>;
 }): Promise<CreateAttemptOutcome> {
-  const {
-    driver,
-    leased,
-    run,
-    handle,
-    deadlineSource,
-    workspacePath,
-    bootstrapTicket,
-    storage,
-    clock,
-    config,
-    compensation,
-    gitGrants,
-    settle,
-  } = input;
-  // create 成功立即持久 handle/deadline（必须匹配 runGeneration；01 §5.1 第 3 条）。
-  const persisted = await storage.runs.recordProviderHandle({
-    runId: run.runId,
-    runGeneration: run.runGeneration,
-    provider: handle.provider,
-    providerHandle: handle.sandboxId,
-    // 与创建期下发值同一份计算（08 §4.1：workspacePath 来自 run 的已验证描述）。
-    workspacePath,
-    providerDeadline: handle.providerDeadline,
-    deadlineEstimate: handle.deadlineEstimate,
-    now: clock.now(),
+  const result = await input.establish.establish({
+    driver: input.driver,
+    run: input.run,
+    handle: input.handle,
+    deadlineSource: input.deadlineSource,
+    ...(input.workspacePath ? { workspacePath: input.workspacePath } : {}),
+    ...(input.bootstrapTicket ? { bootstrapTicket: input.bootstrapTicket } : {}),
+    leasedOperation: input.leased,
+    settleOperation: input.settle,
   });
-  if (!persisted) {
-    // 写 handle 前 run 已被新代际接管/已终态：迟到 handle 只能进入清理（08 §8.1）。
-    await compensation.requestTermination({
-      runId: run.runId,
-      runGeneration: run.runGeneration,
-      reason: "late-handle",
-    });
-    await settle("settled");
-    return {
-      operationId: leased.operation.operationId,
-      outcome: "skipped",
-      reason: "late-handle",
-    };
-  }
-  if (deadlineSource === "estimated") {
-    cloudCoreLogger.info(undefined, "cloud sandbox created with estimated deadline", {
-      runId: run.runId,
-    });
-  }
-  const latest = await storage.runs.get(run.runId);
-  if (latest?.stopRequested) {
-    // 创建与停止并发：不启动 supervisor（08 §8.1「迟到 handle 只能进入清理，不能启动 Agent」）。
-    await compensation.requestTermination({
-      runId: run.runId,
-      runGeneration: run.runGeneration,
-      reason: "stop-after-create",
-    });
-    await settle("settled");
-    return {
-      operationId: leased.operation.operationId,
-      outcome: "skipped",
-      reason: "stop-after-create",
-    };
-  }
-
-  // 01 §5.1 第 3 条 + §7.2：持久 handle/deadline 之后依次执行 bootstrap 步骤
-  // （**clone grant 签发 → 拉起 supervisor**），正常路径与对账恢复路径共用。
-  // 放在 settle 之前：失败时本 operation 记 `failed(<归一码>)`，不留"settled 却没人管"。
-  const started = await bootstrapSandboxWithCompensation({
-    run,
-    compensation,
-    settleFailed: async (code) => {
-      await settle("failed", code);
-    },
-    bootstrap: async () => {
-      // clone grant 必须在 supervisor 启动**之前**：TTL 60s，而 supervisor 启动 → hello →
-      // welcome → bootstrap.config → 兑换实测约 2s，窗口足够；接纳期不能签（create 可能几十秒）。
-      const cloneGrant = await gitGrants.issueForRun({ runId: run.runId, purpose: "clone" });
-      if (!cloneGrant.ok) {
-        if (isRecoverableGitGrantFailure(cloneGrant.code)) {
-          // 可自愈（外部临时不可用）：记录并继续，由兑换侧失败 + 对账兜住，不阻塞 bootstrap。
-          cloudCoreLogger.warn(undefined, "cloud clone grant issuance deferred", {
-            runId: run.runId,
-            code: cloneGrant.code,
-            reason: cloneGrant.reason,
-          });
-        } else {
-          // 不可自愈（终态/停止/仓库未绑定/权限被撤/未配置）：不要启动注定 clone 失败的沙箱。
-          throw new SandboxBootstrapError(
-            cloneGrant.code,
-            "git-grant-issuance-failed",
-            `clone grant issuance failed: ${cloneGrant.reason}`,
-          );
-        }
-      }
-      await driver.startSupervisor(handle, {
-        operationKey: createOperationKey(run.runId),
-        runId: run.runId,
-        runGeneration: run.runGeneration,
-        publicControlPlaneUrl: config.publicControlPlaneUrl,
-        bootstrapTicket,
-        taskId: run.taskId,
-        workspacePath,
-      });
-    },
-  });
-  if (!started.ok) {
-    return {
-      operationId: leased.operation.operationId,
-      outcome: "failed",
-      reason: started.code === "bootstrap_failed" ? "bootstrap-failed" : "bootstrap-step-failed",
-    };
-  }
-
-  await settle("settled");
-  return { operationId: leased.operation.operationId, outcome: "created", runId: run.runId };
+  return toCreateAttemptOutcome(input.leased.operation.operationId, result);
 }
