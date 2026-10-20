@@ -64,6 +64,29 @@ modules:
   - id: e2e-report
     roots: [packages/e2e-report/src]
     managed: false
+  # Cloud Agent：独立模块，只经公开入口消费 ZCode；边界由
+  # packages/cloud-control-plane/test/boundary.test.ts 强制。
+  - id: cloud-protocol
+    roots: [packages/cloud-protocol]
+    managed: true
+    requires: []
+    publicEntrypoints: [packages/cloud-protocol/src/index.ts]
+    layers:
+      domain: "."
+  - id: cloud-bridge
+    roots: [packages/cloud-bridge]
+    managed: true
+    requires: [cloud-protocol]
+    publicEntrypoints: [packages/cloud-bridge/src/index.ts]
+    layers:
+      app: "."
+  - id: cloud-control-plane
+    roots: [packages/cloud-control-plane]
+    managed: true
+    requires: [cloud-protocol, rpc, client, shared]
+    publicEntrypoints: [packages/cloud-control-plane/src/index.ts]
+    layers:
+      app: "."
   - id: zcode-cli
     roots: [apps/zcode-cli]
     managed: false

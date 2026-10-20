@@ -1,0 +1,28 @@
+{
+  "name": "@zcode/cloud-control-plane",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "node --import tsx src/entry/main.ts",
+    "typecheck": "tsc -b tsconfig.json",
+    "test": "vitest run",
+    "lint": "oxlint src test"
+  },
+  "dependencies": {
+    "@zcode/client": "workspace:*",
+    "@zcode/cloud-protocol": "workspace:*",
+    "@zcode/rpc": "workspace:*",
+    "@zcode/shared": "workspace:*",
+    "ws": "^8.20.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4.20.6",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.1"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "lib": ["es2025"]
+  },
+  "include": ["src"],
+  "references": [{ "path": "../cloud-protocol" }]
+}

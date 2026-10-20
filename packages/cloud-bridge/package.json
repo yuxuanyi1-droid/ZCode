@@ -1,0 +1,27 @@
+{
+  "name": "@zcode/cloud-bridge",
+  "private": true,
+  "bin": {
+    "zcode-cloud-bridge": "./dist/bridge.js"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/bridge.js --banner:js=\"import{createRequire as __cr}from'node:module';const require=__cr(import.meta.url);\"",
+    "typecheck": "tsc -b tsconfig.json",
+    "test": "vitest run",
+    "lint": "oxlint src test"
+  },
+  "dependencies": {
+    "@zcode/cloud-protocol": "workspace:*",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "esbuild": "^0.25.12",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.1"
+  }
+}
