@@ -35,6 +35,7 @@ export interface ProcessSandboxDriverOptions {
 export class ProcessSandboxDriver implements SandboxDriver {
   public readonly capabilities;
   public readonly skipCheckout: boolean;
+  public readonly seedsProviderConfig = true;
 
   public constructor(private readonly options: ProcessSandboxDriverOptions) {
     this.capabilities = options.capabilities;
@@ -64,6 +65,16 @@ export class ProcessSandboxDriver implements SandboxDriver {
     const dataDir = join(root, "data");
     await mkdir(serverRoot, { recursive: true });
     await mkdir(dataDir, { recursive: true });
+    if (spec.providerConfig) {
+      // daemon 的数据根是 <ZCODE_DATA_BASE_DIR>/.zcode/v2。
+      const configDir = join(dataDir, ".zcode", "v2");
+      await mkdir(configDir, { recursive: true });
+      await writeFile(
+        join(configDir, "provider_config.json"),
+        JSON.stringify({ schemaVersion: 1, config: spec.providerConfig }),
+        { mode: 0o600 },
+      );
+    }
     // checkout 由控制面通过 exec 完成；这里只确保父目录存在。
     await mkdir(dirname(spec.checkoutPath), { recursive: true });
 

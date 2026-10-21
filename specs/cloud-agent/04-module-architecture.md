@@ -17,14 +17,16 @@ Web 客户端**不新增包**：控制面直接托管仓库既有的 `packages/w
 ```text
 cloud-control-plane/src/
   domain/           Task / Run / Input 记录类型
-  app/              端口 + 用例（供给、输入投递、投影轮询、生命周期）+ DTO
+  app/              端口 + 用例（供给、checkout、输入投递、投影轮询、空闲暂停、
+                    GitHub 发布、诊断）+ DTO
   adapters/
     storage/        SQLite（node:sqlite）+ attach token 加密
     providers/      进程型沙箱驱动（local / fake）与替身 daemon
     tunnel/         反向通道服务端、TunnelDuplex、duplex HTTP/WS 客户端
     zcode/          daemon 客户端（server-info、ChannelClient、本机 daemon）
   channels/         通用 channel 代理
-  http/             原始 Web 托管、登录门、任务选择、/ws 与 /api 代理、云 API
+  http/             原始 Web 托管、登录门、任务选择、/ws 与 /api 代理、云 API、
+                    runtime 归档下载、页面模板
   entry/            进程装配
 ```
 

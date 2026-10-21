@@ -52,9 +52,11 @@ export class DaemonSupervisor {
     let stderr = "";
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
+      process.stderr.write(`[daemon:out] ${chunk.toString("utf8")}`);
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
+      process.stderr.write(`[daemon:err] ${chunk.toString("utf8")}`);
     });
     const exit = new Promise<number>((resolve) => {
       child.once("exit", (code) => resolve(code ?? 1));

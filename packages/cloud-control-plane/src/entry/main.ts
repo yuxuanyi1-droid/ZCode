@@ -3,6 +3,9 @@ import { join } from "node:path";
 
 import { loadConfig } from "../config.js";
 import { ProcessSandboxDriver, FAKE_DAEMON_ENTRY } from "../adapters/providers/processDriver.js";
+import { E2bSandboxDriver } from "../adapters/providers/e2bDriver.js";
+import { GitHubAppClient } from "../adapters/github/githubApp.js";
+import { buildLocalProvisioningEnvelope } from "../adapters/provisioning/localEnvelope.js";
 import { CloudStore } from "../adapters/storage/db.js";
 import { SecretBox } from "../adapters/storage/secrets.js";
 import { BridgeServer } from "../adapters/tunnel/server.js";
@@ -34,6 +37,27 @@ async function main(): Promise<void> {
       );
       continue;
     }
+    if (id === "e2b") {
+      const templateRef = config.sandboxTemplateRef;
+      if (!config.e2bApiKey || !templateRef.startsWith("e2b:")) {
+        throw new Error("E2B_API_KEY and an e2b:<template> ref are required for the e2b provider");
+      }
+      if (!config.serverReleaseTarball) {
+        throw new Error("CLOUD_SERVER_RELEASE_TARBALL is required for the e2b provider");
+      }
+      drivers.set(
+        "e2b",
+        new E2bSandboxDriver({
+          apiKey: config.e2bApiKey,
+          templateId: templateRef.slice("e2b:".length),
+          maxLifetimeSeconds: config.sandboxMaxLifetimeSeconds,
+          bridgeBundlePath: config.bridgeBundlePath,
+          releaseAssetUrl: (runId) =>
+            `${config.publicHttpOrigin.replace(/\/$/u, "")}/api/cloud/assets/server-release?runId=${encodeURIComponent(runId)}`,
+        }),
+      );
+      continue;
+    }
     if (id === "local") {
       if (!config.serverBin) {
         throw new Error("ZCODE_SERVER_BIN is required when CLOUD_PROVIDERS includes local");
@@ -53,6 +77,7 @@ async function main(): Promise<void> {
     throw new Error(`unsupported provider: ${id}`);
   }
 
+  const gitHub = config.githubApp ? new GitHubAppClient(config.githubApp) : null;
   const orchestrator = new Orchestrator({
     store,
     secrets,
@@ -60,6 +85,14 @@ async function main(): Promise<void> {
     defaultProvider: config.defaultProvider,
     publicUrl: config.publicUrl,
     broadcast: events.broadcast,
+    gitHub,
+    sandboxIdlePauseSeconds: config.sandboxIdlePauseSeconds,
+    keepFailedSandboxes: config.keepFailedSandboxes,
+    provisioningEnvelope: () =>
+      buildLocalProvisioningEnvelope({
+        zcodeHome: config.zcodeHome,
+        credentialSecret: config.credentialSecret,
+      }),
   });
 
   const bridgeServer = new BridgeServer({
@@ -78,6 +111,8 @@ async function main(): Promise<void> {
     bridgeServer,
     events,
     accountLink: null,
+    serverReleaseTarball: config.serverReleaseTarball,
+    verifyAttachToken: (runId, token) => orchestrator.verifyAttach(runId, token) !== null,
     providers: [...drivers.values()].map((driver) => ({
       id: driver.id,
       label: driver.label,

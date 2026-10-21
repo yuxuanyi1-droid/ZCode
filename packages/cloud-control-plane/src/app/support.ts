@@ -18,6 +18,14 @@ export function isTerminalRun(run: RunRecord): boolean {
   return run.status === "stopped" || run.status === "expired" || run.status === "failed";
 }
 
+export function parseGitHubRepo(repoUrl: string): { owner: string; name: string } | null {
+  const match = /github\.com[/:]([^/]+)\/([^/?#]+?)(?:\.git)?$/u.exec(repoUrl.trim());
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+  return { owner: match[1], name: match[2] };
+}
+
 export function parseRepoUrl(repoUrl: string): { owner: string; name: string } {
   const cleaned = repoUrl.replace(/\.git$/u, "").replace(/\/+$/u, "");
   if (cleaned.includes("@") && cleaned.includes(":")) {
@@ -63,6 +71,7 @@ export function toTaskDto(store: CloudStore, task: TaskRecord): CloudTaskDto {
   const active = task.activeRunId ? store.getRun(task.activeRunId) : null;
   // 无 active run 时回退到最近一次 Run，UI 需要展示终态与诊断。
   const run = active ?? store.listRuns(task.id)[0] ?? null;
+  const artifact = store.getArtifact(task.id);
   return {
     id: task.id,
     projectId: task.projectId,
@@ -77,6 +86,16 @@ export function toTaskDto(store: CloudStore, task: TaskRecord): CloudTaskDto {
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     run: toRunDto(run),
+    artifact: artifact
+      ? {
+          kind: artifact.kind,
+          taskBranch: artifact.taskBranch,
+          prNumber: artifact.prNumber,
+          prUrl: artifact.prUrl,
+          prStatus: artifact.prStatus,
+          publishedSha: artifact.publishedSha,
+        }
+      : null,
   };
 }
 

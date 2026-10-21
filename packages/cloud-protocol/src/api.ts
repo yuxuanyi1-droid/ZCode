@@ -29,6 +29,15 @@ export interface CloudRunSummaryDto {
   endedAt: number | null;
 }
 
+export interface CloudArtifactDto {
+  kind: "code" | "noChanges";
+  taskBranch: string | null;
+  prNumber: number | null;
+  prUrl: string | null;
+  prStatus: string | null;
+  publishedSha: string | null;
+}
+
 export interface CloudTaskDto {
   id: string;
   projectId: string;
@@ -43,6 +52,7 @@ export interface CloudTaskDto {
   createdAt: number;
   updatedAt: number;
   run: CloudRunSummaryDto | null;
+  artifact: CloudArtifactDto | null;
 }
 
 export interface CloudInputDto {

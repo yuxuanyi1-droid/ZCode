@@ -12,7 +12,7 @@ import {
   type SubmitInputRequest,
 } from "@zcode/cloud-protocol";
 
-import type { InputRecord, RunRecord, TaskRecord } from "../domain/types.js";
+import type { RunRecord, TaskRecord } from "../domain/types.js";
 import {
   isTerminalRun,
   parseRepoUrl,
@@ -22,12 +22,38 @@ import {
   toTaskDto,
 } from "./support.js";
 import { ProjectionPoller } from "./projectionPoller.js";
+import { IdlePauseController } from "./idlePause.js";
+import { checkoutWorkspace } from "./checkout.js";
+import { debugTask as debugTaskImpl } from "./debugTask.js";
+import { deliverOne, deliverPending } from "./inputDelivery.js";
+import { publishArtifact, type GitHubRunMeta } from "./githubPublish.js";
 import { CloudStore } from "../adapters/storage/db.js";
 import type { SecretBox } from "../adapters/storage/secrets.js";
 import type { DaemonConnection } from "../adapters/zcode/daemonClient.js";
 import { connectDaemon } from "../adapters/zcode/daemonClient.js";
 import type { RunAttachment } from "../adapters/tunnel/server.js";
+import type { GitHubAppClient } from "../adapters/github/githubApp.js";
 import type { SandboxDriver, SandboxHandle } from "../adapters/providers/types.js";
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 export type CloudEvent =
   | { type: "task"; taskId: string }
@@ -48,6 +74,12 @@ export interface OrchestratorDeps {
   broadcast: (event: CloudEvent) => void;
   /** 账号域可用时返回 provisioning 信封；不可用返回 null。 */
   provisioningEnvelope?: () => Promise<unknown | null>;
+  /** GitHub App；未配置时跳过 clone token 与 PR 发布。 */
+  gitHub?: GitHubAppClient | null;
+  /** 空闲暂停秒数；require provider 支持 pause。 */
+  sandboxIdlePauseSeconds?: number | null;
+  /** 诊断用：保留失败沙箱以便抓取日志。 */
+  keepFailedSandboxes?: boolean;
 }
 
 export class Orchestrator {
@@ -55,6 +87,7 @@ export class Orchestrator {
   private readonly connections = new Map<string, DaemonConnection>();
   private readonly sessions = new Map<string, string>();
   private readonly projectIds = new Map<string, string>();
+  private readonly githubRuns = new Map<string, GitHubRunMeta>();
   private readonly pipeline = new Set<string>();
   private readonly readyWaiters = new Map<
     string,
@@ -62,9 +95,21 @@ export class Orchestrator {
   >();
 
   private readonly projection: ProjectionPoller;
+  private readonly idle: IdlePauseController;
 
   public constructor(private readonly deps: OrchestratorDeps) {
     this.projection = new ProjectionPoller(deps.store, deps.broadcast);
+    this.idle = new IdlePauseController(
+      deps.store,
+      deps.drivers,
+      deps.sandboxIdlePauseSeconds,
+      (runId, taskId) => {
+        this.connections.get(runId)?.dispose();
+        this.connections.delete(runId);
+        this.projection.stop(runId);
+        this.deps.broadcast({ type: "task", taskId });
+      },
+    );
   }
 
   // ── projects ────────────────────────────────────────────────
@@ -224,15 +269,24 @@ export class Orchestrator {
     this.deps.broadcast({ type: "task", taskId });
 
     if (activeRun) {
+      if (activeRun.status === "paused") {
+        await this.resumeRun(activeRun);
+        return toInputDto(input);
+      }
       const connection = this.connections.get(activeRun.id);
       if (connection && activeRun.status === "ready") {
-        await this.deliverOne(activeRun, task, connection, input);
+        await deliverOne(this.deliveryContext(), activeRun, task, connection, input);
       }
       return toInputDto(this.deps.store.getInput(taskId, request.commandId) ?? input);
     }
 
     void this.ensureRun(task.id).catch(() => undefined);
     return toInputDto(input);
+  }
+
+  /** 诊断：见 app/debugTask。 */
+  public async debugTask(taskId: string): Promise<unknown> {
+    return debugTaskImpl({ store: this.deps.store, connections: this.connections, taskId });
   }
 
   public getInput(taskId: string, commandId: string): CloudInputDto {
@@ -262,6 +316,14 @@ export class Orchestrator {
     });
     this.deps.store.updateRun(run.id, { status: "draining" });
     this.deps.broadcast({ type: "task", taskId });
+
+    // 停止前把沙箱内改动发布为分支/PR；失败只标记 dataAtRisk，不阻断停止。
+    await this.publish(run, task).catch((error: unknown) => {
+      this.deps.store.updateRun(run.id, {
+        dataAtRisk: true,
+        lastError: error instanceof Error ? error.message : String(error),
+      });
+    });
 
     const connection = this.connections.get(run.id);
     const sessionId = this.sessions.get(run.id);
@@ -414,6 +476,7 @@ export class Orchestrator {
 
   public dispose(): void {
     this.projection.stopAll();
+    this.idle.clearAll();
     for (const connection of this.connections.values()) {
       connection.dispose();
     }
@@ -430,6 +493,16 @@ export class Orchestrator {
   }
 
   // ── internal ────────────────────────────────────────────────
+
+  private deliveryContext() {
+    return {
+      store: this.deps.store,
+      sessions: this.sessions,
+      projectIds: this.projectIds,
+      projection: this.projection,
+      broadcast: this.deps.broadcast,
+    };
+  }
 
   private publicUrl(): string {
     return typeof this.deps.publicUrl === "function" ? this.deps.publicUrl() : this.deps.publicUrl;
@@ -471,24 +544,57 @@ export class Orchestrator {
     if (!ingressToken) {
       throw new Error("daemon ingress token missing");
     }
+    process.stderr.write(`[cloud-pipeline] ${run.id} connect\n`);
     const connection = await connectDaemon(attachment, ingressToken);
     this.connections.set(run.id, connection);
+    process.stderr.write(`[cloud-pipeline] ${run.id} connected\n`);
 
     if (this.deps.provisioningEnvelope) {
       const envelope = await this.deps.provisioningEnvelope();
       if (envelope) {
-        const result = (await connection.applyProvisioning(envelope)) as { status?: string };
-        const status = result?.status ?? "";
-        if (status !== "applied" && status !== "already-applied") {
-          throw new Error(`provider provisioning failed: ${status || "unknown"}`);
+        process.stderr.write(`[cloud-pipeline] ${run.id} provisioning\n`);
+        try {
+          const result = (await withTimeout(
+            connection.applyProvisioning(envelope),
+            30_000,
+            "provider provisioning",
+          )) as { status?: string };
+          const status = result?.status ?? "";
+          if (status !== "applied" && status !== "already-applied") {
+            process.stderr.write(
+              `[cloud-pipeline] ${run.id} provisioning returned ${status || "unknown"}; continuing with seeded config\n`,
+            );
+          }
+        } catch (error) {
+          // 公网隧道下 host 通道可能不可用；沙箱已预置 provider_config.json，降级继续。
+          process.stderr.write(
+            `[cloud-pipeline] ${run.id} provisioning skipped: ${error instanceof Error ? error.message : String(error)}\n`,
+          );
         }
       }
     }
 
     const driver = this.deps.drivers.get(run.provider);
     if (driver && !driver.skipCheckout) {
-      await this.checkout(attachment, task, run);
+      process.stderr.write(`[cloud-pipeline] ${run.id} checkout\n`);
+      const project = this.deps.store.getProject(task.projectId);
+      if (!project) {
+        throw new Error("project disappeared");
+      }
+      await withTimeout(
+        checkoutWorkspace({
+          attachment,
+          task,
+          run,
+          project,
+          gitHub: this.deps.gitHub,
+          onGitHubMeta: (meta) => this.githubRuns.set(run.id, meta),
+        }),
+        180_000,
+        "checkout",
+      );
     }
+    process.stderr.write(`[cloud-pipeline] ${run.id} project\n`);
 
     // 远程 owner 的 Host 要求 session 绑定项目（project.remote-project-required）。
     // 每个云任务在沙箱内是单 root 项目，checkout 完成后登记。
@@ -510,49 +616,17 @@ export class Orchestrator {
     if (projectId) {
       this.projectIds.set(run.id, projectId);
     }
+    process.stderr.write(`[cloud-pipeline] ${run.id} ready\n`);
     // Session 不在供给期强建：没有模型凭据时会让整个 Run 失败，
     // 且浏览器会自行创建会话；首个 API 输入到达时再惰性创建。
     this.deps.store.updateRun(run.id, { status: "ready", readyAt: Date.now() });
     this.deps.store.setTaskStatus(task.id, "active");
     this.deps.broadcast({ type: "task", taskId: task.id });
 
-    await this.deliverPending(run, task, connection);
+    await deliverPending(this.deliveryContext(), run, task, connection);
     this.projection.start(run, task, connection);
+    this.idle.schedule(run, task);
     this.resolveReadyWaiter(run.id);
-  }
-
-  private async checkout(
-    attachment: RunAttachment,
-    task: TaskRecord,
-    run: RunRecord,
-  ): Promise<void> {
-    const project = this.deps.store.getProject(task.projectId);
-    if (!project) {
-      throw new Error("project disappeared");
-    }
-    const duplex = await attachment.openStream("exec", [
-      "git",
-      "clone",
-      "--depth",
-      "1",
-      "--branch",
-      task.baseBranch ?? project.defaultBranch,
-      project.repoUrl,
-      run.checkoutPath,
-    ]);
-    let output = "";
-    duplex.on("data", (chunk: Buffer) => {
-      output += chunk.toString("utf8");
-      if (output.length > 20_000) output = output.slice(-20_000);
-    });
-    await new Promise<void>((resolve, reject) => {
-      duplex.once("end", () => resolve());
-      duplex.once("error", (error) => reject(error));
-    }).catch((error: unknown) => {
-      throw new Error(
-        `checkout failed: ${error instanceof Error ? error.message : String(error)} ${output}`,
-      );
-    });
   }
 
   private async ensureRun(taskId: string): Promise<void> {
@@ -589,8 +663,12 @@ export class Orchestrator {
       attachTokenEnc: this.deps.secrets.encrypt(attachToken),
     });
     this.deps.broadcast({ type: "task", taskId: task.id });
-    const ready = this.waitForReady(run.id, 120_000);
+    const ready = this.waitForReady(run.id, 300_000);
     let handle: SandboxHandle | null = null;
+    const envelope =
+      driver.seedsProviderConfig && this.deps.provisioningEnvelope
+        ? await this.deps.provisioningEnvelope().catch(() => null)
+        : null;
     try {
       handle = await driver.create({
         runId,
@@ -604,12 +682,15 @@ export class Orchestrator {
         checkoutPath,
         controlPlaneUrl: this.publicUrl(),
         attachToken,
+        ...(envelope
+          ? { providerConfig: (envelope as { personalConfig?: unknown }).personalConfig }
+          : {}),
       });
       this.deps.store.updateRun(run.id, { providerHandle: JSON.stringify(handle) });
       await ready;
     } catch (error) {
       await this.failRun(run, error);
-      if (handle) {
+      if (handle && !this.deps.keepFailedSandboxes) {
         await driver.terminate(handle).catch(() => undefined);
       }
       throw error;
@@ -644,6 +725,14 @@ export class Orchestrator {
     this.connections.delete(run.id);
     this.sessions.delete(run.id);
     const latest = this.deps.store.getRun(run.id);
+    const driver = this.deps.drivers.get(run.provider);
+    if (driver && latest?.providerHandle && !this.deps.keepFailedSandboxes) {
+      try {
+        await driver.terminate(JSON.parse(latest.providerHandle) as SandboxHandle);
+      } catch {
+        // provider 已回收。
+      }
+    }
     if (latest && !isTerminalRun(latest)) {
       this.deps.store.updateRun(run.id, {
         status: "failed",
@@ -663,84 +752,31 @@ export class Orchestrator {
     this.deps.broadcast({ type: "task", taskId: run.taskId });
   }
 
-  private async deliverPending(
-    run: RunRecord,
-    task: TaskRecord,
-    connection: DaemonConnection,
-  ): Promise<void> {
-    const inputs = this.deps.store.listDeliverableInputs(task.id, run.id);
-    for (const input of inputs) {
-      if (input.intent === "stop") {
-        continue;
-      }
-      await this.deliverOne(run, task, connection, input);
-    }
-  }
-
-  /** 惰性创建 runtime session；浏览器也可能先自行创建，二者共用同一 workspace。 */
-  private async ensureSession(
-    run: RunRecord,
-    task: TaskRecord,
-    connection: DaemonConnection,
-  ): Promise<string> {
-    const existing = this.sessions.get(run.id);
-    if (existing) {
-      return existing;
-    }
-    await connection
-      .callAgent("initialize", {
-        workspacePath: run.checkoutPath,
-        workspaceIdentity: task.workspaceIdentity,
-      })
-      .catch(() => undefined);
-    const projectId = this.projectIds.get(run.id);
-    const snapshot = await connection.callAgent<{
-      sessionId?: string;
-      session?: { sessionId?: string };
-    }>("createSession", {
-      ...(projectId ? { projectId } : {}),
-      workspacePath: run.checkoutPath,
-      workspaceIdentity: task.workspaceIdentity,
-    });
-    const sessionId = snapshot?.sessionId ?? snapshot?.session?.sessionId;
-    if (!sessionId) {
-      throw new Error("createSession returned no sessionId");
-    }
-    this.sessions.set(run.id, sessionId);
-    this.projection.start(run, task, connection);
-    return sessionId;
-  }
-
-  private async deliverOne(
-    run: RunRecord,
-    task: TaskRecord,
-    connection: DaemonConnection,
-    input: InputRecord,
-  ): Promise<void> {
-    if (input.deliveryStatus === "acked") {
+  private async publish(run: RunRecord, task: TaskRecord): Promise<void> {
+    const gitHub = this.deps.gitHub;
+    const meta = this.githubRuns.get(run.id);
+    const attachment = this.attachments.get(run.id);
+    if (!gitHub || !meta || !attachment) {
       return;
     }
-    const payload = JSON.parse(input.payloadJson) as {
-      prompt?: string;
-      modelSelection?: Record<string, unknown>;
-    };
-    this.deps.store.markInputDelivered(input.id, run.id);
-    try {
-      const sessionId = await this.ensureSession(run, task, connection);
-      await connection.callAgent("sendPrompt", {
-        workspacePath: run.checkoutPath,
-        workspaceIdentity: task.workspaceIdentity,
-        sessionId,
-        content: payload.prompt ?? "",
-        ...(payload.modelSelection ? { modelSelection: payload.modelSelection } : {}),
-      });
-      this.deps.store.markInputAcked(input.id);
-    } catch (error) {
-      this.deps.store.markInputFailed(
-        input.id,
-        error instanceof Error ? error.message : String(error),
-      );
+    await publishArtifact({
+      gitHub,
+      meta,
+      attachment,
+      run,
+      task,
+      store: this.deps.store,
+    });
+  }
+
+  private async resumeRun(run: RunRecord): Promise<void> {
+    const driver = this.deps.drivers.get(run.provider);
+    if (!driver?.resume || !run.providerHandle) {
+      return;
     }
-    this.deps.broadcast({ type: "task", taskId: task.id });
+    const handle = JSON.parse(run.providerHandle) as SandboxHandle;
+    await driver.resume(handle);
+    this.deps.store.updateRun(run.id, { status: "provisioning" });
+    this.deps.broadcast({ type: "task", taskId: run.taskId });
   }
 }

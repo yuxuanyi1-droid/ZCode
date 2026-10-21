@@ -12,8 +12,19 @@ function parseConfigPath(argv: string[]): string {
 }
 
 function log(message: string): void {
-  process.stderr.write(`[cloud-bridge] ${message}\n`);
+  process.stderr.write(`[cloud-bridge] ${new Date().toISOString()} ${message}\n`);
 }
+
+process.on("uncaughtException", (error) => {
+  log(`uncaught: ${error.stack ?? error.message}`);
+  process.exit(1);
+});
+process.on("unhandledRejection", (error) => {
+  log(`unhandled: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+});
+process.on("exit", (code) => {
+  process.stderr.write(`[cloud-bridge] exit ${code}\n`);
+});
 
 async function main(): Promise<void> {
   const configPath = parseConfigPath(process.argv.slice(2));

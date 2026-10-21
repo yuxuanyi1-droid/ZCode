@@ -10,6 +10,8 @@ export interface SandboxSpec {
   checkoutPath: string;
   controlPlaneUrl: string;
   attachToken: string;
+  /** 在 daemon 启动前写入 dataDir/provider_config.json。 */
+  providerConfig?: unknown;
 }
 
 export interface SandboxHandle {
@@ -28,7 +30,11 @@ export interface SandboxDriver {
   };
   /** fake provider 不需要真实 checkout。 */
   readonly skipCheckout?: boolean;
+  /** provider 配置由沙箱启动前落盘，不再经 host RPC 下发。 */
+  readonly seedsProviderConfig?: boolean;
   checkoutPath(taskStableId: string, repoName: string): string;
   create(spec: SandboxSpec): Promise<SandboxHandle>;
   terminate(handle: SandboxHandle): Promise<void>;
+  pause?(handle: SandboxHandle): Promise<void>;
+  resume?(handle: SandboxHandle): Promise<void>;
 }

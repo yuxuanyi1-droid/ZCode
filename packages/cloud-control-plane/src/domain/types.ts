@@ -63,6 +63,17 @@ export interface InputRecord {
   createdAt: number;
 }
 
+export interface ArtifactRecord {
+  taskId: string;
+  kind: "code" | "noChanges";
+  taskBranch: string | null;
+  prNumber: number | null;
+  prUrl: string | null;
+  prStatus: string | null;
+  publishedSha: string | null;
+  updatedAt: number;
+}
+
 export interface ProjectionRecord {
   taskId: string;
   logEpoch: number;

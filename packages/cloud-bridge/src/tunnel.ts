@@ -84,7 +84,7 @@ export class TunnelClient {
       this.missedHeartbeats = 0;
       this.sendHello();
       this.startHeartbeat();
-      this.options.onLog?.("tunnel connected");
+      this.options.onLog?.(`tunnel connected pid=${process.pid}`);
     });
     socket.on("message", (data, isBinary) => {
       if (isBinary) {
@@ -106,6 +106,7 @@ export class TunnelClient {
         return;
       }
       this.options.onLog?.(`tunnel closed (${code} ${reason.toString()})`);
+      process.stderr.write(`[cloud-bridge] reconnect scheduled\n`);
       this.scheduleReconnect();
     });
   }

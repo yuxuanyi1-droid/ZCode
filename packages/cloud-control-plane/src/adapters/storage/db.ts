@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { CloudInputIntent, CloudRunStatus, CloudTaskStatus } from "@zcode/cloud-protocol";
 
 import type {
+  ArtifactRecord,
   InputRecord,
   ProjectRecord,
   ProjectionRecord,
@@ -90,6 +91,17 @@ CREATE TABLE IF NOT EXISTS projections (
   payload_json TEXT NOT NULL,
   ingested_at INTEGER NOT NULL,
   PRIMARY KEY (task_id, log_epoch, seq)
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+  kind TEXT NOT NULL,
+  task_branch TEXT,
+  pr_number INTEGER,
+  pr_url TEXT,
+  pr_status TEXT,
+  published_sha TEXT,
+  updated_at INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
@@ -523,6 +535,51 @@ export class CloudStore {
       .prepare("SELECT 1 AS present FROM inputs WHERE task_id = ? AND intent = ? LIMIT 1")
       .get(taskId, intent) as { present: number } | undefined;
     return Boolean(row);
+  }
+
+  // ── artifacts ───────────────────────────────────────────────
+
+  public setArtifact(input: {
+    taskId: string;
+    kind: "code" | "noChanges";
+    taskBranch?: string | null;
+    prNumber?: number | null;
+    prUrl?: string | null;
+    prStatus?: string | null;
+    publishedSha?: string | null;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO artifacts (task_id, kind, task_branch, pr_number, pr_url, pr_status, published_sha, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.taskId,
+        input.kind,
+        input.taskBranch ?? null,
+        input.prNumber ?? null,
+        input.prUrl ?? null,
+        input.prStatus ?? null,
+        input.publishedSha ?? null,
+        Date.now(),
+      );
+  }
+
+  public getArtifact(taskId: string): ArtifactRecord | null {
+    const row = this.db.prepare("SELECT * FROM artifacts WHERE task_id = ?").get(taskId);
+    if (!row) {
+      return null;
+    }
+    return {
+      taskId: String(row["task_id"]),
+      kind: String(row["kind"]) as ArtifactRecord["kind"],
+      taskBranch: row["task_branch"] == null ? null : String(row["task_branch"]),
+      prNumber: row["pr_number"] == null ? null : Number(row["pr_number"]),
+      prUrl: row["pr_url"] == null ? null : String(row["pr_url"]),
+      prStatus: row["pr_status"] == null ? null : String(row["pr_status"]),
+      publishedSha: row["published_sha"] == null ? null : String(row["published_sha"]),
+      updatedAt: Number(row["updated_at"]),
+    };
   }
 
   // ── projections ─────────────────────────────────────────────

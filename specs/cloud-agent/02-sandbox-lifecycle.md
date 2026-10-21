@@ -155,10 +155,11 @@ sequenceDiagram
 
 ## 5. Provisioning 下发
 
-- 通道：daemon 原生 `provider-provisioning-target`（`IProviderProvisioningTargetService.apply`），控制面通过隧道 RPC 调用。
-- 信封构造：控制面读取 account daemon 的公开事实（`settingService.get`、`credentialService.load` 的 allowlist 键、个人 provider 配置），按 `providerProvisioningEnvelopeSchema` 校验。
+- 通道：daemon 原生 `provider-provisioning-target`（`IProviderProvisioningTargetService.apply`），控制面通过 `/ws/host` RPC 调用。
+- 兜底：沙箱启动前先把个人 provider 配置写入 `<ZCODE_DATA_BASE_DIR>/.zcode/v2/provider_config.json`；Host 通道不可用（隧道异常/旧 daemon）时 provisioning 尝试 30s 后降级继续，不阻断 Run ready。
+- 信封构造：控制面读取本机账号事实（`provider_config.json`、`setting.json`、`credentials.json`），按 `providerProvisioningEnvelopeSchema` 校验。
 - 触发：新 Run ready 前；账号配置可见变化时对在线 Run 重推（节流单飞）。
-- 结果：`applied` / `already-applied` 才允许 ready；`failed` / `rollback_failed` / `unsupported` 使 Run 供给失败。
+- 结果：`applied` / `already-applied` 为成功；`failed` / `unsupported` 或超时记录诊断并继续（依赖预置配置）。
 - 凭据只存在于信封与沙箱正式 Store；控制面不把 Secret 写入日志或投影。
 
 ## 6. Git 与工作区

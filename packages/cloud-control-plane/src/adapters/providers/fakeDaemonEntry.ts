@@ -109,6 +109,21 @@ function agentChannel(): IServerChannel {
           const session = sessions.get(String(params["sessionId"] ?? ""));
           return (session ? [...session.messages] : []) as T;
         }
+        case "conversationRowsRangeV4": {
+          const session = sessions.get(String(params["sessionId"] ?? ""));
+          const messages = session?.messages ?? [];
+          const limit = Number(params["limit"] ?? 50);
+          const rows = messages
+            .slice(-limit)
+            .map((message, index) => ({ rowId: index + 1, ...message }));
+          return {
+            rows,
+            atSeq: messages.length,
+            atRevision: messages.length,
+            atLogEpoch: "1",
+            hasMore: false,
+          } as T;
+        }
         case "listSessions":
           return [...sessions.values()]
             .map((session) => ({
@@ -183,7 +198,7 @@ async function startDaemon(serverRoot: string): Promise<void> {
     }
     if (req.url === "/api/rpc-host-capability") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({}));
+      res.end(JSON.stringify({ capability: "fake-host-capability" }));
       return;
     }
     res.writeHead(404);

@@ -45,29 +45,20 @@ export class ProjectionPoller {
               epochs.set(info.sessionId, epochs.size + 1);
             }
             const epoch = epochs.get(info.sessionId) ?? 1;
-            const messages = await connection.callAgent<Array<Record<string, unknown>>>(
-              "readSessionMessages",
-              {
-                workspacePath: run.checkoutPath,
-                workspaceIdentity: task.workspaceIdentity,
-                sessionId: info.sessionId,
-                limit: 500,
-              },
-            );
-            if (!Array.isArray(messages)) {
-              continue;
-            }
-            messages.forEach((message, index) => {
+            // v4 投影：rows/range 是稳定行序（rowId 升序），legacy readSessionMessages
+            // 无法解析 v4 消息结构，不能用于云历史。
+            const rows = await this.loadRows(connection, info.sessionId);
+            rows.forEach((row, index) => {
               this.store.appendProjection({
                 taskId: task.id,
                 // 每个 Run 使用独立 epoch；会话内序号保持单调。
                 logEpoch: run.generation,
                 seq: epoch * 1_000_000 + index + 1,
-                kind: "message",
-                payloadJson: JSON.stringify(message),
+                kind: "row",
+                payloadJson: JSON.stringify(row),
               });
             });
-            signature.push(`${info.sessionId}:${messages.length}`);
+            signature.push(`${info.sessionId}:${rows.length}`);
           }
           const current = signature.join("|");
           if (current !== lastSignature) {
@@ -82,6 +73,37 @@ export class ProjectionPoller {
     }, 1000);
     timer.unref?.();
     this.timers.set(run.id, timer);
+  }
+
+  private async loadRows(
+    connection: DaemonConnection,
+    sessionId: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    const pages: Array<Array<Record<string, unknown>>> = [];
+    let beforeRowId: number | undefined;
+    for (let page = 0; page < 6; page += 1) {
+      const result = await connection.callAgent<{
+        rows?: Array<Record<string, unknown>>;
+        hasMore?: boolean;
+      }>("conversationRowsRangeV4", {
+        sessionId,
+        limit: 200,
+        ...(beforeRowId === undefined ? {} : { beforeRowId }),
+      });
+      if (!Array.isArray(result?.rows) || result.rows.length === 0) {
+        break;
+      }
+      pages.unshift(result.rows);
+      if (!result.hasMore) {
+        break;
+      }
+      const firstRowId = result.rows[0]?.["rowId"];
+      if (typeof firstRowId !== "number") {
+        break;
+      }
+      beforeRowId = firstRowId;
+    }
+    return pages.flat();
   }
 
   public stop(runId: string): void {

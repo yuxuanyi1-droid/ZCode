@@ -24,6 +24,7 @@ import type { RunRecord } from "../domain/types.js";
 import type { BridgeServer } from "../adapters/tunnel/server.js";
 import { connectWebSocketOverDuplex, requestOverDuplex } from "../adapters/tunnel/client.js";
 import { proxyChannel } from "../channels/proxy.js";
+import { renderLoginPage, renderTaskListPage } from "./pages.js";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const SESSION_COOKIE = "cloud_session";
@@ -139,38 +140,6 @@ function parseCookies(request: IncomingMessage): Record<string, string> {
   return cookies;
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-const AUTH_PAGE_CSS = `
-  :root { color-scheme: dark; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-    background: #0f1115; color: #e7eaf0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }
-  form { width: min(400px, 90vw); background: #161a21; border: 1px solid #262d38;
-    border-radius: 14px; padding: 26px; display: flex; flex-direction: column; gap: 14px; }
-  h1 { font-size: 18px; margin: 0; }
-  p { margin: 0; color: #939bab; font-size: 13px; }
-  input { background: #1c2129; border: 1px solid #262d38; border-radius: 8px;
-    padding: 10px 12px; color: inherit; font: inherit; outline: none; }
-  input:focus { border-color: #5b8cff; }
-  button { background: #5b8cff; color: #0b0e13; border: none; border-radius: 8px;
-    padding: 10px 14px; font: inherit; font-weight: 600; cursor: pointer; }
-  ul { width: min(720px, 92vw); padding: 0; list-style: none; margin: 0; display: flex;
-    flex-direction: column; gap: 10px; }
-  li { background: #161a21; border: 1px solid #262d38; border-radius: 10px; padding: 14px 16px; }
-  li a { color: #5b8cff; text-decoration: none; font-weight: 600; }
-  .meta { color: #939bab; font-size: 12px; margin-top: 4px; }
-  .shell { padding: 32px 16px; display: flex; flex-direction: column; gap: 18px; align-items: center; }
-  .badge { display: inline-block; border: 1px solid #262d38; border-radius: 999px;
-    padding: 1px 8px; font-size: 11px; color: #939bab; margin-left: 8px; }
-  .empty { color: #939bab; }
-`;
-
 export interface CloudHttpServerOptions {
   host: string;
   port: number;
@@ -188,6 +157,9 @@ export interface CloudHttpServerOptions {
     verified: boolean;
   }>;
   accountLink: { getChannel(name: string): import("@zcode/rpc").IChannel } | null;
+  /** 沙箱 runtime 归档；E2B 等 provider 通过受控 URL 下载。 */
+  serverReleaseTarball: string | null;
+  verifyAttachToken: (runId: string, token: string) => boolean;
 }
 
 export class CloudHttpServer {
@@ -300,6 +272,11 @@ export class CloudHttpServer {
       return;
     }
 
+    if (path === "/api/cloud/assets/server-release") {
+      await this.serveReleaseAsset(request, response, url);
+      return;
+    }
+
     if (path.startsWith("/api/cloud/")) {
       if (!this.isBearerAuthorized(request)) {
         sendJson(response, 401, { error: { code: "unauthorized", message: "invalid token" } });
@@ -330,7 +307,17 @@ export class CloudHttpServer {
         response.end();
         return;
       }
-      this.renderTaskList(response);
+      sendHtml(
+        response,
+        200,
+        renderTaskListPage({
+          tasks: this.options.orchestrator.listTasks(),
+          statusOf: (task) => {
+            const run = this.options.orchestrator.getActiveRun(task.id);
+            return run ? `${run.status} · gen ${run.generation}` : task.status;
+          },
+        }),
+      );
       return;
     }
     const selectMatch = /^\/tasks\/([^/]+)\/select$/u.exec(path);
@@ -380,15 +367,7 @@ export class CloudHttpServer {
         response.end();
         return;
       }
-      sendHtml(
-        response,
-        200,
-        `<!doctype html><html><head><meta charset="utf-8"><title>ZCode Cloud</title><style>${AUTH_PAGE_CSS}</style></head>
-<body><form method="post" action="/login">
-<h1>ZCode Cloud</h1><p>Sign in with your deployment token.</p>
-<input type="password" name="token" placeholder="CLOUD_ACCESS_TOKEN" autofocus required>
-<button type="submit">Continue</button></form></body></html>`,
-      );
+      sendHtml(response, 200, renderLoginPage());
       return;
     }
     if (method !== "POST") {
@@ -400,13 +379,7 @@ export class CloudHttpServer {
     const params = new URLSearchParams(body);
     const token = params.get("token")?.trim() ?? "";
     if (token !== this.options.accessToken) {
-      sendHtml(
-        response,
-        401,
-        `<!doctype html><html><head><meta charset="utf-8"><style>${AUTH_PAGE_CSS}</style></head>
-<body><form method="post" action="/login"><h1>ZCode Cloud</h1><p>Invalid token.</p>
-<input type="password" name="token" autofocus required><button type="submit">Continue</button></form></body></html>`,
-      );
+      sendHtml(response, 401, renderLoginPage({ error: true }));
       return;
     }
     response.writeHead(302, {
@@ -416,24 +389,41 @@ export class CloudHttpServer {
     response.end();
   }
 
-  private renderTaskList(response: ServerResponse): void {
-    const tasks = this.options.orchestrator.listTasks();
-    const items = tasks
-      .map((task) => {
-        const run = this.options.orchestrator.getActiveRun(task.id);
-        const status = run ? `${run.status} · gen ${run.generation}` : task.status;
-        return `<li><a href="/tasks/${encodeURIComponent(task.id)}/select">${escapeHtml(task.title)}</a>
-<span class="badge">${escapeHtml(status)}</span><div class="meta">${escapeHtml(task.taskStableId)}</div></li>`;
-      })
-      .join("\n");
-    sendHtml(
-      response,
-      200,
-      `<!doctype html><html><head><meta charset="utf-8"><title>Cloud tasks</title><style>${AUTH_PAGE_CSS}</style></head>
-<body><div class="shell"><h1>Cloud tasks</h1>
-${tasks.length === 0 ? '<p class="empty">No tasks yet. Create one through the cloud API.</p>' : `<ul>${items}</ul>`}
-</div></body></html>`,
-    );
+  private async serveReleaseAsset(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    const runId = url.searchParams.get("runId") ?? "";
+    const header = request.headers.authorization ?? "";
+    const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    if (!runId || !token || !this.options.verifyAttachToken(runId, token)) {
+      sendJson(response, 401, { error: { code: "unauthorized", message: "invalid run token" } });
+      return;
+    }
+    const tarball = this.options.serverReleaseTarball;
+    if (!tarball) {
+      sendJson(response, 503, {
+        error: {
+          code: "provider_unavailable",
+          message: "server release archive is not configured",
+        },
+      });
+      return;
+    }
+    const info = await stat(tarball).catch(() => null);
+    if (!info?.isFile()) {
+      sendJson(response, 503, {
+        error: { code: "provider_unavailable", message: "server release archive is missing" },
+      });
+      return;
+    }
+    response.writeHead(200, {
+      "content-type": "application/gzip",
+      "content-length": info.size,
+      "cache-control": "no-store",
+    });
+    createReadStream(tarball).pipe(response);
   }
 
   private async handleCloudApi(
@@ -529,6 +519,12 @@ ${tasks.length === 0 ? '<p class="empty">No tasks yet. Create one through the cl
     const archiveMatch = /^\/api\/cloud\/tasks\/([^/]+)\/archive$/u.exec(path);
     if (archiveMatch && method === "POST") {
       sendJson(response, 200, orchestrator.archiveTask(decodeURIComponent(archiveMatch[1]!)));
+      return;
+    }
+
+    const debugMatch = /^\/api\/cloud\/tasks\/([^/]+)\/debug$/u.exec(path);
+    if (debugMatch && method === "GET") {
+      sendJson(response, 200, await orchestrator.debugTask(decodeURIComponent(debugMatch[1]!)));
       return;
     }
 
