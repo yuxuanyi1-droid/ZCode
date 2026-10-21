@@ -32,9 +32,12 @@ export async function checkoutWorkspace(input: {
   }
   const duplex = await attachment.openStream("exec", [
     "git",
+    // HTTP/2 在部分出口代理/沙箱网络上会以 framing 错误中断 clone；固定 HTTP/1.1 更稳。
+    "-c",
+    "http.version=HTTP/1.1",
     "clone",
-    "--depth",
-    "1",
+    // 非 GitHub 的 dumb HTTP/静态仓库不支持浅克隆；只在 GitHub 上使用 --depth 1。
+    ...(clone.url.includes("github.com") ? ["--depth", "1"] : []),
     "--branch",
     task.baseBranch ?? project.defaultBranch,
     clone.url,

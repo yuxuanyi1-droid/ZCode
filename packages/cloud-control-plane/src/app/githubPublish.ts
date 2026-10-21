@@ -59,6 +59,47 @@ export async function resolveCloneUrl(input: {
   };
 }
 
+/**
+ * 停止前的发布入口：无 GitHub 事实时也要给出明确 artifact——
+ * 干净工作区记 noChanges；有改动但无法发布时标记 dataAtRisk。
+ */
+export async function publishRunArtifact(input: {
+  gitHub: GitHubAppClient | null | undefined;
+  meta: GitHubRunMeta | null | undefined;
+  attachment: RunAttachment | null | undefined;
+  run: RunRecord;
+  task: TaskRecord;
+  store: CloudStore;
+}): Promise<void> {
+  const { attachment, run, task, store } = input;
+  if (!attachment) {
+    return;
+  }
+  const status = await execCollect(attachment, [
+    "git",
+    "-C",
+    run.checkoutPath,
+    "status",
+    "--porcelain",
+  ]).catch(() => "");
+  if (!status.trim()) {
+    store.setArtifact({ taskId: task.id, kind: "noChanges" });
+    return;
+  }
+  if (!input.gitHub || !input.meta) {
+    store.updateRun(run.id, { dataAtRisk: true });
+    return;
+  }
+  await publishArtifact({
+    gitHub: input.gitHub,
+    meta: input.meta,
+    attachment,
+    run,
+    task,
+    store,
+  });
+}
+
 /** 停止前把沙箱内改动发布为分支/PR；失败只标记 dataAtRisk，不阻断停止。 */
 export async function publishArtifact(input: {
   gitHub: GitHubAppClient;

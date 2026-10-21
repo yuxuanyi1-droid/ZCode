@@ -61,10 +61,11 @@ export class ProcessSandboxDriver implements SandboxDriver {
       spec.taskStableId,
       `run-${spec.generation}`,
     );
-    const serverRoot = join(root, "server");
-    const dataDir = join(root, "data");
+    // server-cli 只在 <base>/.zcode/server 布局下把 dataBaseDir 推导为 <base>，
+    // 其它路径会把数据根固定到 serverRoot 自身；这里与生产目录保持一致。
+    const dataDir = root;
+    const serverRoot = join(dataDir, ".zcode", "server");
     await mkdir(serverRoot, { recursive: true });
-    await mkdir(dataDir, { recursive: true });
     if (spec.providerConfig) {
       // daemon 的数据根是 <ZCODE_DATA_BASE_DIR>/.zcode/v2。
       const configDir = join(dataDir, ".zcode", "v2");
@@ -108,7 +109,9 @@ export class ProcessSandboxDriver implements SandboxDriver {
       ["--import", "tsx", BRIDGE_ENTRY, "--config", bootstrapPath],
       {
         cwd: REPO_ROOT,
-        env: { ...process.env, ZCODE_DATA_BASE_DIR: dataDir },
+        // 隔离 HOME：Agent CLI 的 rollout/session 存储直接基于 homedir()，若不改写
+        // 会落进开发机的 ~/.zcode，并与其它 Run 共享历史。
+        env: { ...process.env, HOME: dataDir, USERPROFILE: dataDir, ZCODE_DATA_BASE_DIR: dataDir },
         detached: true,
         stdio: ["ignore", logFd, logFd],
       },
@@ -124,6 +127,41 @@ export class ProcessSandboxDriver implements SandboxDriver {
   }
 
   public async terminate(handle: SandboxHandle): Promise<void> {
+    const root = typeof handle.meta["root"] === "string" ? handle.meta["root"] : undefined;
+    const serverRoot =
+      typeof handle.meta["serverRoot"] === "string" ? handle.meta["serverRoot"] : undefined;
+    const dataDir = typeof handle.meta["dataDir"] === "string" ? handle.meta["dataDir"] : undefined;
+    // 先让 server-cli 自己停 supervisor：只杀 bridge 会留下 detached 的 daemon。
+    const serverCommand = this.options.serverCommand;
+    if (serverRoot && dataDir && serverCommand) {
+      await new Promise<void>((resolve) => {
+        const child = spawn(
+          serverCommand[0]!,
+          [...serverCommand.slice(1), "stop", "--server-root", serverRoot],
+          {
+            env: {
+              ...process.env,
+              HOME: dataDir,
+              USERPROFILE: dataDir,
+              ZCODE_DATA_BASE_DIR: dataDir,
+            },
+            stdio: "ignore",
+          },
+        );
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          resolve();
+        }, 10_000);
+        child.once("exit", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        child.once("error", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
     const pid = typeof handle.meta["pid"] === "number" ? handle.meta["pid"] : undefined;
     if (pid) {
       try {
@@ -132,8 +170,7 @@ export class ProcessSandboxDriver implements SandboxDriver {
         // 已退出。
       }
     }
-    await sleep(300);
-    const root = typeof handle.meta["root"] === "string" ? handle.meta["root"] : undefined;
+    await sleep(500);
     if (root) {
       await rm(root, { recursive: true, force: true }).catch(() => undefined);
     }

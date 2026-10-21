@@ -42,17 +42,32 @@
 
 ## 4. 验收记录（本次实施）
 
-| 项目                                            | 结果                                                                                                      |
-| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `pnpm typecheck`                                | 通过                                                                                                      |
-| `pnpm lint`                                     | 新包 0 error / 0 warning；全仓仅既有 warning                                                              |
-| `pnpm architecture:check --changed`             | violations 0                                                                                              |
-| `pnpm --filter @zcode/cloud-protocol test`      | 10 通过                                                                                                   |
-| `pnpm --filter @zcode/cloud-bridge test`        | 5 通过                                                                                                    |
-| `pnpm --filter @zcode/cloud-control-plane test` | 4 通过（含真实 bridge + 反向通道 + daemon 协议的端到端生命周期）                                          |
-| 浏览器验收（原始 Web + 真实 daemon）            | 登录门、任务选择、原始 ZCode Web 加载、`/api/server-info` 与 `/ws` 代理、反向通道连接均通过               |
-| 未验证（环境限制）                              | 原始 Web 的工作区/会话交互需要模型账号凭据；本环境没有凭据，因此停留在原始 Welcome 界面。这不是代码缺陷。 |
-| 未验证（产品边界）                              | e2b/modal/daytona 真实环境；本版只交付进程型 local/fake provider。                                        |
+### 4.1 静态与单测
+
+| 项目                                            | 结果                                                                            |
+| ----------------------------------------------- | ------------------------------------------------------------------------------- |
+| `pnpm typecheck`                                | 通过                                                                            |
+| `pnpm lint`                                     | 新包 0 error / 0 warning；全仓仅既有 warning                                    |
+| `pnpm architecture:check --changed`             | violations 0                                                                    |
+| `pnpm --filter @zcode/cloud-protocol test`      | 10 通过                                                                         |
+| `pnpm --filter @zcode/cloud-bridge test`        | 5 通过                                                                          |
+| `pnpm --filter @zcode/cloud-control-plane test` | 11 通过（含真实 bridge + 反向通道 + daemon 协议的端到端生命周期与边界依赖扫描） |
+
+### 4.2 真实链路验收
+
+| 场景                                   | 结果                                                                                                                                                                                 |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 本地 provider + 真实 daemon + 真实模型 | Run ready；API `start`/`append` 输入 runtime ACK；v4 投影落库；助手回复与用户输入均在云历史中                                                                                        |
+| 原始 Web（未改 UI）                    | 登录门 → 任务选择 → 首页加载；选择任务项目后发送消息，收到模型回复（“界面消息已收到”，耗时 4s）                                                                                      |
+| 停止与重开                             | stop 后 Run 终态、任务 completed；reopen 后新 generation 就绪；历史同时包含旧 Run 与新 Run 的投影                                                                                    |
+| E2B 真实沙箱                           | 创建 → 反向通道连接 → provisioning → checkout → ready；输入 runtime ACK；模型回复入投影；空闲暂停；`/api/server-info` 唤醒后 14.8s 内重新 ready；`/ws` 代理收到 daemon Initialize 帧 |
+| GitHub App                             | installation token、分支创建、commit、PR 创建与关闭、分支删除全部通过                                                                                                                |
+
+已知限制：
+
+- 原始 Web 在普通 Web 模式下按 `workspacePath` 工作（不下发 identity）；项目分组写入（`task-groups.admit`）会因原始 Web 派生的 `hostId=local` 与独立 server 的 remote hostId 不一致而弹一次 “Group action failed” 提示。会话、发送与项目归属本身仍然生效。
+- E2B + 公网隧道下，原始 Web 的项目目录菜单在部分会话中不可用（`useProjectDirectory` 走 remote host 路由失败），因此浏览器内新建会话会提示发送失败；云 API 输入与本地原始 Web 全链路已验收。
+- 本地 provider 的 Run 目录会隔离 `HOME`；E2B 使用模板自带的 `/home/user`。
 
 ## 5. 验收命令（完整验收）
 
@@ -64,7 +79,7 @@ pnpm architecture:check --changed
 pnpm --filter @zcode/cloud-protocol test
 pnpm --filter @zcode/cloud-bridge test
 pnpm --filter @zcode/cloud-control-plane test
-pnpm --filter @zcode/cloud-web build
+pnpm build:cloud
 pnpm test:cloud          # 含 E2E（local provider + 真实 daemon）
 ```
 
@@ -77,14 +92,14 @@ pnpm test:cloud          # 含 E2E（local provider + 真实 daemon）
 
 ## 6. 风险
 
-| 风险                                     | 影响               | 缓解                                                  |
-| ---------------------------------------- | ------------------ | ----------------------------------------------------- |
-| ws-over-duplex 不可行（S1）              | 反向通道需要重设计 | 提前 spike；备选方案见 §2                             |
-| 沙箱内无 systemd                         | daemon 起不来      | detached fallback + bridge 持有子进程                 |
-| 账号域跨进程读取 provisioning 事实不完整 | 沙箱模型不可用     | 首版允许 `credential.load` + 文件读取；记录为已知边界 |
-| 浏览器 UI 与 `@zcode/ui` 契约漂移        | 任务视图渲染失败   | 只用公开导出；组件不满足时在 cloud-web 内自建薄封装   |
-| provider 真实环境未验收                  | e2b 以外不可用     | 能力门控默认隐藏，UI 标注"未验证"                     |
-| 单用户 token 被滥用                      | 部署安全           | 部署级 token + HTTPS；多租户前不做公网开放            |
+| 风险                                     | 影响                 | 缓解                                                    |
+| ---------------------------------------- | -------------------- | ------------------------------------------------------- |
+| ws-over-duplex 不可行（S1）              | 反向通道需要重设计   | 提前 spike；备选方案见 §2                               |
+| 沙箱内无 systemd                         | daemon 起不来        | detached fallback + bridge 持有子进程                   |
+| 账号域跨进程读取 provisioning 事实不完整 | 沙箱模型不可用       | 首版允许 `credential.load` + 文件读取；记录为已知边界   |
+| 原始 Web 只认 path 工作区                | 项目分组提示失败     | 不下发 identity；功能路径已验收，分组提示记录为已知限制 |
+| 其它 provider 未验收                     | modal/daytona 不可用 | 能力门控默认隐藏，UI 标注"未验证"                       |
+| 单用户 token 被滥用                      | 部署安全             | 部署级 token + HTTPS；多租户前不做公网开放              |
 
 ## 7. 交付物清单
 
@@ -92,6 +107,5 @@ pnpm test:cloud          # 含 E2E（local provider + 真实 daemon）
 - `packages/cloud-protocol`
 - `packages/cloud-bridge`
 - `packages/cloud-control-plane`
-- `packages/cloud-web`
 - 根脚本、架构登记、边界测试
 - 验收记录（命令与结果）

@@ -14,6 +14,12 @@ import {
   ZCODE_RPC_HOST_CAPABILITY_HEADER,
   type ServerRemoteInfo,
 } from "@zcode/shared";
+import {
+  V4_WIRE_PROTOCOL_VERSION,
+  helloMessageSchema,
+  hostSupportsWorkflowRunDeltas,
+  type ClientHello,
+} from "@zcode/shared/zcode-protocol-v4";
 import type { WebSocket } from "ws";
 
 import type { RunAttachment } from "../tunnel/server.js";
@@ -71,6 +77,25 @@ function wrapNodeSocket(socket: WebSocket, _label = "ws"): ISocket {
   };
 }
 
+async function performV4Handshake(client: ChannelClient, clientId: string): Promise<void> {
+  const agent = client.getChannel("zcode-agent");
+  const hello = helloMessageSchema.parse(await agent.call("helloConversationV4", []));
+  const capabilities: NonNullable<ClientHello["capabilities"]> = {
+    workspaceHookReviewUi: true,
+    ...(hello.capabilities.historyFirst === true ? { historyFirst: true } : {}),
+    ...(hostSupportsWorkflowRunDeltas(hello.capabilities) ? { workflowRunDeltas: true } : {}),
+  };
+  const clientHello: ClientHello = {
+    kind: "clientHello",
+    protocolVersion: V4_WIRE_PROTOCOL_VERSION,
+    clientId,
+    clientKind: "web",
+    appVersion: "unknown",
+    capabilities,
+  };
+  await agent.call("initializeConversationV4", [clientHello]);
+}
+
 export async function connectDaemon(
   attachment: RunAttachment,
   ingressToken: string,
@@ -87,14 +112,29 @@ export async function connectDaemon(
   const serverInfo = serverRemoteInfoSchema.parse(JSON.parse(response.body.toString("utf8")));
 
   const wsDuplex = await attachment.openStream("daemon");
-  const socket = await connectWebSocketOverDuplex(wsDuplex, "ws://127.0.0.1/ws", {
-    authorization,
-  });
-  const client = new ChannelClientClass(new SocketProtocol(wrapNodeSocket(socket, "replay")));
+  const replayHolder: { client: ChannelClient | null } = { client: null };
+  const socket = await connectWebSocketOverDuplex(
+    wsDuplex,
+    "ws://127.0.0.1/ws",
+    { authorization },
+    10_000,
+    (opened) => {
+      replayHolder.client = new ChannelClientClass(
+        new SocketProtocol(wrapNodeSocket(opened, "replay")),
+      );
+    },
+  );
+  const replayClient = replayHolder.client as ChannelClient | null;
+  if (!replayClient) {
+    throw new Error("replayable channel client was not initialized");
+  }
+  // v4 会话投影（conversationRowsRangeV4）受连接级握手门禁保护；控制面连接不是浏览器，
+  // 必须自己完成 hello → clientHello，否则该附件上的 v4 读取全部返回 handshakeRequired。
+  await performV4Handshake(replayClient, `cloud-control-plane:${serverInfo.serverId}`);
 
   // 受信 Host 连接：provisioning envelope 只允许 desktop-continuous 客户端下发。
   // 该通道不可用（旧 daemon / 隧道异常）时降级为 replayable，provisioning 由上层忽略。
-  let hostClient: ChannelClient = client;
+  let hostClient: ChannelClient = replayClient;
   let hostSocket: WebSocket | null = null;
   let reverseServer: ChannelServer | null = null;
   try {
@@ -112,37 +152,49 @@ export async function connectDaemon(
       JSON.parse(capabilityResponse.body.toString("utf8")),
     );
     const hostWsDuplex = await attachment.openStream("daemon");
-    hostSocket = await connectWebSocketOverDuplex(hostWsDuplex, "ws://127.0.0.1/ws/host", {
-      authorization,
-      [ZCODE_RPC_HOST_CAPABILITY_HEADER]: capability.capability,
-    });
-    const hostProtocol = new SocketProtocol(wrapNodeSocket(hostSocket, "host"));
-    hostClient = new ChannelClientClass(hostProtocol);
-    // Host 连接是双向的：服务端会用反向 client 请求 topic resource relay。
-    reverseServer = new ChannelServer(hostProtocol, "cloud-resource");
-    reverseServer.registerChannel(TOPIC_RESOURCE_RELAY_CHANNEL, {
-      async call<T>(): Promise<T> {
-        return {} as T;
+    const hostHolder: { client: ChannelClient | null } = { client: null };
+    hostSocket = await connectWebSocketOverDuplex(
+      hostWsDuplex,
+      "ws://127.0.0.1/ws/host",
+      {
+        authorization,
+        [ZCODE_RPC_HOST_CAPABILITY_HEADER]: capability.capability,
       },
-      listen() {
-        return () => ({ dispose() {} });
+      10_000,
+      (opened) => {
+        const hostProtocol = new SocketProtocol(wrapNodeSocket(opened, "host"));
+        hostHolder.client = new ChannelClientClass(hostProtocol);
+        // Host 连接是双向的：服务端会用反向 client 请求 topic resource relay。
+        reverseServer = new ChannelServer(hostProtocol, "cloud-resource");
+        reverseServer.registerChannel(TOPIC_RESOURCE_RELAY_CHANNEL, {
+          async call<T>(): Promise<T> {
+            return {} as T;
+          },
+          listen() {
+            return () => ({ dispose() {} });
+          },
+        });
       },
-    });
+    );
+    const dedicatedHostClient = hostHolder.client as ChannelClient | null;
+    if (dedicatedHostClient) {
+      hostClient = dedicatedHostClient;
+    }
   } catch {
-    hostClient = client;
+    hostClient = replayClient;
   }
   return {
     serverInfo,
-    client,
+    client: replayClient,
     getChannel(name: string): IChannel {
-      return client.getChannel(name);
+      return replayClient.getChannel(name);
     },
     getHostChannel(name: string): IChannel {
       return hostClient.getChannel(name);
     },
     async callAgent<T>(command: string, arg?: unknown): Promise<T> {
       // Channel 参数约定为数组：server 侧 ProxyChannel 使用 apply(handler, args)。
-      return (await client.getChannel("zcode-agent").call(command, [arg])) as T;
+      return (await replayClient.getChannel("zcode-agent").call(command, [arg])) as T;
     },
     async applyProvisioning<T>(envelope: unknown): Promise<T> {
       return (await hostClient
@@ -150,8 +202,8 @@ export async function connectDaemon(
         .call("apply", [envelope])) as T;
     },
     dispose(): void {
-      client.dispose?.();
-      if (hostClient !== client) {
+      replayClient.dispose?.();
+      if (hostClient !== replayClient) {
         hostClient.dispose?.();
       }
       reverseServer?.dispose();

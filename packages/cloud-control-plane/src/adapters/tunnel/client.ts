@@ -76,6 +76,7 @@ export async function connectWebSocketOverDuplex(
   url: string,
   headers: Record<string, string> = {},
   timeoutMs = 10_000,
+  onOpen?: (socket: WebSocket) => void,
 ): Promise<WebSocket> {
   const agent = createSingleUseAgent(duplex);
   return await new Promise<WebSocket>((resolve, reject) => {
@@ -86,6 +87,9 @@ export async function connectWebSocketOverDuplex(
       reject(new Error("websocket upgrade timeout"));
     }, timeoutMs);
     socket.once("open", () => {
+      // 服务端在 101 之后立即发送 Initialize；监听必须在 open 回调内同步挂上，
+      // 否则 await 期间到达的首帧会被丢弃。
+      onOpen?.(socket);
       clearTimeout(timer);
       resolve(socket);
     });

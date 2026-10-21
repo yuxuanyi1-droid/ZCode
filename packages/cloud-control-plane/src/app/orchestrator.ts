@@ -26,7 +26,8 @@ import { IdlePauseController } from "./idlePause.js";
 import { checkoutWorkspace } from "./checkout.js";
 import { debugTask as debugTaskImpl } from "./debugTask.js";
 import { deliverOne, deliverPending } from "./inputDelivery.js";
-import { publishArtifact, type GitHubRunMeta } from "./githubPublish.js";
+import { ensureRunReadyForAccess } from "./runReadiness.js";
+import { publishRunArtifact, type GitHubRunMeta } from "./githubPublish.js";
 import { CloudStore } from "../adapters/storage/db.js";
 import type { SecretBox } from "../adapters/storage/secrets.js";
 import type { DaemonConnection } from "../adapters/zcode/daemonClient.js";
@@ -297,6 +298,11 @@ export class Orchestrator {
     return toInputDto(input);
   }
 
+  /** 浏览器进入任务时唤醒 paused Run；语义见 runReadiness。 */
+  public ensureReadyForAccess(taskId: string): Promise<RunRecord | null> {
+    return ensureRunReadyForAccess(this.deps.store, taskId, (run) => this.resumeRun(run));
+  }
+
   public async stopTask(taskId: string): Promise<CloudTaskDto> {
     const task = this.deps.store.getTask(taskId);
     if (!task) {
@@ -331,7 +337,6 @@ export class Orchestrator {
       await connection
         .callAgent("closeSession", {
           workspacePath: run.checkoutPath,
-          workspaceIdentity: task.workspaceIdentity,
           sessionId,
         })
         .catch(() => undefined);
@@ -752,17 +757,11 @@ export class Orchestrator {
     this.deps.broadcast({ type: "task", taskId: run.taskId });
   }
 
-  private async publish(run: RunRecord, task: TaskRecord): Promise<void> {
-    const gitHub = this.deps.gitHub;
-    const meta = this.githubRuns.get(run.id);
-    const attachment = this.attachments.get(run.id);
-    if (!gitHub || !meta || !attachment) {
-      return;
-    }
-    await publishArtifact({
-      gitHub,
-      meta,
-      attachment,
+  private publish(run: RunRecord, task: TaskRecord): Promise<void> {
+    return publishRunArtifact({
+      gitHub: this.deps.gitHub,
+      meta: this.githubRuns.get(run.id),
+      attachment: this.attachments.get(run.id),
       run,
       task,
       store: this.deps.store,

@@ -90,7 +90,8 @@ export class E2bSandboxDriver implements SandboxDriver {
         "set -eu",
         `mkdir -p ${serverRoot} ${dirname(spec.checkoutPath)} ${DONE_DIR}`,
         `curl -fsSL -H "Authorization: Bearer ${spec.attachToken}" "${this.options.releaseAssetUrl(spec.runId)}" -o /tmp/zcode-release.tar.gz`,
-        `tar -xzf /tmp/zcode-release.tar.gz -C ${serverRoot}`,
+        // 归档根目录是 zcode-server-linux-x64/；serverRoot 必须直接包含 runtime/server-cli.js。
+        `tar -xzf /tmp/zcode-release.tar.gz -C ${serverRoot} --strip-components=1`,
         "rm -f /tmp/zcode-release.tar.gz",
         `rm -f ${DONE_DIR}/setup.sh`,
       ].join("\n");
@@ -130,12 +131,16 @@ export class E2bSandboxDriver implements SandboxDriver {
   }
 
   public async resume(handle: SandboxHandle): Promise<void> {
-    await this.postSandboxAction(handle, "resume");
+    // ResumedSandbox.timeout 默认只有 15 秒；不显式续期会在恢复后立刻再次自动暂停。
+    await this.postSandboxAction(handle, "resume", {
+      timeout: this.options.maxLifetimeSeconds,
+    });
   }
 
   private async postSandboxAction(
     handle: SandboxHandle,
     action: "pause" | "resume",
+    body?: Record<string, unknown>,
   ): Promise<void> {
     const sandboxId = handle.meta["sandboxId"];
     if (typeof sandboxId !== "string" || !sandboxId) {
@@ -145,7 +150,11 @@ export class E2bSandboxDriver implements SandboxDriver {
       `${API_BASE}/sandboxes/${encodeURIComponent(sandboxId)}/${action}`,
       {
         method: "POST",
-        headers: { "X-API-Key": this.options.apiKey },
+        headers: {
+          "X-API-Key": this.options.apiKey,
+          ...(body ? { "content-type": "application/json" } : {}),
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
       },
     );
     if (!response.ok) {

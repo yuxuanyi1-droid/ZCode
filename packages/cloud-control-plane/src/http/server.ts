@@ -20,10 +20,12 @@ import {
 
 import type { EventHub } from "../app/events.js";
 import type { Orchestrator } from "../app/orchestrator.js";
+import { isTerminalRun } from "../app/support.js";
 import type { RunRecord } from "../domain/types.js";
 import type { BridgeServer } from "../adapters/tunnel/server.js";
 import { connectWebSocketOverDuplex, requestOverDuplex } from "../adapters/tunnel/client.js";
 import { proxyChannel } from "../channels/proxy.js";
+import { withTaskWorkspace } from "./taskWorkspace.js";
 import { renderLoginPage, renderTaskListPage } from "./pages.js";
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -240,18 +242,19 @@ export class CloudHttpServer {
 
   // ── task selection ──────────────────────────────────────────
 
-  private selectedRun(request: IncomingMessage): RunRecord | null {
+  private async selectedRun(request: IncomingMessage): Promise<RunRecord | null> {
     const taskId = parseCookies(request)[TASK_COOKIE];
     if (taskId) {
       const run = this.options.orchestrator.getActiveRun(taskId);
-      if (run?.status === "ready") {
-        return run;
+      if (run && !isTerminalRun(run)) {
+        return await this.options.orchestrator.ensureReadyForAccess(taskId);
       }
+      return null;
     }
     for (const task of this.options.orchestrator.listTasks()) {
       const run = this.options.orchestrator.getActiveRun(task.id);
-      if (run?.status === "ready") {
-        return run;
+      if (run && !isTerminalRun(run)) {
+        return await this.options.orchestrator.ensureReadyForAccess(task.id);
       }
     }
     return null;
@@ -553,7 +556,7 @@ export class CloudHttpServer {
     response: ServerResponse,
     path: string,
   ): Promise<void> {
-    const run = this.selectedRun(request);
+    const run = await this.selectedRun(request);
     if (!run) {
       sendJson(response, 503, {
         error: { code: "attachment_unavailable", message: "no ready task selected" },
@@ -582,10 +585,16 @@ export class CloudHttpServer {
         },
         ...(body.byteLength > 0 ? { body } : {}),
       });
+      // 原始 Web 以 /api/server-info 的 workspaces[0] 作为启动工作区；沙箱 daemon
+      // 自身没有登记工作区，必须在代理层注入当前任务的工作区，否则首屏草稿会话无 workspace。
+      let payload = result.body;
+      if (path === "/api/server-info" && result.status === 200) {
+        payload = withTaskWorkspace(result.body, run);
+      }
       response.writeHead(result.status, {
         "content-type": "application/json; charset=utf-8",
       });
-      response.end(result.body);
+      response.end(payload);
     } finally {
       stream.destroy();
     }
@@ -722,7 +731,7 @@ export class CloudHttpServer {
         socket.destroy();
         return;
       }
-      const run = this.selectedRun(request);
+      const run = await this.selectedRun(request);
       const token = run ? this.options.orchestrator.getIngressToken(run.id) : null;
       const stream = run ? await this.options.orchestrator.openRunStream(run.id, "daemon") : null;
       if (!run || !token || !stream) {
@@ -730,24 +739,40 @@ export class CloudHttpServer {
         socket.destroy();
         return;
       }
+      // daemon 在 101 之后立刻发送协议 Initialize；浏览器侧握手要等 handleUpgrade
+      // 回调。upstream 的 message 监听必须在 onOpen 内同步挂上，否则 await 期间的
+      // 首帧会被丢弃，浏览器永远收不到 Initialize。
+      const pendingUpstream: Array<{ data: WebSocket.RawData; isBinary: boolean }> = [];
+      let browserSocket: WebSocket | null = null;
       let upstream: WebSocket;
       try {
-        upstream = await connectWebSocketOverDuplex(stream, `ws://127.0.0.1${path}`, {
-          authorization: `Bearer ${token}`,
-        });
+        upstream = await connectWebSocketOverDuplex(
+          stream,
+          `ws://127.0.0.1${path}`,
+          { authorization: `Bearer ${token}` },
+          10_000,
+          (opened) => {
+            opened.on("message", (data, isBinary) => {
+              if (browserSocket && browserSocket.readyState === browserSocket.OPEN) {
+                browserSocket.send(data, { binary: isBinary });
+              } else {
+                pendingUpstream.push({ data, isBinary });
+              }
+            });
+          },
+        );
       } catch {
         socket.destroy();
         return;
       }
       this.proxyWss.handleUpgrade(request, socket, head, (browser) => {
+        browserSocket = browser;
+        for (const pending of pendingUpstream.splice(0)) {
+          browser.send(pending.data, { binary: pending.isBinary });
+        }
         browser.on("message", (data, isBinary) => {
           if (upstream.readyState === upstream.OPEN) {
             upstream.send(data, { binary: isBinary });
-          }
-        });
-        upstream.on("message", (data, isBinary) => {
-          if (browser.readyState === browser.OPEN) {
-            browser.send(data, { binary: isBinary });
           }
         });
         browser.on("close", () => upstream.close());

@@ -16,6 +16,7 @@ import {
   type ISocket,
   type IServerChannel,
 } from "@zcode/rpc";
+import { V4_WIRE_PROTOCOL_VERSION } from "@zcode/shared/zcode-protocol-v4";
 import { WebSocketServer, type WebSocket } from "ws";
 
 interface FakeSession {
@@ -78,6 +79,24 @@ function agentChannel(): IServerChannel {
       const raw = Array.isArray(args) ? args[0] : args;
       const params = (raw ?? {}) as Record<string, unknown>;
       switch (command) {
+        case "helloConversationV4":
+          return {
+            kind: "hello",
+            protocolVersion: V4_WIRE_PROTOCOL_VERSION,
+            connectionId: randomUUID(),
+            clientMode: "web-remote-replayable",
+            deliveryProfile: "replayable",
+            serverTime: Date.now(),
+            capabilities: {
+              nativeDialogs: false,
+              localTerminal: false,
+              binaryFrames: true,
+              compression: "none",
+            },
+            auth: {},
+          } as T;
+        case "initializeConversationV4":
+          return undefined as T;
         case "initialize":
           return { available: true, workspaceKey: String(params["workspacePath"] ?? "") } as T;
         case "createSession": {

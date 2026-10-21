@@ -20,10 +20,7 @@ export async function debugTask(input: {
   if (!run || !connection) {
     return { run, sessions: [], rows: {} };
   }
-  const target = {
-    workspacePath: run.checkoutPath,
-    workspaceIdentity: task.workspaceIdentity,
-  };
+  const target = { workspacePath: run.checkoutPath };
   const sessions = await connection
     .callAgent<Array<{ sessionId?: string }>>("listSessions", { ...target, limit: 20 })
     .catch((error: unknown) => ({ error: String(error) }));
@@ -32,7 +29,11 @@ export async function debugTask(input: {
     for (const session of sessions) {
       if (typeof session.sessionId !== "string") continue;
       rows[session.sessionId] = await connection
-        .callAgent("conversationRowsRangeV4", { sessionId: session.sessionId, limit: 100 })
+        .callAgent("conversationRowsRangeV4", {
+          ...target,
+          sessionId: session.sessionId,
+          limit: 100,
+        })
         .catch((error: unknown) => String(error));
     }
   }

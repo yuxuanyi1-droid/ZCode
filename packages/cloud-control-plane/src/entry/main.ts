@@ -125,7 +125,11 @@ async function main(): Promise<void> {
   await httpServer.start();
   const address = httpServer.address();
   process.stdout.write(
-    `[cloud-control-plane] listening on http://${address.host}:${address.port} providers=${[...drivers.keys()].join(",")}\n`,
+    `[cloud-control-plane] listening on http://${address.host}:${address.port} providers=${[...drivers.keys()].join(",")} github=${
+      config.githubApp
+        ? `app:${config.githubApp.appId}/installations:${config.githubApp.allowedInstallationIds.join(",")}`
+        : "off"
+    }\n`,
   );
 
   const shutdown = (): void => {

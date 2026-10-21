@@ -27,7 +27,6 @@ export class ProjectionPoller {
             Array<{ sessionId?: string; createdAt?: number }>
           >("listSessions", {
             workspacePath: run.checkoutPath,
-            workspaceIdentity: task.workspaceIdentity,
             limit: 50,
           });
           if (!Array.isArray(infos)) {
@@ -47,7 +46,9 @@ export class ProjectionPoller {
             const epoch = epochs.get(info.sessionId) ?? 1;
             // v4 投影：rows/range 是稳定行序（rowId 升序），legacy readSessionMessages
             // 无法解析 v4 消息结构，不能用于云历史。
-            const rows = await this.loadRows(connection, info.sessionId);
+            const rows = await this.loadRows(connection, info.sessionId, {
+              workspacePath: run.checkoutPath,
+            });
             rows.forEach((row, index) => {
               this.store.appendProjection({
                 taskId: task.id,
@@ -65,8 +66,12 @@ export class ProjectionPoller {
             lastSignature = current;
             this.broadcast({ type: "projection", taskId: task.id });
           }
-        } catch {
-          // 连接断开时停止轮询；重连后由新的 pipeline 恢复。
+        } catch (error) {
+          // 连接断开时停止轮询；重连后由新的 pipeline 恢复。首次失败必须落日志，
+          // 不能把“投影一直是空的”静默当成正常结束。
+          process.stderr.write(
+            `[cloud-projection] ${run.id} polling failed: ${error instanceof Error ? error.message : String(error)}\n`,
+          );
           this.stop(run.id);
         }
       })();
@@ -78,6 +83,7 @@ export class ProjectionPoller {
   private async loadRows(
     connection: DaemonConnection,
     sessionId: string,
+    target: { workspacePath: string },
   ): Promise<Array<Record<string, unknown>>> {
     const pages: Array<Array<Record<string, unknown>>> = [];
     let beforeRowId: number | undefined;
@@ -86,6 +92,7 @@ export class ProjectionPoller {
         rows?: Array<Record<string, unknown>>;
         hasMore?: boolean;
       }>("conversationRowsRangeV4", {
+        ...target,
         sessionId,
         limit: 200,
         ...(beforeRowId === undefined ? {} : { beforeRowId }),

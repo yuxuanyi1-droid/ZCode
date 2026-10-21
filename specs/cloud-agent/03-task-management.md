@@ -173,6 +173,9 @@ submit(commandId, intent, payload)
 
 - 浏览器使用既有 `packages/web`，只连接 `/ws` 与 `/api/server-info`。
 - 控制面把两者透明代理到当前选中任务 daemon，并注入 ingress token；浏览器不接触沙箱网络。
+- `/api/server-info` 代理把 `workspaces` 重写为 `[{ path: <checkoutPath> }]`：沙箱 daemon 自身没有登记工作区，原始 Web 以 `workspaces[0]` 作为首屏工作区。不下发 `workspaceIdentity`，否则原始 Web 会进入 remote-waiting 并禁用发送。
+- `/ws` 代理在浏览器 upgrade 完成前缓存 daemon→浏览器帧：daemon 在 101 后立即发送协议 Initialize，不能因 `handleUpgrade` 回调晚一拍而丢首帧。
+- 控制面自身的 daemon 连接必须先完成 v4 `helloConversationV4 → initializeConversationV4` 握手，`conversationRowsRangeV4` 才可用。
 - 任务选择通过 `/tasks` 页面写入 `cloud_task` cookie；未选择时使用最近一个 ready Run。
 
 ### 6.2 `/ws/cloud`

@@ -127,7 +127,8 @@ export class TunnelClient {
         this.open();
       }
     }, jitter);
-    this.reconnectTimer.unref?.();
+    // 不能 unref：tunnel 断开后若没有其它活跃句柄（daemon 子进程已 detach），
+    // 进程会在重连前直接退出，沙箱恢复后永久失联。
   }
 
   private startHeartbeat(): void {

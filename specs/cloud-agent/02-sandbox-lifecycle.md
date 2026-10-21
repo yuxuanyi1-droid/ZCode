@@ -112,11 +112,18 @@ interface SandboxSpec {
   "taskStableId": "...",
   "generation": 3,
   "serverRoot": "<home>/.zcode/server",
-  "dataDir": "<home>/.zcode/v2",
+  "dataDir": "<home>",
   "workspacePath": "<home>/workspace/repo",
   "checkout": { "done": false }
 }
 ```
+
+目录约束：
+
+- `serverRoot` 必须是 `<dataDir>/.zcode/server`。`zcode serve` 仅在 `.../.zcode/server` 布局下把数据根推导为 `<dataDir>`；其它路径会把数据根固定到 serverRoot 自身，个人 provider 配置与会话历史将读不到。
+- 本地 provider 还必须把 bridge 子进程的 `HOME`/`USERPROFILE` 指向 `<dataDir>`，否则 Agent CLI 的 `~/.zcode/cli` 会话存储会泄漏到宿主机并在 Run 之间共享。
+- provider 配置预置写入 `<dataDir>/.zcode/v2/provider_config.json`（0600）。
+- terminate 先执行 `zcode stop --server-root <serverRoot>` 停 supervisor，再结束 bridge 进程并删除目录；只杀 bridge 会留下 detached daemon。
 
 ### 4.3 供给时序
 

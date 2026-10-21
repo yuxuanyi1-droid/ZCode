@@ -14,6 +14,10 @@ export class TunnelDuplex extends Duplex {
     private readonly sink: DuplexSink,
   ) {
     super();
+    // tunnel 关闭会为所有 stream 注入 error；未被消费者接管的 stream（如刚打开
+    // 就随 attachment 断开）没有 error 监听器时会升级成进程级 uncaughtException。
+    // 保留默认监听器只兜底生命周期，消费者仍会收到同一个 error 事件。
+    this.on("error", () => undefined);
   }
 
   public override _read(): void {
@@ -48,7 +52,7 @@ export class TunnelDuplex extends Duplex {
   }
 
   public pushFromTunnel(chunk: Buffer): void {
-    if (!this.ended) {
+    if (!this.ended && !this.destroyed) {
       this.push(chunk);
     }
   }
@@ -58,6 +62,9 @@ export class TunnelDuplex extends Duplex {
       return;
     }
     this.ended = true;
+    if (this.destroyed) {
+      return;
+    }
     if (reason) {
       this.destroy(new Error(reason));
       return;

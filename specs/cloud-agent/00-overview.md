@@ -102,23 +102,24 @@ flowchart LR
 
 ## 6. 身份与代际
 
-| 概念                        | 定义                                                                                                                                                |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `taskStableId`              | 控制面为每个 Task 生成的小写稳定标识（`[a-z0-9._-]`），跨 Run 不变                                                                                  |
-| `workspaceIdentity`         | `remote:server:<taskStableId>:<checkoutPath>`，使用 main 原生格式；沙箱 daemon 以 `ZCODE_SERVER_ID=<taskStableId>` 启动，使 daemon 自身默认身份一致 |
-| `workspacePath`             | 沙箱内固定 checkout 路径（模板约定），用于 IO/cwd/Git                                                                                               |
-| `remoteSessionId`           | 每次 attachment 由控制面生成，用于请求关联；不按路径匹配                                                                                            |
-| `runGeneration`             | Task 内单调递增；唯一有效写入 Run                                                                                                                   |
-| `connectionEpoch`           | 同一 Run 每次 attach 接管单调递增；旧 epoch 帧一律拒绝                                                                                              |
-| `logEpoch` / revision / seq | runtime 投影代际，用于游标恢复；不等同于网络 epoch                                                                                                  |
+| 概念                        | 定义                                                                                                                   |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `taskStableId`              | 控制面为每个 Task 生成的小写稳定标识（`[a-z0-9._-]`），跨 Run 不变                                                     |
+| `workspaceIdentity`         | 控制面保存的稳定身份 `remote:server:<taskStableId>:<checkoutPath>`，用于云侧记录与跨 Run 关联；**不发送给沙箱 daemon** |
+| `workspacePath`             | 沙箱内固定 checkout 路径（模板约定），控制面与浏览器对 daemon 的唯一 workspace 目标                                    |
+| `remoteSessionId`           | 每次 attachment 由控制面生成，用于请求关联；不按路径匹配                                                               |
+| `runGeneration`             | Task 内单调递增；唯一有效写入 Run                                                                                      |
+| `connectionEpoch`           | 同一 Run 每次 attach 接管单调递增；旧 epoch 帧一律拒绝                                                                 |
+| `logEpoch` / revision / seq | runtime 投影代际，用于游标恢复；不等同于网络 epoch                                                                     |
 
 规则：
 
 1. Task 跨 Run 稳定；新 Run 用相同 `workspaceIdentity`、新 `runGeneration`。
-2. 输入和事件的路由必须校验 `(taskId, activeRunId, runGeneration, connectionEpoch)`，异步回写再 CAS。
-3. 网络断连只改变 connectivity，不产生新的 Run，也不把 Run 置为终态。
-4. 新 Run 创建前必须有旧 Run 的终止证据（provider 确认或 runtime 退出事实）；无法确认时返回 `recovery-required`，禁止自动重开。
-5. `transport ACK`、`runtime ACK`、`durable ingest`、`accepted receipt` 是四类不同事实，禁止互相冒充。
+2. 对 daemon 的所有 workspace 参数（initialize/createSession/sendPrompt/listSessions/rows）只传 `workspacePath`。原始 Web 把任何非空 `workspaceIdentity` 判定为远端目标（remote-waiting 会禁用发送），因此控制面不向浏览器与 daemon 下发 identity。
+3. 输入和事件的路由必须校验 `(taskId, activeRunId, runGeneration, connectionEpoch)`，异步回写再 CAS。
+4. 网络断连只改变 connectivity，不产生新的 Run，也不把 Run 置为终态。
+5. 新 Run 创建前必须有旧 Run 的终止证据（provider 确认或 runtime 退出事实）；无法确认时返回 `recovery-required`，禁止自动重开。
+6. `transport ACK`、`runtime ACK`、`durable ingest`、`accepted receipt` 是四类不同事实，禁止互相冒充。
 
 ## 7. 依赖账本（摘要，详见 04）
 
@@ -127,7 +128,8 @@ flowchart LR
 | `@zcode/cloud-protocol`      | `zod`                                                                                                  | 任何 `@zcode/*`                                                                      |
 | `@zcode/cloud-bridge`        | `@zcode/cloud-protocol`、`ws`、node 内置                                                               | 任何其他 `@zcode/*`（含 shared/client/rpc）                                          |
 | `@zcode/cloud-control-plane` | `cloud-protocol`、`@zcode/shared`、`@zcode/client`、`@zcode/rpc`、provider SDK、`ws`、`hono`/node http | `@zcode/server`、`@zcode/services`、`@zcode/desktop`、`@zcode/web`、`apps/zcode-cli` |
-| `@zcode/cloud-web`           | `cloud-protocol`、`@zcode/shared`、`@zcode/client`、`@zcode/rpc`、`@zcode/ui`、react                   | 同上 + `@zcode/cloud-control-plane`                                                  |
+
+浏览器端不新增包：控制面直接托管 `packages/web/dist` 的原始构建产物。
 
 ## 8. 文档地图
 

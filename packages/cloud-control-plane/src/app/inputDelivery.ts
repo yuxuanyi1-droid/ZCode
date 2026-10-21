@@ -25,7 +25,6 @@ export async function ensureSession(
   await connection
     .callAgent("initialize", {
       workspacePath: run.checkoutPath,
-      workspaceIdentity: task.workspaceIdentity,
     })
     .catch(() => undefined);
   const projectId = context.projectIds.get(run.id);
@@ -34,8 +33,9 @@ export async function ensureSession(
     session?: { sessionId?: string };
   }>("createSession", {
     ...(projectId ? { projectId } : {}),
+    // 只传 path：原始 Web 以 server-info 的 path 作为 workspace key（本地语义）。
+    // 传 remote identity 会让 Web 把目标判定为 remote-waiting 并禁用发送。
     workspacePath: run.checkoutPath,
-    workspaceIdentity: task.workspaceIdentity,
   });
   const sessionId = snapshot?.sessionId ?? snapshot?.session?.sessionId;
   if (!sessionId) {
@@ -80,7 +80,6 @@ export async function deliverOne(
     const sessionId = await ensureSession(context, run, task, connection);
     await connection.callAgent("sendPrompt", {
       workspacePath: run.checkoutPath,
-      workspaceIdentity: task.workspaceIdentity,
       sessionId,
       content: payload.prompt ?? "",
       ...(payload.modelSelection ? { modelSelection: payload.modelSelection } : {}),
